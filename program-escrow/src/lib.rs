@@ -144,6 +144,7 @@
 
 mod error_recovery;
 mod reentrancy_guard;
+mod governance_integration;
 
 #[cfg(test)]
 mod error_recovery_tests;
@@ -163,6 +164,9 @@ mod test_granular_pause;
 
 #[cfg(test)]
 mod test_lifecycle;
+
+#[cfg(test)]
+mod test_governance_integration;
 
 // ── Step 2: Add these public contract functions to the ProgramEscrowContract
 //    impl block (alongside the existing admin functions) ──────────────────
@@ -388,6 +392,8 @@ pub enum DataKey {
     ClaimWindow,                     // u64 seconds (global config)
     PauseFlags,                      // PauseFlags struct
     RateLimitConfig,                 // RateLimitConfig struct
+    FeeConfig,                       // FeeConfig struct
+    ProgramRegistry,                 // Vec<String> of program IDs
 }
 
 #[contracttype]
@@ -486,19 +492,19 @@ pub enum BatchError {
     DuplicateProgramId = 3,
 }
 
-/// Storage key type for individual programs
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DataKey {
-    Program(String),                 // program_id -> ProgramData
-    ReleaseSchedule(String, u64),    // program_id, schedule_id -> ProgramReleaseSchedule
-    ReleaseHistory(String),          // program_id -> Vec<ProgramReleaseHistory>
-    NextScheduleId(String),          // program_id -> next schedule_id
-    MultisigConfig(String),          // program_id -> MultisigConfig
-    PayoutApproval(String, Address), // program_id, recipient -> PayoutApproval
-    PendingClaim(String, u64),       // (program_id, schedule_id) -> ClaimRecord
-    ClaimWindow,                     // u64 seconds (global config)
+pub struct FeeConfig {
+    pub lock_fee_rate: i128,
+    pub payout_fee_rate: i128,
+    pub fee_recipient: Address,
+    pub fee_enabled: bool,
 }
+
+const BASIS_POINTS: i128 = 10_000;
+const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
+const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
+const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -780,6 +786,9 @@ impl ProgramEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        // Check governance requirements
+        Self::check_governance_requirements(&env);
+
         let mut flags = Self::get_pause_flags(&env);
 
         if let Some(paused) = lock {
@@ -878,6 +887,9 @@ impl ProgramEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        // Check governance requirements
+        Self::check_governance_requirements(&env);
+
         let config = RateLimitConfig {
             window_size,
             max_operations,
@@ -907,10 +919,49 @@ impl ProgramEscrowContract {
         }
     }
 
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
     pub fn set_whitelist(env: Env, _address: Address, _whitelisted: bool) {
         // Only admin can set whitelist
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap_or_else(|| panic!("Not initialized"));
         admin.require_auth();
+    }
+
+    // ========================================================================
+    // Governance Integration
+    // ========================================================================
+
+    /// Set the governance contract address (admin only)
+    pub fn set_governance_contract(env: Env, governance_addr: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+        governance_integration::set_governance_contract(&env, governance_addr);
+    }
+
+    /// Get the governance contract address
+    pub fn get_governance_contract(env: Env) -> Option<Address> {
+        governance_integration::get_governance_contract(&env)
+    }
+
+    /// Set minimum required governance version (admin only)
+    pub fn set_min_governance_version(env: Env, min_version: u32) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+        governance_integration::set_min_governance_version(&env, min_version);
+    }
+
+    /// Get minimum required governance version
+    pub fn get_min_governance_version(env: Env) -> u32 {
+        governance_integration::get_min_governance_version(&env)
+    }
+
+    /// Check if governance requirements are met before admin operations
+    fn check_governance_requirements(env: &Env) {
+        if !governance_integration::check_governance_version(env) {
+            panic!("Governance version requirement not met");
+        }
     }
  // ========================================================================
     // Payout Functions
