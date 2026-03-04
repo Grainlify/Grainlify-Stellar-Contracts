@@ -34,7 +34,6 @@
 ///                                         ▼
 ///                                       Active
 /// ```
-
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -150,7 +149,7 @@ fn test_uninitialized_create_schedule_rejected() {
     env.mock_all_auths();
     let (client, _cid) = make_client(&env);
     let r = Address::generate(&env);
-    client.create_program_release_schedule(&r, &100, &1000);
+    client.create_program_release_schedule(&100, &1000, &r);
 }
 
 #[test]
@@ -339,10 +338,7 @@ fn test_active_batch_exceeds_balance_rejected() {
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     // 30_000 + 30_000 = 60_000 > 50_000
-    client.batch_payout(
-        &vec![&env, r1, r2],
-        &vec![&env, 30_000i128, 30_000i128],
-    );
+    client.batch_payout(&vec![&env, r1, r2], &vec![&env, 30_000i128, 30_000i128]);
 }
 
 /// Zero-amount single payout must be rejected.
@@ -363,10 +359,7 @@ fn test_active_zero_amount_in_batch_rejected() {
     let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
-    client.batch_payout(
-        &vec![&env, r1, r2],
-        &vec![&env, 100i128, 0i128],
-    );
+    client.batch_payout(&vec![&env, r1, r2], &vec![&env, 100i128, 0i128]);
 }
 
 /// Mismatched recipients/amounts vectors must be rejected.
@@ -399,7 +392,10 @@ fn test_active_payout_history_grows() {
     let r3 = Address::generate(&env);
 
     client.single_payout(&r1, &10_000);
-    client.batch_payout(&vec![&env, r2.clone(), r3.clone()], &vec![&env, 15_000i128, 5_000i128]);
+    client.batch_payout(
+        &vec![&env, r2.clone(), r3.clone()],
+        &vec![&env, 15_000i128, 5_000i128],
+    );
 
     let info = client.get_program_info();
     assert_eq!(info.payout_history.len(), 3);
@@ -633,7 +629,7 @@ fn test_drained_further_payout_rejected() {
     let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r = Address::generate(&env);
     client.single_payout(&r, &50_000); // drains to 0
-    client.single_payout(&r, &1);     // must panic
+    client.single_payout(&r, &1); // must panic
 }
 
 /// Re-locking funds after drain transitions back to Active (Drained → Active).
@@ -714,7 +710,7 @@ fn test_schedule_before_timestamp_not_triggered() {
     let recipient = Address::generate(&env);
 
     let now = env.ledger().timestamp();
-    client.create_program_release_schedule(&recipient, &30_000, &(now + 500));
+    client.create_program_release_schedule(&30_000, &(now + 500), &recipient);
 
     // Trigger at t < release_timestamp — should release 0 schedules
     env.ledger().set_timestamp(now + 499);
@@ -731,7 +727,7 @@ fn test_schedule_triggered_at_exact_timestamp() {
     let recipient = Address::generate(&env);
 
     let now = env.ledger().timestamp();
-    client.create_program_release_schedule(&recipient, &25_000, &(now + 200));
+    client.create_program_release_schedule(&25_000, &(now + 200), &recipient);
 
     env.ledger().set_timestamp(now + 200);
     let count = client.trigger_program_releases();
@@ -748,7 +744,7 @@ fn test_schedule_not_released_twice() {
     let recipient = Address::generate(&env);
 
     let now = env.ledger().timestamp();
-    client.create_program_release_schedule(&recipient, &20_000, &(now + 100));
+    client.create_program_release_schedule(&20_000, &(now + 100), &recipient);
 
     env.ledger().set_timestamp(now + 100);
     let count1 = client.trigger_program_releases();
@@ -770,9 +766,9 @@ fn test_multiple_schedules_same_timestamp_all_released() {
     let r3 = Address::generate(&env);
 
     let now = env.ledger().timestamp();
-    client.create_program_release_schedule(&r1, &10_000, &(now + 50));
-    client.create_program_release_schedule(&r2, &15_000, &(now + 50));
-    client.create_program_release_schedule(&r3, &20_000, &(now + 50));
+    client.create_program_release_schedule(&10_000, &(now + 50), &r1);
+    client.create_program_release_schedule(&15_000, &(now + 50), &r2);
+    client.create_program_release_schedule(&20_000, &(now + 50), &r3);
 
     env.ledger().set_timestamp(now + 50);
     let count = client.trigger_program_releases();
@@ -795,7 +791,8 @@ fn test_complete_lifecycle_all_transitions() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (token_client, token_id) = fund_contract(&env, &contract_id, 500_000);
+    // Fund exactly 400_000 = 300_000 (initial lock) + 100_000 (top-up)
+    let (token_client, token_id) = fund_contract(&env, &contract_id, 400_000);
     let admin = Address::generate(&env);
     let program_id = String::from_str(&env, "hack-2026");
 
