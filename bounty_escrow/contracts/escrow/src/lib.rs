@@ -1,6 +1,7 @@
 #![no_std]
 mod events;
 mod analytics;
+mod error_recovery;
 
 #[cfg(test)]
 mod test_rbac;
@@ -569,6 +570,12 @@ impl BountyEscrowContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
 
+        error_recovery::set_default_config_if_missing(&env);
+        error_recovery::init_error_log_if_missing(&env);
+        if error_recovery::get_circuit_admin(&env).is_none() {
+            error_recovery::set_circuit_admin(&env, admin.clone());
+        }
+
         emit_bounty_initialized(
             &env,
             BountyEscrowInitialized {
@@ -580,6 +587,20 @@ impl BountyEscrowContract {
         );
 
         Ok(())
+    }
+
+    fn check_circuit(env: &Env) -> Result<(), Error> {
+        if error_recovery::check_and_allow(env).is_err() {
+            return Err(Error::FundsPaused);
+        }
+        Ok(())
+    }
+
+    fn require_circuit_admin(env: &Env, admin: &Address) {
+        match error_recovery::get_circuit_admin(env) {
+            Some(ref a) if a == admin => admin.require_auth(),
+            _ => panic!("Unauthorized"),
+        }
     }
 
     /// Calculate fee amount based on rate (in basis points)
@@ -865,6 +886,8 @@ impl BountyEscrowContract {
         // Apply rate limiting
         anti_abuse::check_rate_limit(&env, depositor.clone());
 
+        Self::check_circuit(&env)?;
+
         if Self::check_paused(&env, symbol_short!("lock")) {
             return Err(Error::FundsPaused);
         }
@@ -901,6 +924,16 @@ impl BountyEscrowContract {
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
+
+        if client.balance(&depositor) < amount {
+            error_recovery::record_failure(
+                &env,
+                bounty_id,
+                symbol_short!("lock"),
+                error_recovery::ERR_INSUFFICIENT_BALANCE,
+            );
+            return Err(Error::InsufficientFunds);
+        }
 
         // Transfer funds from depositor to contract
         client.transfer(&depositor, &env.current_contract_address(), &amount);
@@ -983,6 +1016,8 @@ impl BountyEscrowContract {
             },
         );
 
+        error_recovery::record_success(&env);
+
         Ok(())
     }
 
@@ -992,6 +1027,8 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
         }
+
+        Self::check_circuit(&env)?;
 
         // Dispute protection: if a pending claim exists for this bounty,
         // the dispute must be resolved (claim or cancel) before any direct release.
@@ -1092,6 +1129,8 @@ impl BountyEscrowContract {
         // Clear reentrancy guard
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
 
+        error_recovery::record_success(&env);
+
         Ok(())
     }
 
@@ -1116,6 +1155,8 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
         }
+
+        Self::check_circuit(&env)?;
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
@@ -1171,6 +1212,8 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
         }
+
+        Self::check_circuit(&env)?;
         if !env
             .storage()
             .persistent()
@@ -1196,6 +1239,16 @@ impl BountyEscrowContract {
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
+
+        if client.balance(&env.current_contract_address()) < claim.amount {
+            error_recovery::record_failure(
+                &env,
+                bounty_id,
+                symbol_short!("claim"),
+                error_recovery::ERR_INSUFFICIENT_BALANCE,
+            );
+            return Err(Error::InsufficientFunds);
+        }
         client.transfer(
             &env.current_contract_address(),
             &claim.recipient,
@@ -1227,6 +1280,8 @@ impl BountyEscrowContract {
                 claimed_at: now,
             },
         );
+
+        error_recovery::record_success(&env);
         Ok(())
     }
 
@@ -1344,6 +1399,7 @@ impl BountyEscrowContract {
         contributor: Address,
         payout_amount: i128,
     ) -> Result<(), Error> {
+        Self::check_circuit(&env)?;
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
@@ -1417,6 +1473,8 @@ impl BountyEscrowContract {
             },
         );
 
+        error_recovery::record_success(&env);
+
         Ok(())
     }
 
@@ -1426,6 +1484,8 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("refund")) {
             return Err(Error::FundsPaused);
         }
+
+        Self::check_circuit(&env)?;
 
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
@@ -2106,6 +2166,8 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("lock")) {
             return Err(Error::FundsPaused);
         }
+
+        Self::check_circuit(&env)?;
         // Validate batch size
         let batch_size = items.len() as u32;
         if batch_size == 0 {
@@ -2172,6 +2234,15 @@ impl BountyEscrowContract {
         // Process all items (atomic - all succeed or all fail)
         let mut locked_count = 0u32;
         for item in items.iter() {
+            if client.balance(&item.depositor) < item.amount {
+                error_recovery::record_failure(
+                    &env,
+                    item.bounty_id,
+                    symbol_short!("b_lock"),
+                    error_recovery::ERR_INSUFFICIENT_BALANCE,
+                );
+                return Err(Error::InsufficientFunds);
+            }
             // Transfer funds from depositor to contract
             client.transfer(&item.depositor, &contract_address, &item.amount);
 
@@ -2215,6 +2286,8 @@ impl BountyEscrowContract {
             },
         );
 
+        error_recovery::record_success(&env);
+
         Ok(locked_count)
     }
 
@@ -2239,6 +2312,8 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
         }
+
+        Self::check_circuit(&env)?;
         // Validate batch size
         let batch_size = items.len() as u32;
         if batch_size == 0 {
@@ -2308,6 +2383,16 @@ impl BountyEscrowContract {
                 .ok_or(Error::InvalidAmount)?;
         }
 
+        if client.balance(&contract_address) < total_amount {
+            error_recovery::record_failure(
+                &env,
+                0,
+                symbol_short!("b_rel"),
+                error_recovery::ERR_INSUFFICIENT_BALANCE,
+            );
+            return Err(Error::InsufficientFunds);
+        }
+
         // Process all items (atomic - all succeed or all fail)
         let mut released_count = 0u32;
         for item in items.iter() {
@@ -2351,7 +2436,83 @@ impl BountyEscrowContract {
             },
         );
 
+        error_recovery::record_success(&env);
+
         Ok(released_count)
+    }
+
+    pub fn set_circuit_admin(env: Env, new_admin: Address, caller: Address) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+
+        if let Some(current) = error_recovery::get_circuit_admin(&env) {
+            if caller != current {
+                return Err(Error::Unauthorized);
+            }
+            Self::require_circuit_admin(&env, &caller);
+        } else {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if caller != admin {
+                return Err(Error::Unauthorized);
+            }
+            admin.require_auth();
+        }
+
+        error_recovery::set_circuit_admin(&env, new_admin);
+        Ok(())
+    }
+
+    pub fn get_circuit_admin(env: Env) -> Option<Address> {
+        error_recovery::get_circuit_admin(&env)
+    }
+
+    pub fn get_circuit_status(env: Env) -> error_recovery::CircuitBreakerStatus {
+        error_recovery::get_status(&env)
+    }
+
+    pub fn get_circuit_error_log(env: Env) -> soroban_sdk::Vec<error_recovery::ErrorEntry> {
+        error_recovery::get_error_log(&env)
+    }
+
+    pub fn reset_circuit_breaker(env: Env, admin: Address) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        Self::require_circuit_admin(&env, &admin);
+        error_recovery::reset_circuit_breaker(&env);
+        Ok(())
+    }
+
+    pub fn configure_circuit_breaker(
+        env: Env,
+        admin: Address,
+        failure_threshold: u32,
+        success_threshold: u32,
+        max_error_log: u32,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        Self::require_circuit_admin(&env, &admin);
+        error_recovery::set_config(
+            &env,
+            error_recovery::CircuitBreakerConfig {
+                failure_threshold,
+                success_threshold,
+                max_error_log,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn emergency_open_circuit(env: Env, admin: Address) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        Self::require_circuit_admin(&env, &admin);
+        error_recovery::open_circuit(&env);
+        Ok(())
     }
 
     // ==================== ANALYTICS VIEW FUNCTIONS ====================
@@ -2680,3 +2841,5 @@ mod test_pause;
 mod test_query_filters;
 #[cfg(test)]
 mod test_bounty_analytics;
+#[cfg(test)]
+mod test_circuit_breaker;
