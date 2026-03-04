@@ -594,7 +594,10 @@ fn test_batch_initialize_programs_success() {
         authorized_payout_key: admin.clone(),
         token_address: token.clone(),
     });
-    let count = client.try_batch_initialize_programs(&items).unwrap().unwrap();
+    let count = client
+        .try_batch_initialize_programs(&items)
+        .unwrap()
+        .unwrap();
     assert_eq!(count, 2);
     assert!(client.program_exists());
     assert!(client.program_exists());
@@ -687,7 +690,7 @@ fn test_analytics_after_single_payout() {
     let env = Env::default();
     let initial_funds = 100_000_0000000i128;
     let payout_amount = 25_000_0000000i128;
-    
+
     let (client, _admin, _token, _token_admin) = setup_program(&env, initial_funds);
 
     let recipient = Address::generate(&env);
@@ -1318,7 +1321,7 @@ fn test_batch_payout_sequential_batches() {
     assert_eq!(record3.amount, 4_000_000);
 }
 
-// PROGRAM ESCROW HISTORY QUERY FILTER TESTS 
+// PROGRAM ESCROW HISTORY QUERY FILTER TESTS
 // Tests for recipient, amount, timestamp filters + pagination on payout history
 
 #[test]

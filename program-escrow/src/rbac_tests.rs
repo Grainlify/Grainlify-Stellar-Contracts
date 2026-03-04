@@ -1,10 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, Env, String,
-};
+use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 struct RbacSetup<'a> {
     env: Env,
@@ -29,7 +26,9 @@ impl<'a> RbacSetup<'a> {
         let random = Address::generate(&env);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
 
         let program_id = String::from_str(&env, "RBAC-Test");
 
@@ -64,7 +63,7 @@ impl<'a> RbacSetup<'a> {
 #[test]
 fn test_admin_permissions() {
     let setup = RbacSetup::new();
-    
+
     // Admin should be able to pause/unpause
     setup.env.mock_all_auths();
     setup.client.set_paused(&Some(true), &None, &None);
@@ -76,7 +75,7 @@ fn test_admin_permissions() {
 fn test_random_cannot_pause() {
     let setup = RbacSetup::new();
     setup.client.set_paused(&Some(true), &None, &None);
-    // This should panic because the default caller in Soroban tests (without mock_all_auths) 
+    // This should panic because the default caller in Soroban tests (without mock_all_auths)
     // will be unauthorized if it hasn't call setup.env.mock_all_auths() or provided auth.
 }
 
@@ -98,7 +97,7 @@ fn test_operator_permissions() {
 fn test_admin_cannot_trigger_releases() {
     let setup = RbacSetup::new();
     // No mock_all_auths()
-    
+
     // Admin is not the operator
     setup.admin.require_auth();
     setup.client.trigger_program_releases();
@@ -115,7 +114,9 @@ fn test_pauser_permissions() {
 
     // Pauser should be able to reset/configure circuit breaker
     setup.client.reset_circuit_breaker(&setup.pauser);
-    setup.client.configure_circuit_breaker(&setup.pauser, &5, &2, &20);
+    setup
+        .client
+        .configure_circuit_breaker(&setup.pauser, &5, &2, &20);
 }
 
 #[test]
@@ -123,7 +124,7 @@ fn test_pauser_permissions() {
 fn test_admin_cannot_reset_circuit() {
     let setup = RbacSetup::new();
     setup.env.mock_all_auths();
-    
+
     // Even admin cannot reset circuit if they aren't the registered pauser
     setup.client.reset_circuit_breaker(&setup.admin);
 }
@@ -133,7 +134,7 @@ fn test_admin_cannot_reset_circuit() {
 fn test_operator_cannot_reset_circuit() {
     let setup = RbacSetup::new();
     setup.env.mock_all_auths();
-    
+
     // Operator cannot reset circuit
     setup.client.reset_circuit_breaker(&setup.operator);
 }

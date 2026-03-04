@@ -20,10 +20,7 @@
 //! | true        | true           | true          | ✗          | ✗             | ✗            |
 
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    token, vec, Address, Env, String,
-};
+use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -80,8 +77,14 @@ fn test_default_all_flags_false() {
 
     let flags = client.get_pause_flags();
     assert!(!flags.lock_paused, "lock_paused should default to false");
-    assert!(!flags.release_paused, "release_paused should default to false");
-    assert!(!flags.refund_paused, "refund_paused should default to false");
+    assert!(
+        !flags.release_paused,
+        "release_paused should default to false"
+    );
+    assert!(
+        !flags.refund_paused,
+        "refund_paused should default to false"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +165,10 @@ fn test_partial_update_preserves_other_flags() {
     client.set_paused(&None, &Some(false), &None);
     let flags = client.get_pause_flags();
     assert!(flags.lock_paused, "lock_paused should remain true");
-    assert!(!flags.release_paused, "release_paused should be false after unset");
+    assert!(
+        !flags.release_paused,
+        "release_paused should be false after unset"
+    );
     assert!(flags.refund_paused, "refund_paused should remain true");
 }
 
@@ -204,10 +210,7 @@ fn test_batch_allowed_when_only_lock_paused() {
 
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
-    let data = client.batch_payout(
-        &vec![&env, r1, r2],
-        &vec![&env, 100i128, 200i128],
-    );
+    let data = client.batch_payout(&vec![&env, r1, r2], &vec![&env, 100i128, 200i128]);
     assert_eq!(data.remaining_balance, 700);
 }
 
@@ -474,11 +477,9 @@ fn test_batch_payout_restored_after_unpause() {
 
     client.set_paused(&None, &Some(true), &None);
     let r1 = Address::generate(&env);
-    assert!(
-        client
-            .try_batch_payout(&vec![&env, r1.clone()], &vec![&env, 100i128])
-            .is_err()
-    );
+    assert!(client
+        .try_batch_payout(&vec![&env, r1.clone()], &vec![&env, 100i128])
+        .is_err());
 
     client.set_paused(&None, &Some(false), &None);
     let data = client.batch_payout(&vec![&env, r1], &vec![&env, 100i128]);

@@ -6,15 +6,16 @@
 #![cfg(test)]
 
 use crate::{reentrancy_guard::*, ProgramEscrowContract};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::Env;
 
-/// Helper to create an `Env` that is executing in a contract context.
-/// This makes the standalone guard tests match real Soroban execution,
-/// where storage is always scoped to a specific contract ID.
-fn contract_env() -> Env {
+/// Helper to execute a closure within a contract context.
+fn with_contract_env<F, T>(f: F) -> T
+where
+    F: FnOnce(Env) -> T,
+{
     let env = Env::default();
     let contract_id = env.register_contract(None, ProgramEscrowContract);
-    env.as_contract(&contract_id)
+    env.as_contract(&contract_id, || f(env.clone()))
 }
 
 #[test]

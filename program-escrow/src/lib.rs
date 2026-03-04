@@ -149,9 +149,9 @@ mod governance_integration;
 #[cfg(test)]
 mod error_recovery_tests;
 
+mod reentrancy_tests;
 #[cfg(test)]
 mod test_dispute_resolution;
-mod reentrancy_tests;
 
 #[cfg(test)]
 mod reentrancy_guard_standalone_test;
@@ -705,12 +705,7 @@ impl ProgramEscrowContract {
             }
         }
 
-        let mut registry: Vec<String> = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_REGISTRY)
-            .unwrap_or(vec![&env]);
-
+        let mut count = 0u32;
         for i in 0..batch_size {
             let item = items.get(i).unwrap();
             let program_id = item.program_id.clone();
@@ -732,16 +727,6 @@ impl ProgramEscrowContract {
             let program_key = DataKey::Program(program_id.clone());
             env.storage().instance().set(&program_key, &program_data);
 
-            if i == 0 {
-                let fee_config = FeeConfig {
-                    lock_fee_rate: 0,
-                    payout_fee_rate: 0,
-                    fee_recipient: authorized_payout_key.clone(),
-                    fee_enabled: false,
-                };
-                env.storage().instance().set(&FEE_CONFIG, &fee_config);
-            }
-
             let multisig_config = MultisigConfig {
                 threshold_amount: i128::MAX,
                 signers: vec![&env],
@@ -752,15 +737,14 @@ impl ProgramEscrowContract {
                 &multisig_config,
             );
 
-            registry.push_back(program_id.clone());
             env.events().publish(
-                (PROGRAM_REGISTERED,),
+                (symbol_short!("BatchReg"),),
                 (program_id, authorized_payout_key, token_address, 0i128),
             );
+            count += 1;
         }
-        env.storage().instance().set(&PROGRAM_REGISTRY, &registry);
 
-        Ok(batch_size as u32)
+        Ok(count)
     }
 
     /// Calculate fee amount based on rate (in basis points)
@@ -910,6 +894,7 @@ impl ProgramEscrowContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
+    /// Register or replace the contract admin. Can be called multiple times to rotate the admin.
     pub fn set_admin(env: Env, admin: Address) {
         // Allow updating admin if already set
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -1039,7 +1024,9 @@ impl ProgramEscrowContract {
             max_operations,
             cooldown_period,
         };
-        env.storage().instance().set(&DataKey::RateLimitConfig, &config);
+        env.storage()
+            .instance()
+            .set(&DataKey::RateLimitConfig, &config);
     }
 
     pub fn get_rate_limit_config(env: Env) -> RateLimitConfig {
@@ -1069,7 +1056,11 @@ impl ProgramEscrowContract {
 
     pub fn set_whitelist(env: Env, _address: Address, _whitelisted: bool) {
         // Only admin can set whitelist
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap_or_else(|| panic!("Not initialized"));
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
         admin.require_auth();
     }
 
@@ -1127,6 +1118,12 @@ impl ProgramEscrowContract {
         if Self::check_paused(&env, symbol_short!("release")) {
             reentrancy_guard::clear_entered(&env);
             panic!("Funds Paused");
+        }
+
+        // Dispute guard: block payouts while a dispute is open
+        if Self::is_disputed(env.clone()) {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Dispute in progress");
         }
 
         // Verify authorization
@@ -1241,6 +1238,12 @@ impl ProgramEscrowContract {
         if Self::check_paused(&env, symbol_short!("release")) {
             reentrancy_guard::clear_entered(&env);
             panic!("Funds Paused");
+        }
+
+        // Dispute guard: block payouts while a dispute is open
+        if Self::is_disputed(env.clone()) {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Dispute in progress");
         }
 
         // Verify authorization
@@ -1395,6 +1398,12 @@ impl ProgramEscrowContract {
         reentrancy_guard::check_not_entered(&env);
         reentrancy_guard::set_entered(&env);
 
+        // Dispute guard: block schedule releases while a dispute is open
+        if Self::is_disputed(env.clone()) {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Dispute in progress");
+        }
+
         let mut program_data: ProgramData = env
             .storage()
             .instance()
@@ -1511,11 +1520,21 @@ impl ProgramEscrowContract {
         Self::lock_program_funds(env, amount)
     }
 
-    pub fn single_payout_v2(env: Env, _program_id: String, recipient: Address, amount: i128) -> ProgramData {
+    pub fn single_payout_v2(
+        env: Env,
+        _program_id: String,
+        recipient: Address,
+        amount: i128,
+    ) -> ProgramData {
         Self::single_payout(env, recipient, amount)
     }
 
-    pub fn batch_payout_v2(env: Env, _program_id: String, recipients: Vec<Address>, amounts: Vec<i128>) -> ProgramData {
+    pub fn batch_payout_v2(
+        env: Env,
+        _program_id: String,
+        recipients: Vec<Address>,
+        amounts: Vec<i128>,
+    ) -> ProgramData {
         Self::batch_payout(env, recipients, amounts)
     }
 
@@ -1868,10 +1887,7 @@ impl ProgramEscrowContract {
         results
     }
 
-    pub fn get_program_release_schedule(
-        env: Env,
-        schedule_id: u64,
-    ) -> ProgramReleaseSchedule {
+    pub fn get_program_release_schedule(env: Env, schedule_id: u64) -> ProgramReleaseSchedule {
         let schedules = Self::get_program_release_schedules(env);
         for s in schedules.iter() {
             if s.schedule_id == schedule_id {
@@ -1896,7 +1912,7 @@ impl ProgramEscrowContract {
     pub fn release_program_schedule_manual(env: Env, schedule_id: u64) {
         let mut schedules = Self::get_program_release_schedules(env.clone());
         let program_data = Self::get_program_info(env.clone());
-        
+
         program_data.authorized_payout_key.require_auth();
 
         let caller = program_data.authorized_payout_key.clone();
@@ -1910,11 +1926,11 @@ impl ProgramEscrowContract {
                 if s.released {
                     panic!("Already released");
                 }
-                
+
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
-                
+
                 s.released = true;
                 s.released_at = Some(now);
                 s.released_by = Some(caller.clone());
@@ -1937,16 +1953,17 @@ impl ProgramEscrowContract {
                 break;
             }
         }
-        
+
         if !found {
             panic!("Schedule not found");
         }
-        
+
         env.storage().instance().set(&SCHEDULES, &schedules);
 
         // Write to release history
         if let Some(s) = released_schedule {
-            let mut history: Vec<ProgramReleaseHistory> = env.storage()
+            let mut history: Vec<ProgramReleaseHistory> = env
+                .storage()
                 .instance()
                 .get(&RELEASE_HISTORY)
                 .unwrap_or_else(|| Vec::new(&env));
@@ -1977,11 +1994,11 @@ impl ProgramEscrowContract {
                 if now < s.release_timestamp {
                     panic!("Not yet due");
                 }
-                
+
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
-                
+
                 s.released = true;
                 s.released_at = Some(now);
                 s.released_by = Some(env.current_contract_address());
@@ -2004,16 +2021,17 @@ impl ProgramEscrowContract {
                 break;
             }
         }
-        
+
         if !found {
             panic!("Schedule not found");
         }
-        
+
         env.storage().instance().set(&SCHEDULES, &schedules);
 
         // Write to release history
         if let Some(s) = released_schedule {
-            let mut history: Vec<ProgramReleaseHistory> = env.storage()
+            let mut history: Vec<ProgramReleaseHistory> = env
+                .storage()
                 .instance()
                 .get(&RELEASE_HISTORY)
                 .unwrap_or_else(|| Vec::new(&env));
@@ -2086,11 +2104,7 @@ mod integration_tests {
         client.lock_program_funds(&total_amount);
 
         // Create release schedule
-        client.create_program_release_schedule(
-            &total_amount,
-            &release_timestamp,
-            winner,
-        );
+        client.create_program_release_schedule(&total_amount, &release_timestamp, winner);
     }
 
     #[test]
@@ -2168,19 +2182,11 @@ mod integration_tests {
         client.lock_program_funds(&total_amount);
 
         // Create first release schedule
-        client.create_program_release_schedule(
-            &amount1,
-            &1000,
-            &winner1,
-        );
-        
+        client.create_program_release_schedule(&amount1, &1000, &winner1);
+
         // Create second release schedule
-        client.create_program_release_schedule(
-            &amount2,
-            &2000,
-            &winner2,
-        );
-        
+        client.create_program_release_schedule(&amount2, &2000, &winner2);
+
         // Verify both schedules exist
         let all_schedules = client.get_all_prog_release_schedules();
         assert_eq!(all_schedules.len(), 2);
@@ -2244,7 +2250,7 @@ mod integration_tests {
 
         // Release automatically
         client.release_prog_schedule_automatic(&1);
-        
+
         // Verify schedule was released
         let schedule = client.get_program_release_schedule(&1);
         assert!(schedule.released);
@@ -2295,7 +2301,7 @@ mod integration_tests {
         // Manually release before timestamp (authorized key can do this)
         env.ledger().set_timestamp(999);
         client.release_program_schedule_manual(&1);
-        
+
         // Verify schedule was released
         let schedule = client.get_program_release_schedule(&1);
         assert!(schedule.released);
@@ -2341,26 +2347,18 @@ mod integration_tests {
         client.lock_program_funds(&total_amount);
 
         // Create first schedule
-        client.create_program_release_schedule(
-            &amount1,
-            &1000,
-            &winner1,
-        );
-        
+        client.create_program_release_schedule(&amount1, &1000, &winner1);
+
         // Create second schedule
-        client.create_program_release_schedule(
-            &amount2,
-            &2000,
-            &winner2,
-        );
-        
+        client.create_program_release_schedule(&amount2, &2000, &winner2);
+
         // Release first schedule manually
         client.release_program_schedule_manual(&1);
-        
+
         // Advance time and release second schedule automatically
         env.ledger().set_timestamp(2001);
         client.release_prog_schedule_automatic(&2);
-        
+
         // Verify complete history
         let history = client.get_program_release_history();
         assert_eq!(history.len(), 2);
@@ -2424,23 +2422,11 @@ mod integration_tests {
         client.lock_program_funds(&total_amount);
 
         // Create overlapping schedules (all at same timestamp)
-        client.create_program_release_schedule(
-            &amount1,
-            &base_timestamp,
-            &winner1.clone(),
-        );
+        client.create_program_release_schedule(&amount1, &base_timestamp, &winner1.clone());
 
-        client.create_program_release_schedule(
-            &amount2,
-            &base_timestamp,
-            &winner2.clone(),
-        );
+        client.create_program_release_schedule(&amount2, &base_timestamp, &winner2.clone());
 
-        client.create_program_release_schedule(
-            &amount3,
-            &base_timestamp,
-            &winner3.clone(),
-        );
+        client.create_program_release_schedule(&amount3, &base_timestamp, &winner3.clone());
 
         // Advance time to after release timestamp
         env.ledger().set_timestamp(base_timestamp + 1);
@@ -2453,7 +2439,7 @@ mod integration_tests {
         client.release_prog_schedule_automatic(&1);
         client.release_prog_schedule_automatic(&2);
         client.release_prog_schedule_automatic(&3);
-        
+
         // Verify all schedules are released
         let pending = client.get_pending_program_schedules();
         assert_eq!(pending.len(), 0);
@@ -2540,7 +2526,10 @@ mod integration_tests {
             authorized_payout_key: admin.clone(),
             token_address: token.clone(),
         });
-        let count = client.try_batch_initialize_programs(&items).unwrap().unwrap();
+        let count = client
+            .try_batch_initialize_programs(&items)
+            .unwrap()
+            .unwrap();
         assert_eq!(count, 2);
         assert!(client.program_exists());
         assert!(client.program_exists());
@@ -2620,7 +2609,6 @@ mod integration_tests {
     // ========================================================================
     // Edge Cases for Program Management
     // ========================================================================
-
     #[test]
     fn test_program_reinitialization_attempt() {
         let env = Env::default();
@@ -2813,6 +2801,6 @@ mod integration_tests {
         client.update_rate_limit_config(&3600, &10, &30);
     }
 }
-mod test;
 #[cfg(test)]
 mod rbac_tests;
+mod test;
