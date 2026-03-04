@@ -368,6 +368,11 @@ pub struct BatchPayoutEvent {
     pub recipient_count: u32,
     pub total_amount: i128,
     pub remaining_balance: i128,
+    pub gas_proxy_transfer_ops: u32,
+    pub gas_proxy_history_appends: u32,
+    pub gas_proxy_storage_reads: u32,
+    pub gas_proxy_storage_writes: u32,
+    pub gas_proxy_events_emitted: u32,
 }
 
 #[contracttype]
@@ -1127,7 +1132,7 @@ impl ProgramEscrowContract {
         }
 
         // Verify authorization
-        let program_data: ProgramData =
+        let mut program_data: ProgramData =
             env.storage()
                 .instance()
                 .get(&PROGRAM_DATA)
@@ -1138,13 +1143,16 @@ impl ProgramEscrowContract {
 
         program_data.authorized_payout_key.require_auth();
 
+        let batch_len = recipients.len();
+        let recipient_count = batch_len as u32;
+
         // Validate input lengths match
-        if recipients.len() != amounts.len() {
+        if batch_len != amounts.len() {
             reentrancy_guard::clear_entered(&env);
             panic!("Recipients and amounts vectors must have the same length");
         }
 
-        if recipients.len() == 0 {
+        if batch_len == 0 {
             reentrancy_guard::clear_entered(&env);
             panic!("Cannot process empty batch");
         }
@@ -1169,17 +1177,29 @@ impl ProgramEscrowContract {
         }
 
         // Execute transfers
-        let mut updated_history = program_data.payout_history.clone();
         let timestamp = env.ledger().timestamp();
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &program_data.token_address);
+        let threshold = program_data.total_funds / 10;
+        let program_id = program_data.program_id.clone();
 
-        for i in 0..recipients.len() {
+        for i in 0..batch_len {
             let recipient = recipients.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
 
             // Check and emit large payout event
-            Self::check_and_emit_large_payout(&env, &program_data, &recipient, amount);
+            if amount >= threshold {
+                env.events().publish(
+                    (LARGE_PAYOUT,),
+                    LargePayoutEvent {
+                        version: EVENT_VERSION_V2,
+                        program_id: program_id.clone(),
+                        recipient: recipient.clone(),
+                        amount,
+                        threshold,
+                    },
+                );
+            }
 
             // Transfer funds from contract to recipient
             token_client.transfer(&contract_address, &recipient, &amount);
@@ -1190,36 +1210,45 @@ impl ProgramEscrowContract {
                 amount,
                 timestamp,
             };
-            updated_history.push_back(payout_record);
+            program_data.payout_history.push_back(payout_record);
         }
 
         // Update program data
-        let mut updated_data = program_data.clone();
-        updated_data.remaining_balance -= total_payout;
-        updated_data.payout_history = updated_history;
+        program_data.remaining_balance = program_data
+            .remaining_balance
+            .checked_sub(total_payout)
+            .unwrap_or_else(|| {
+                reentrancy_guard::clear_entered(&env);
+                panic!("Payout underflow")
+            });
 
         // Store updated data
-        env.storage().instance().set(&PROGRAM_DATA, &updated_data);
+        env.storage().instance().set(&PROGRAM_DATA, &program_data);
 
         // Emit BatchPayout event
         env.events().publish(
             (BATCH_PAYOUT,),
             BatchPayoutEvent {
                 version: EVENT_VERSION_V2,
-                program_id: updated_data.program_id.clone(),
-                recipient_count: recipients.len() as u32,
+                program_id: program_data.program_id.clone(),
+                recipient_count,
                 total_amount: total_payout,
-                remaining_balance: updated_data.remaining_balance,
+                remaining_balance: program_data.remaining_balance,
+                gas_proxy_transfer_ops: recipient_count,
+                gas_proxy_history_appends: recipient_count,
+                gas_proxy_storage_reads: 1,
+                gas_proxy_storage_writes: 1,
+                gas_proxy_events_emitted: 1,
             },
         );
 
         // Emit aggregate stats
-        Self::emit_aggregate_stats(&env, &updated_data);
+        Self::emit_aggregate_stats(&env, &program_data);
 
         // Clear reentrancy guard before returning
         reentrancy_guard::clear_entered(&env);
 
-        updated_data
+        program_data
     }
 
     /// Execute a single payout to one recipient

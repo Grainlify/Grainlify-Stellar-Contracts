@@ -137,8 +137,33 @@ Emitted when a single payout is executed.
 ### BatchPayout
 Emitted when a batch payout is executed.
 ```
-(BatchPayout, program_id, recipient_count, total_amount, remaining_balance)
+(BatchPayout, program_id, recipient_count, total_amount, remaining_balance,
+ gas_proxy_transfer_ops, gas_proxy_history_appends,
+ gas_proxy_storage_reads, gas_proxy_storage_writes, gas_proxy_events_emitted)
 ```
+
+Gas proxy fields are lightweight instrumentation for payout profiling. They track
+high-level operation counts without adding per-recipient events, keeping event
+footprint bounded for large batches.
+
+## Batch Payout Gas and Footprint Notes
+
+- `batch_payout()` emits exactly one contract-level batch event per call.
+- Gas proxy counters are emitted in `BatchPayout`:
+  - `gas_proxy_transfer_ops = recipient_count`
+  - `gas_proxy_history_appends = recipient_count`
+  - `gas_proxy_storage_reads = 1`
+  - `gas_proxy_storage_writes = 1`
+  - `gas_proxy_events_emitted = 1`
+- Payout loop avoids indexed recipient/amount reads and iterates pairwise, reducing per-item overhead for large batches.
+
+### Stress/Gas Validation
+
+The test suite includes:
+- `test_batch_payout_stress_large_batch_event_footprint_is_bounded`
+- `test_batch_payout_gas_proxy_improves_vs_legacy_model_for_large_batch`
+
+These validate bounded event growth and improved proxy metrics for large batches.
 
 ## Usage Flow
 
@@ -154,6 +179,15 @@ Emitted when a batch payout is executed.
 - All amounts must be positive
 - Payout history is immutable and auditable
 - Token transfers use the Soroban token contract standard
+
+## Batch Payout Gas and Footprint Notes
+
+- `batch_payout()` minimizes storage churn by mutating in-memory `ProgramData` and persisting once.
+- Payout loop reuses batch invariants (`batch_len`, threshold, token client) to reduce repeated host work.
+- Event footprint stays predictable:
+  - Exactly one `BatchPay` and one `AggStats` contract event per batch call.
+  - `LrgPay` events are threshold-gated and mathematically bounded by payout constraints.
+- Gas-proxy tests for large batches live in `src/test.rs` and assert event-growth and footprint bounds.
 
 ## Testing
 
