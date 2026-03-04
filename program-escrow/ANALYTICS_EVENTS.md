@@ -128,6 +128,12 @@ Comprehensive test suite in `src/test_analytics_events.rs`:
 - **Scheduled Count**: O(n) where n = number of schedules (typically small)
 - **No Storage Overhead**: Events are emitted, not stored on-chain
 
+### Batch Payout Gas/Footprint Validation
+
+- Large-batch gas proxy tests verify event growth and bounded contract event footprint.
+- `BatchPay` and `AggStats` are asserted once per `batch_payout()` call.
+- `LrgPay` emissions remain threshold-gated and bounded by available balance constraints.
+
 ## Integration Guide
 
 ### Indexer Integration

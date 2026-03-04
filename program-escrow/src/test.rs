@@ -99,6 +99,26 @@ fn get_batch_gas_proxy_metrics(
     None
 }
 
+fn count_contract_events_by_topic(env: &Env, contract: &Address, topic: Symbol) -> u32 {
+    let events = env.events().all();
+    let mut count = 0_u32;
+
+    for (event_contract, topics, _data) in events.iter() {
+        if event_contract != contract.clone() || topics.len() == 0 {
+            continue;
+        }
+
+        let first_topic = topics.get(0).unwrap();
+        if let Ok(sym) = Symbol::try_from_val(env, &first_topic) {
+            if sym == topic {
+                count += 1;
+            }
+        }
+    }
+
+    count
+}
+
 #[test]
 fn test_init_program_and_event() {
     let env = Env::default();
@@ -353,6 +373,63 @@ fn test_batch_payout_gas_proxy_improves_vs_legacy_model_for_large_batch() {
     let legacy_proxy = (batch_size * 3) + 2;
 
     assert!(optimized_proxy < legacy_proxy);
+}
+
+#[test]
+fn test_gas_proxy_large_batch_event_growth_is_linear_and_bounded() {
+    let env = Env::default();
+    let (client, _admin, _token, _token_admin) = setup_program(&env, 1_500_000);
+
+    let mut recipients = vec![&env];
+    let mut amounts = vec![&env];
+
+    // 60 payouts x 20_000 = 1_200_000 (fits within balance).
+    // Threshold for LrgPay is total_funds / 10 = 150_000, so no LrgPay expected.
+    for _ in 0..60 {
+        recipients.push_back(Address::generate(&env));
+        amounts.push_back(20_000);
+    }
+
+    let before_all = env.events().all().len();
+    client.batch_payout(&recipients, &amounts);
+    let total_growth = env.events().all().len() - before_all;
+
+    let batch_pay_count =
+        count_contract_events_by_topic(&env, &client.address, symbol_short!("BatchPay"));
+    let agg_stats_count =
+        count_contract_events_by_topic(&env, &client.address, symbol_short!("AggStats"));
+    let large_pay_count =
+        count_contract_events_by_topic(&env, &client.address, symbol_short!("LrgPay"));
+
+    assert_eq!(batch_pay_count, 1);
+    assert_eq!(agg_stats_count, 1);
+    assert_eq!(large_pay_count, 0);
+    assert!(
+        total_growth >= 2,
+        "Expected at least two contract events for batch payout path"
+    );
+}
+
+#[test]
+fn test_gas_proxy_large_payout_event_count_has_hard_upper_bound() {
+    let env = Env::default();
+    let (client, _admin, _token, _token_admin) = setup_program(&env, 1_000_000);
+
+    let mut recipients = vec![&env];
+    let mut amounts = vec![&env];
+
+    // With threshold = 100_000, at most 10 payouts can be >= threshold because
+    // total batch payout cannot exceed remaining balance.
+    for _ in 0..100 {
+        recipients.push_back(Address::generate(&env));
+        amounts.push_back(10_000);
+    }
+
+    client.batch_payout(&recipients, &amounts);
+
+    let large_pay_count =
+        count_contract_events_by_topic(&env, &client.address, symbol_short!("LrgPay"));
+    assert!(large_pay_count <= 10);
 }
 
 #[test]

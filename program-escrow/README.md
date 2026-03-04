@@ -180,6 +180,15 @@ These validate bounded event growth and improved proxy metrics for large batches
 - Payout history is immutable and auditable
 - Token transfers use the Soroban token contract standard
 
+## Batch Payout Gas and Footprint Notes
+
+- `batch_payout()` minimizes storage churn by mutating in-memory `ProgramData` and persisting once.
+- Payout loop reuses batch invariants (`batch_len`, threshold, token client) to reduce repeated host work.
+- Event footprint stays predictable:
+  - Exactly one `BatchPay` and one `AggStats` contract event per batch call.
+  - `LrgPay` events are threshold-gated and mathematically bounded by payout constraints.
+- Gas-proxy tests for large batches live in `src/test.rs` and assert event-growth and footprint bounds.
+
 ## Testing
 
 Run tests with:

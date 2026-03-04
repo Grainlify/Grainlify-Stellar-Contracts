@@ -1180,13 +1180,26 @@ impl ProgramEscrowContract {
         let timestamp = env.ledger().timestamp();
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &program_data.token_address);
+        let threshold = program_data.total_funds / 10;
+        let program_id = program_data.program_id.clone();
 
-        for i in 0..recipients.len() {
+        for i in 0..batch_len {
             let recipient = recipients.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
 
             // Check and emit large payout event
-            Self::check_and_emit_large_payout(&env, &program_data, &recipient, amount);
+            if amount >= threshold {
+                env.events().publish(
+                    (LARGE_PAYOUT,),
+                    LargePayoutEvent {
+                        version: EVENT_VERSION_V2,
+                        program_id: program_id.clone(),
+                        recipient: recipient.clone(),
+                        amount,
+                        threshold,
+                    },
+                );
+            }
 
             // Transfer funds from contract to recipient
             token_client.transfer(&contract_address, &recipient, &amount);
@@ -1201,7 +1214,13 @@ impl ProgramEscrowContract {
         }
 
         // Update program data
-        program_data.remaining_balance -= total_payout;
+        program_data.remaining_balance = program_data
+            .remaining_balance
+            .checked_sub(total_payout)
+            .unwrap_or_else(|| {
+                reentrancy_guard::clear_entered(&env);
+                panic!("Payout underflow")
+            });
 
         // Store updated data
         env.storage().instance().set(&PROGRAM_DATA, &program_data);
@@ -1224,7 +1243,7 @@ impl ProgramEscrowContract {
         );
 
         // Emit aggregate stats
-        Self::emit_aggregate_stats(&env, &updated_data);
+        Self::emit_aggregate_stats(&env, &program_data);
 
         // Clear reentrancy guard before returning
         reentrancy_guard::clear_entered(&env);
