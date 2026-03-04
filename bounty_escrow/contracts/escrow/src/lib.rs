@@ -1,5 +1,6 @@
 #![no_std]
 mod events;
+mod governance_integration;
 mod analytics;
 
 #[cfg(test)]
@@ -623,6 +624,9 @@ impl BountyEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        // Check governance requirements
+        Self::check_governance_requirements(&env);
+
         let mut fee_config = Self::get_fee_config_internal(&env);
 
         if let Some(rate) = lock_fee_rate {
@@ -678,6 +682,9 @@ impl BountyEscrowContract {
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        // Check governance requirements
+        Self::check_governance_requirements(&env);
 
         let mut flags = Self::get_pause_flags(&env);
 
@@ -2027,6 +2034,49 @@ impl BountyEscrowContract {
         Ok(escrow.refund_history)
     }
 
+    // ========================================================================
+    // Governance Integration
+    // ========================================================================
+
+    /// Set the governance contract address (admin only)
+    pub fn set_governance_contract(env: Env, governance_addr: Address) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        governance_integration::set_governance_contract(&env, governance_addr);
+        Ok(())
+    }
+
+    /// Get the governance contract address
+    pub fn get_governance_contract(env: Env) -> Option<Address> {
+        governance_integration::get_governance_contract(&env)
+    }
+
+    /// Set minimum required governance version (admin only)
+    pub fn set_min_governance_version(env: Env, min_version: u32) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        governance_integration::set_min_governance_version(&env, min_version);
+        Ok(())
+    }
+
+    /// Get minimum required governance version
+    pub fn get_min_governance_version(env: Env) -> u32 {
+        governance_integration::get_min_governance_version(&env)
+    }
+
+    /// Check if governance requirements are met before admin operations
+    fn check_governance_requirements(env: &Env) {
+        if !governance_integration::check_governance_version(env) {
+            panic!("Governance version requirement not met");
+        }
+    }
+
     /// Gets refund eligibility information for a bounty.
     ///
     /// # Arguments
@@ -2679,4 +2729,5 @@ mod test_pause;
 #[cfg(test)]
 mod test_query_filters;
 #[cfg(test)]
+mod test_governance_integration;
 mod test_bounty_analytics;

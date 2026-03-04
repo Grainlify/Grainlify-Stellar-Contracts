@@ -35,20 +35,23 @@ fn test_reentrancy_guard_basic_functionality() {
     use crate::reentrancy_guard::*;
 
     let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
 
-    // Initially, guard should not be set
-    assert!(!is_entered(&env));
+    env.as_contract(&contract_id, || {
+        // Initially, guard should not be set
+        assert!(!is_entered(&env));
 
-    // Check should pass
-    check_not_entered(&env);
+        // Check should pass
+        check_not_entered(&env);
 
-    // Set the guard
-    set_entered(&env);
-    assert!(is_entered(&env));
+        // Set the guard
+        set_entered(&env);
+        assert!(is_entered(&env));
 
-    // Clear the guard
-    clear_entered(&env);
-    assert!(!is_entered(&env));
+        // Clear the guard
+        clear_entered(&env);
+        assert!(!is_entered(&env));
+    });
 }
 
 #[test]
@@ -57,12 +60,15 @@ fn test_reentrancy_guard_detects_reentry() {
     use crate::reentrancy_guard::*;
 
     let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
 
-    // Set the guard
-    set_entered(&env);
+    env.as_contract(&contract_id, || {
+        // Set the guard
+        set_entered(&env);
 
-    // This should panic
-    check_not_entered(&env);
+        // This should panic
+        check_not_entered(&env);
+    });
 }
 
 #[test]
@@ -70,21 +76,24 @@ fn test_reentrancy_guard_allows_sequential_calls() {
     use crate::reentrancy_guard::*;
 
     let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
 
-    // First call
-    check_not_entered(&env);
-    set_entered(&env);
-    clear_entered(&env);
+    env.as_contract(&contract_id, || {
+        // First call
+        check_not_entered(&env);
+        set_entered(&env);
+        clear_entered(&env);
 
-    // Second call (should succeed)
-    check_not_entered(&env);
-    set_entered(&env);
-    clear_entered(&env);
+        // Second call (should succeed)
+        check_not_entered(&env);
+        set_entered(&env);
+        clear_entered(&env);
 
-    // Third call (should succeed)
-    check_not_entered(&env);
-    set_entered(&env);
-    clear_entered(&env);
+        // Third call (should succeed)
+        check_not_entered(&env);
+        set_entered(&env);
+        clear_entered(&env);
+    });
 }
 
 // ============================================================================
@@ -146,7 +155,9 @@ fn test_single_payout_blocks_reentrancy() {
     client.lock_program_funds(&amount);
 
     // Manually set the reentrancy guard to simulate an ongoing call
-    crate::reentrancy_guard::set_entered(&env);
+    env.as_contract(&contract_id, || {
+        crate::reentrancy_guard::set_entered(&env);
+    });
 
     // This should panic with "Reentrancy detected"
     client.single_payout(&authorized_key, &(amount / 2));
@@ -213,7 +224,9 @@ fn test_batch_payout_blocks_reentrancy() {
     client.lock_program_funds(&total_amount);
 
     // Manually set the reentrancy guard
-    crate::reentrancy_guard::set_entered(&env);
+    env.as_contract(&contract_id, || {
+        crate::reentrancy_guard::set_entered(&env);
+    });
 
     // This should panic
     let recipients = vec![&env, recipient1, recipient2];
@@ -249,7 +262,9 @@ fn test_cross_function_reentrancy_single_to_batch() {
     client.lock_program_funds(&amount);
 
     // Simulate being inside single_payout
-    crate::reentrancy_guard::set_entered(&env);
+    env.as_contract(&contract_id, || {
+        crate::reentrancy_guard::set_entered(&env);
+    });
 
     // Try to call batch_payout (should be blocked)
     let recipients = vec![&env, recipient];
@@ -281,7 +296,9 @@ fn test_cross_function_reentrancy_batch_to_single() {
     client.lock_program_funds(&amount);
 
     // Simulate being inside batch_payout
-    crate::reentrancy_guard::set_entered(&env);
+    env.as_contract(&contract_id, || {
+        crate::reentrancy_guard::set_entered(&env);
+    });
 
     // Try to call single_payout (should be blocked)
     client.single_payout(&recipient, &(amount / 2));
@@ -315,7 +332,7 @@ fn test_trigger_releases_normal_execution() {
     client.lock_program_funds(&amount);
 
     // Create schedule
-    client.create_program_release_schedule(&recipient, &amount, &release_timestamp);
+    client.create_program_release_schedule(&amount, &release_timestamp, &recipient);
 
     // Advance time
     env.ledger().set_timestamp(release_timestamp + 1);
@@ -351,13 +368,15 @@ fn test_trigger_releases_blocks_reentrancy() {
     client.lock_program_funds(&amount);
 
     // Create schedule
-    client.create_program_release_schedule(&recipient, &amount, &release_timestamp);
+    client.create_program_release_schedule(&amount, &release_timestamp, &recipient);
 
     // Advance time
     env.ledger().set_timestamp(release_timestamp + 1);
 
     // Manually set the reentrancy guard
-    crate::reentrancy_guard::set_entered(&env);
+    env.as_contract(&contract_id, || {
+        crate::reentrancy_guard::set_entered(&env);
+    });
 
     // This should panic
     client.trigger_program_releases();
@@ -433,13 +452,15 @@ fn test_guard_cleared_after_successful_payout() {
     client.lock_program_funds(&amount);
 
     // Guard should not be set initially
-    assert!(!is_entered(&env));
+    let initially_set = env.as_contract(&contract_id, || is_entered(&env));
+    assert!(!initially_set);
 
     // Execute payout
     client.single_payout(&recipient, &(amount / 2));
 
     // Guard should be cleared after successful execution
-    assert!(!is_entered(&env));
+    let after_payout = env.as_contract(&contract_id, || is_entered(&env));
+    assert!(!after_payout);
 }
 
 #[test]
@@ -468,18 +489,18 @@ fn test_guard_state_across_multiple_operations() {
     client.lock_program_funds(&total_amount);
 
     // Verify guard state through multiple operations
-    assert!(!is_entered(&env));
+    assert!(!env.as_contract(&contract_id, || is_entered(&env)));
 
     client.single_payout(&recipient1, &300_0000000i128);
-    assert!(!is_entered(&env));
+    assert!(!env.as_contract(&contract_id, || is_entered(&env)));
 
     let recipients = vec![&env, recipient2];
     let amounts = vec![&env, 200_0000000i128];
     client.batch_payout(&recipients, &amounts);
-    assert!(!is_entered(&env));
+    assert!(!env.as_contract(&contract_id, || is_entered(&env)));
 
     client.single_payout(&recipient1, &100_0000000i128);
-    assert!(!is_entered(&env));
+    assert!(!env.as_contract(&contract_id, || is_entered(&env)));
 }
 
 // ============================================================================
