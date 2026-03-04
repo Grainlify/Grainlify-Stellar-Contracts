@@ -38,9 +38,19 @@ fn assert_event_data_has_v2_tag(env: &Env, data: &Val) {
 fn assert_current_call_has_versioned_contract_event(env: &Env, contract_id: &Address) {
     let events = env.events().all();
     let mut found = false;
-    for (contract, _topics, data) in events.iter() {
+    for (contract, topics, data) in events.iter() {
         if contract != *contract_id {
             continue;
+        }
+
+        // Analytics events use ANALYTICS_VERSION_V1 and are not part of the legacy
+        // event versioning scheme enforced by EVENT_VERSION_V2.
+        if let Some(topic0) = topics.get(0) {
+            if let Ok(sym) = Symbol::try_from_val(env, &topic0) {
+                if sym == Symbol::new(env, "analytics") {
+                    continue;
+                }
+            }
         }
         assert_event_data_has_v2_tag(env, &data);
         found = true;
