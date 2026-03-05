@@ -213,96 +213,125 @@ pub fn get_bounty_analytics(env: &Env, bounty_id: u64) -> Option<BountyAnalytics
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::{contract, contractimpl};
+
+    #[contract]
+    struct DummyAnalyticsContract;
+
+    #[contractimpl]
+    impl DummyAnalyticsContract {
+        pub fn noop(_env: Env) {}
+    }
 
     #[test]
     fn test_bounty_analytics_initialization() {
         let env = Env::default();
-        let bounty_id = 1u64;
-        let amount = 1000i128;
-        let timestamp = 100u64;
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
 
-        init_bounty_analytics(&env, bounty_id, amount, timestamp);
+        env.as_contract(&contract_id, || {
+            let bounty_id = 1u64;
+            let amount = 1000i128;
+            let timestamp = 100u64;
 
-        let analytics = get_bounty_analytics(&env, bounty_id);
-        assert!(analytics.is_some());
+            init_bounty_analytics(&env, bounty_id, amount, timestamp);
 
-        let analytics = analytics.unwrap();
-        assert_eq!(analytics.total_amount_locked, amount);
-        assert_eq!(analytics.total_amount_released, 0);
-        assert_eq!(analytics.total_amount_refunded, 0);
-        assert_eq!(analytics.remaining_amount, amount);
-        assert_eq!(analytics.created_at, timestamp);
-        assert_eq!(analytics.last_updated, timestamp);
-        assert_eq!(analytics.partial_releases_count, 0);
-        assert_eq!(analytics.partial_refunds_count, 0);
+            let analytics = get_bounty_analytics(&env, bounty_id);
+            assert!(analytics.is_some());
+
+            let analytics = analytics.unwrap();
+            assert_eq!(analytics.total_amount_locked, amount);
+            assert_eq!(analytics.total_amount_released, 0);
+            assert_eq!(analytics.total_amount_refunded, 0);
+            assert_eq!(analytics.remaining_amount, amount);
+            assert_eq!(analytics.created_at, timestamp);
+            assert_eq!(analytics.last_updated, timestamp);
+            assert_eq!(analytics.partial_releases_count, 0);
+            assert_eq!(analytics.partial_refunds_count, 0);
+        });
     }
 
     #[test]
     fn test_analytics_on_release() {
         let env = Env::default();
-        let bounty_id = 2u64;
-        let amount = 1000i128;
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
 
-        init_bounty_analytics(&env, bounty_id, amount, 100);
-        update_analytics_on_release(&env, bounty_id, 500, 200);
+        env.as_contract(&contract_id, || {
+            let bounty_id = 2u64;
+            let amount = 1000i128;
 
-        let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
-        assert_eq!(analytics.total_amount_released, 500);
-        assert_eq!(analytics.remaining_amount, 500);
-        assert_eq!(analytics.partial_releases_count, 1);
-        assert_eq!(analytics.last_updated, 200);
+            init_bounty_analytics(&env, bounty_id, amount, 100);
+            update_analytics_on_release(&env, bounty_id, 500, 200);
+
+            let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(analytics.total_amount_released, 500);
+            assert_eq!(analytics.remaining_amount, 500);
+            assert_eq!(analytics.partial_releases_count, 1);
+            assert_eq!(analytics.last_updated, 200);
+        });
     }
 
     #[test]
     fn test_analytics_on_refund() {
         let env = Env::default();
-        let bounty_id = 3u64;
-        let amount = 1000i128;
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
 
-        init_bounty_analytics(&env, bounty_id, amount, 100);
-        update_analytics_on_refund(&env, bounty_id, 300, 200);
+        env.as_contract(&contract_id, || {
+            let bounty_id = 3u64;
+            let amount = 1000i128;
 
-        let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
-        assert_eq!(analytics.total_amount_refunded, 300);
-        assert_eq!(analytics.remaining_amount, 700);
-        assert_eq!(analytics.partial_refunds_count, 1);
-        assert_eq!(analytics.last_updated, 200);
+            init_bounty_analytics(&env, bounty_id, amount, 100);
+            update_analytics_on_refund(&env, bounty_id, 300, 200);
+
+            let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(analytics.total_amount_refunded, 300);
+            assert_eq!(analytics.remaining_amount, 700);
+            assert_eq!(analytics.partial_refunds_count, 1);
+            assert_eq!(analytics.last_updated, 200);
+        });
     }
 
     #[test]
     fn test_analytics_lifecycle() {
         let env = Env::default();
-        let bounty_id = 4u64;
-        let amount = 1000i128;
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
 
-        // Initialize
-        init_bounty_analytics(&env, bounty_id, amount, 100);
+        env.as_contract(&contract_id, || {
+            let bounty_id = 4u64;
+            let amount = 1000i128;
 
-        // Partial release
-        update_analytics_on_release(&env, bounty_id, 300, 200);
-        let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
-        assert_eq!(analytics.remaining_amount, 700);
-        assert_eq!(analytics.total_amount_released, 300);
+            // Initialize
+            init_bounty_analytics(&env, bounty_id, amount, 100);
 
-        // Another release
-        update_analytics_on_release(&env, bounty_id, 300, 300);
-        let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
-        assert_eq!(analytics.remaining_amount, 400);
-        assert_eq!(analytics.total_amount_released, 600);
-        assert_eq!(analytics.partial_releases_count, 2);
+            // Partial release
+            update_analytics_on_release(&env, bounty_id, 300, 200);
+            let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(analytics.remaining_amount, 700);
+            assert_eq!(analytics.total_amount_released, 300);
 
-        // Final refund for remaining
-        update_analytics_on_refund(&env, bounty_id, 400, 400);
-        let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
-        assert_eq!(analytics.remaining_amount, 0);
-        assert_eq!(analytics.total_amount_refunded, 400);
-        assert_eq!(analytics.partial_refunds_count, 1);
+            // Another release
+            update_analytics_on_release(&env, bounty_id, 300, 300);
+            let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(analytics.remaining_amount, 400);
+            assert_eq!(analytics.total_amount_released, 600);
+            assert_eq!(analytics.partial_releases_count, 2);
+
+            // Final refund for remaining
+            update_analytics_on_refund(&env, bounty_id, 400, 400);
+            let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(analytics.remaining_amount, 0);
+            assert_eq!(analytics.total_amount_refunded, 400);
+            assert_eq!(analytics.partial_refunds_count, 1);
+        });
     }
 
     #[test]
     fn test_get_nonexistent_bounty_analytics() {
         let env = Env::default();
-        let analytics = get_bounty_analytics(&env, 999u64);
-        assert!(analytics.is_none());
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let analytics = get_bounty_analytics(&env, 999u64);
+            assert!(analytics.is_none());
+        });
     }
 }

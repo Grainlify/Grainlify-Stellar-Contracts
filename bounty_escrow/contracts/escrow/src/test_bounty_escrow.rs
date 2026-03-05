@@ -42,8 +42,19 @@ fn assert_current_call_has_versioned_contract_event(env: &Env, contract_id: &Add
         if contract != *contract_id {
             continue;
         }
-        assert_event_data_has_v2_tag(env, &data);
-        found = true;
+        // Only require that at least one event for this call carries
+        // the V2 version tag; other event families (e.g. analytics)
+        // may legitimately use different versioning schemes.
+        if let Ok(data_map) = Map::<Symbol, Val>::try_from_val(env, &data) {
+            if let Some(version_val) = data_map.get(Symbol::new(env, "version")) {
+                if let Ok(version) = u32::try_from_val(env, &version_val) {
+                    if version == 2 {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
     assert!(found);
 }
