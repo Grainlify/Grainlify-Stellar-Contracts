@@ -496,6 +496,37 @@ pub struct MultisigConfig {
     pub required_signatures: u32,
 }
 
+/// Compact, admin-focused configuration snapshot for audit views.
+///
+/// This struct is intentionally stable and versioned so that off-chain
+/// dashboards can safely decode it across contract upgrades.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminConfigSnapshot {
+    /// Schema version for this snapshot.
+    pub version: u32,
+    /// Contract admin address responsible for configuration changes.
+    pub admin: Address,
+    /// Escrow token address used for all bounties.
+    pub token: Address,
+    /// Current fee configuration (rates, recipient, enablement).
+    pub fee_config: FeeConfig,
+    /// Granular pause flags controlling lock/release/refund operations.
+    pub pause_flags: PauseFlags,
+    /// Optional governance contract controlling upgrades and config.
+    pub governance_contract: Option<Address>,
+    /// Minimum governance version required for admin operations.
+    pub min_governance_version: u32,
+    /// Global claim window in seconds for authorized claims.
+    pub claim_window: u64,
+    /// Whether an amount policy is configured.
+    pub has_amount_policy: bool,
+    /// Minimum allowed lock amount when `has_amount_policy` is true.
+    pub min_lock_amount: i128,
+    /// Maximum allowed lock amount when `has_amount_policy` is true.
+    pub max_lock_amount: i128,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReleaseApproval {
@@ -799,6 +830,89 @@ impl BountyEscrowContract {
                 signers: vec![&env],
                 required_signatures: 0,
             })
+    }
+
+    /// Admin-focused audit view of core configuration.
+    ///
+    /// This view returns a compact, versioned snapshot combining admin,
+    /// token, fee configuration, pause flags, governance wiring, and
+    /// key risk controls such as claim window and amount policy.
+    /// It is designed for off-chain dashboards and monitoring systems
+    /// that need a single stable entrypoint for configuration audits.
+    pub fn get_admin_audit_view(env: Env) -> AdminConfigSnapshot {
+        // If the contract is not initialized yet, return a conservative
+        // snapshot rooted in the current contract address so callers
+        // never see malformed addresses.
+        if !env.storage().instance().has(&DataKey::Admin) {
+            let contract_addr = env.current_contract_address();
+            let fee_config = FeeConfig {
+                lock_fee_rate: 0,
+                release_fee_rate: 0,
+                fee_recipient: contract_addr.clone(),
+                fee_enabled: false,
+            };
+            let pause_flags = PauseFlags {
+                lock_paused: false,
+                release_paused: false,
+                refund_paused: false,
+            };
+
+            return AdminConfigSnapshot {
+                version: 1,
+                admin: contract_addr.clone(),
+                token: contract_addr,
+                fee_config,
+                pause_flags,
+                governance_contract: None,
+                min_governance_version: 0,
+                claim_window: 0,
+                has_amount_policy: false,
+                min_lock_amount: 0,
+                max_lock_amount: 0,
+            };
+        }
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let fee_config = Self::get_fee_config_internal(&env);
+        let pause_flags = Self::get_pause_flags(&env);
+
+        let governance_contract = Self::get_governance_contract(env.clone());
+        let min_governance_version = Self::get_min_governance_version(env.clone());
+
+        let claim_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClaimWindow)
+            .unwrap_or(0);
+
+        let mut has_amount_policy = false;
+        let mut min_lock_amount: i128 = 0;
+        let mut max_lock_amount: i128 = 0;
+
+        if let Some((min_amount, max_amount)) = env
+            .storage()
+            .instance()
+            .get::<DataKey, (i128, i128)>(&DataKey::AmountPolicy)
+        {
+            has_amount_policy = true;
+            min_lock_amount = min_amount;
+            max_lock_amount = max_amount;
+        }
+
+        AdminConfigSnapshot {
+            version: 1,
+            admin,
+            token,
+            fee_config,
+            pause_flags,
+            governance_contract,
+            min_governance_version,
+            claim_window,
+            has_amount_policy,
+            min_lock_amount,
+            max_lock_amount,
+        }
     }
 
     /// Approve release for large amount (requires multisig)
