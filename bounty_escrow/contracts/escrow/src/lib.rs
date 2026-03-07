@@ -2,6 +2,7 @@
 mod events;
 mod governance_integration;
 mod analytics;
+mod error_recovery;
 
 #[cfg(test)]
 mod test_rbac;
@@ -17,6 +18,11 @@ use analytics::{
     get_bounty_analytics, init_bounty_analytics, update_analytics_on_refund,
     update_analytics_on_release, BountyActivityEvent, BountyStateTransitioned, ContractAnalytics,
     AnalyticsSnapshot,
+};
+use error_recovery::{
+    check_and_allow, record_failure, record_success, set_circuit_admin, get_circuit_admin,
+    set_config, get_config, get_status, reset_circuit_breaker, CircuitBreakerConfig,
+    CircuitBreakerStatus, CircuitState, ErrorEntry, ERR_CIRCUIT_OPEN,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
@@ -379,6 +385,8 @@ pub enum Error {
     AmountBelowMinimum = 19,
     /// Returned when lock amount is above the configured policy maximum (Issue #62)
     AmountAboveMaximum = 20,
+    /// Returned when circuit breaker is open and operations are paused
+    CircuitBreakerOpen = 21,
 }
 
 #[contracttype]
@@ -876,6 +884,11 @@ impl BountyEscrowContract {
             return Err(Error::FundsPaused);
         }
 
+        // Check circuit breaker before proceeding
+        if let Err(_) = check_and_allow(&env) {
+            return Err(Error::CircuitBreakerOpen);
+        }
+
         let _start = env.ledger().timestamp();
         let _caller = depositor.clone();
 
@@ -998,6 +1011,11 @@ impl BountyEscrowContract {
     pub fn release_funds(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
+        }
+
+        // Check circuit breaker before proceeding
+        if let Err(_) = check_and_allow(&env) {
+            return Err(Error::CircuitBreakerOpen);
         }
 
         // Dispute protection: if a pending claim exists for this bounty,
@@ -1178,6 +1196,11 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
         }
+
+        // Check circuit breaker before proceeding
+        if let Err(_) = check_and_allow(&env) {
+            return Err(Error::CircuitBreakerOpen);
+        }
         if !env
             .storage()
             .persistent()
@@ -1355,6 +1378,11 @@ impl BountyEscrowContract {
             return Err(Error::NotInitialized);
         }
 
+        // Check circuit breaker before proceeding
+        if let Err(_) = check_and_allow(&env) {
+            return Err(Error::CircuitBreakerOpen);
+        }
+
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -1432,6 +1460,11 @@ impl BountyEscrowContract {
     pub fn refund(env: Env, bounty_id: u64) -> Result<(), Error> {
         if Self::check_paused(&env, symbol_short!("refund")) {
             return Err(Error::FundsPaused);
+        }
+
+        // Check circuit breaker before proceeding
+        if let Err(_) = check_and_allow(&env) {
+            return Err(Error::CircuitBreakerOpen);
         }
 
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
@@ -2156,6 +2189,11 @@ impl BountyEscrowContract {
         if Self::check_paused(&env, symbol_short!("lock")) {
             return Err(Error::FundsPaused);
         }
+
+        // Check circuit breaker before proceeding
+        if let Err(_) = check_and_allow(&env) {
+            return Err(Error::CircuitBreakerOpen);
+        }
         // Validate batch size
         let batch_size = items.len() as u32;
         if batch_size == 0 {
@@ -2288,6 +2326,11 @@ impl BountyEscrowContract {
     pub fn batch_release_funds(env: Env, items: Vec<ReleaseFundsItem>) -> Result<u32, Error> {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
+        }
+
+        // Check circuit breaker before proceeding
+        if let Err(_) = check_and_allow(&env) {
+            return Err(Error::CircuitBreakerOpen);
         }
         // Validate batch size
         let batch_size = items.len() as u32;
@@ -2706,6 +2749,87 @@ impl BountyEscrowContract {
 
         results
     }
+
+    // ==================== CIRCUIT BREAKER ADMIN CONTROLS ====================
+
+    /// Set the circuit breaker admin address (admin only).
+    /// The circuit breaker admin can reset the circuit when it opens.
+    pub fn set_circuit_breaker_admin(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+
+        let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        current_admin.require_auth();
+
+        set_circuit_admin(&env, admin, Some(current_admin));
+        Ok(())
+    }
+
+    /// Get the circuit breaker admin address, if set.
+    pub fn get_circuit_breaker_admin(env: Env) -> Option<Address> {
+        get_circuit_admin(&env)
+    }
+
+    /// Configure the circuit breaker thresholds (admin only).
+    pub fn set_circuit_breaker_config(
+        env: Env,
+        failure_threshold: u32,
+        success_threshold: u32,
+        max_error_log: u32,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold,
+                success_threshold,
+                max_error_log,
+            },
+        );
+        Ok(())
+    }
+
+    /// Get the current circuit breaker configuration.
+    pub fn get_circuit_breaker_config(env: Env) -> CircuitBreakerConfig {
+        get_config(&env)
+    }
+
+    /// Get the current circuit breaker status.
+    pub fn get_circuit_breaker_status(env: Env) -> CircuitBreakerStatus {
+        get_status(&env)
+    }
+
+    /// Reset the circuit breaker (circuit breaker admin only).
+    /// Transitions: Open -> HalfOpen, or HalfOpen/Closed -> Closed.
+    pub fn reset_circuit(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+
+        // The reset_circuit_breaker function handles auth internally
+        reset_circuit_breaker(&env, &admin);
+        Ok(())
+    }
+
+    /// Get the circuit breaker error log.
+    pub fn get_circuit_error_log(env: Env) -> soroban_sdk::Vec<ErrorEntry> {
+        error_recovery::get_error_log(&env)
+    }
+
+    // ==================== END CIRCUIT BREAKER ADMIN CONTROLS ====================
 }
 
 
@@ -2730,4 +2854,6 @@ mod test_pause;
 mod test_query_filters;
 #[cfg(test)]
 mod test_governance_integration;
+#[cfg(test)]
+mod test_circuit_breaker;
 mod test_bounty_analytics;
