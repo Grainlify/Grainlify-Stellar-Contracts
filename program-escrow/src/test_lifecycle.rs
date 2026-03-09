@@ -791,7 +791,8 @@ fn test_complete_lifecycle_all_transitions() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (token_client, token_id) = fund_contract(&env, &contract_id, 500_000);
+    // Fund exactly 400_000 = 300_000 (initial lock) + 100_000 (top-up)
+    let (token_client, token_id) = fund_contract(&env, &contract_id, 400_000);
     let admin = Address::generate(&env);
     let program_id = String::from_str(&env, "hack-2026");
 
@@ -847,5 +848,5 @@ fn test_complete_lifecycle_all_transitions() {
     assert_eq!(token_client.balance(&r3), 200_000);
     assert_eq!(token_client.balance(&r4), 100_000);
     // Contract still has 100_000 that was minted but never locked
-    assert_eq!(token_client.balance(&contract_id), 100_000);
+    assert_eq!(token_client.balance(&contract_id), 0);
 }

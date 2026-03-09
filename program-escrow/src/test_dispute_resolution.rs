@@ -36,7 +36,9 @@ fn setup(
 
     let admin = Address::generate(env);
     let token_admin_key = Address::generate(env);
-    let token_id = env.register_stellar_asset_contract(token_admin_key.clone());
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin_key.clone())
+        .address();
     let token_admin = token::StellarAssetClient::new(env, &token_id);
 
     let program_id = String::from_str(env, "disp-test-program");
@@ -60,7 +62,7 @@ fn setup(
 #[should_panic(expected = "Dispute in progress")]
 fn test_open_dispute_blocks_payout() {
     let env = Env::default();
-    let (client, admin, _cid) = setup(&env, 100_000);
+    let (client, _admin, _cid) = setup(&env, 100_000);
 
     let reason = String::from_str(&env, "Winner address disputed by organiser");
     client.open_dispute(&reason);
@@ -162,7 +164,7 @@ fn test_open_dispute_non_admin_rejected() {
 
     let admin = Address::generate(&env);
     let token_key = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract(token_key);
+    let token_id = env.register_stellar_asset_contract_v2(token_key).address();
     let prog_id = String::from_str(&env, "restricted-prog");
 
     // Set up program with auth mocked only for setup steps
@@ -177,7 +179,9 @@ fn test_open_dispute_non_admin_rejected() {
     let client2 = ProgramEscrowContractClient::new(&env2, &contract_id2);
     let admin2 = Address::generate(&env2);
     let token_key2 = Address::generate(&env2);
-    let token_id2 = env2.register_stellar_asset_contract(token_key2);
+    let token_id2 = env2
+        .register_stellar_asset_contract_v2(token_key2)
+        .address();
     let prog_id2 = String::from_str(&env2, "prog2");
     env2.mock_all_auths();
     client2.init_program(&prog_id2, &admin2, &token_id2);
