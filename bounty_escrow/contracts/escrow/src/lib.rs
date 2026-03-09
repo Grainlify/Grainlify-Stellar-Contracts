@@ -2731,3 +2731,5 @@ mod test_query_filters;
 #[cfg(test)]
 mod test_governance_integration;
 mod test_bounty_analytics;
+#[cfg(test)]
+mod test_gas_proxy;
