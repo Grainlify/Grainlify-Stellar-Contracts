@@ -2973,3 +2973,6 @@ mod test_circuit_breaker;
 mod test_bounty_analytics;
 #[cfg(test)]
 mod test_gas_proxy;
+
+#[cfg(test)]
+mod test_reentrancy;
