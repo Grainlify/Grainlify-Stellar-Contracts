@@ -41,18 +41,18 @@ describe('Min/Max Amount Policy Enforcement', () => {
 
   describe('lockProgramFunds – amount boundary validation', () => {
     it('rejects zero amount with ValidationError before reaching the contract', async () => {
-      await expect(client.lockProgramFunds(0n, mockKeypair))
+      await expect(client.lockProgramFunds(mockKeypair.publicKey(), 0n, mockKeypair))
         .rejects.toBeInstanceOf(ValidationError);
 
-      await expect(client.lockProgramFunds(0n, mockKeypair))
+      await expect(client.lockProgramFunds(mockKeypair.publicKey(), 0n, mockKeypair))
         .rejects.toThrow('Amount must be greater than zero');
     });
 
     it('rejects negative amount with ValidationError before reaching the contract', async () => {
-      await expect(client.lockProgramFunds(-1n, mockKeypair))
+      await expect(client.lockProgramFunds(mockKeypair.publicKey(), -1n, mockKeypair))
         .rejects.toBeInstanceOf(ValidationError);
 
-      await expect(client.lockProgramFunds(-9_999n, mockKeypair))
+      await expect(client.lockProgramFunds(mockKeypair.publicKey(), -9_999n, mockKeypair))
         .rejects.toBeInstanceOf(ValidationError);
     });
 

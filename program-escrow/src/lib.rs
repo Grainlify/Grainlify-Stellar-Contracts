@@ -102,7 +102,7 @@
 //!
 //! // 2. Lock prize pool (10,000 USDC)
 //! let prize_pool = 10_000_0000000; // 10,000 USDC (7 decimals)
-//! escrow_client.lock_program_funds(&prize_pool);
+//! escrow_client.lock_program_funds(&authorized_key, &prize_pool);
 //!
 //! // 3. After hackathon, distribute prizes
 //! let winners = vec![
@@ -184,15 +184,15 @@ mod test_governance_integration;
 /// by the existing admin.
 ///
 /// # Arguments
-/// * `new_admin` - Address to register as circuit breaker admin
+/// * `newadmin` - Address to register as circuit breaker admin
 /// * `caller`    - Existing admin (None if setting for the first time)
-pub fn set_circuit_admin(env: Env, new_admin: Address, caller: Option<Address>) {
-    error_recovery::set_circuit_admin(&env, new_admin, caller);
+pub fn set_circuitadmin(env: Env, newadmin: Address, caller: Option<Address>) {
+    error_recovery::set_circuitadmin(&env, newadmin, caller);
 }
 
 /// Returns the registered circuit breaker admin, if any.
-pub fn get_circuit_admin(env: Env) -> Option<Address> {
-    error_recovery::get_circuit_admin(&env)
+pub fn get_circuitadmin(env: Env) -> Option<Address> {
+    error_recovery::get_circuitadmin(&env)
 }
 
 /// Returns the full circuit breaker status snapshot.
@@ -229,7 +229,7 @@ pub fn configure_circuit_breaker(
     success_threshold: u32,
     max_error_log: u32,
 ) {
-    let stored = error_recovery::get_circuit_admin(&env);
+    let stored = error_recovery::get_circuitadmin(&env);
     match stored {
         Some(ref a) if a == &admin => {
             admin.require_auth();
@@ -253,7 +253,7 @@ pub fn get_circuit_error_log(env: Env) -> soroban_sdk::Vec<error_recovery::Error
 
 /// Directly open the circuit (emergency lockout). Admin only.
 pub fn emergency_open_circuit(env: Env, admin: Address) {
-    let stored = error_recovery::get_circuit_admin(&env);
+    let stored = error_recovery::get_circuitadmin(&env);
     match stored {
         Some(ref a) if a == &admin => {
             admin.require_auth();
@@ -880,16 +880,19 @@ impl ProgramEscrowContract {
     // Fund Management
     // ========================================================================
 
-    /// Lock initial funds into the program escrow
+    /// Lock funds into the program escrow
     ///
     /// # Arguments
+    /// * `from` - The address funding the contract, must authorize this call
     /// * `amount` - Amount of funds to lock (in native token units)
     ///
     /// # Returns
     /// Updated ProgramData with locked funds
-    pub fn lock_program_funds(env: Env, amount: i128) -> ProgramData {
+    pub fn lock_program_funds(env: Env, from: Address, amount: i128) -> ProgramData {
         let start = env.ledger().timestamp();
-        let caller_addr = env.current_contract_address();
+        let caller_addr = from.clone();
+        from.require_auth();
+        
         if Self::check_paused(&env, symbol_short!("lock")) {
             monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
             panic!("Funds Paused");
@@ -906,9 +909,19 @@ impl ProgramEscrowContract {
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
 
+        // Transfer funds
+        let token_client = token::Client::new(&env, &program_data.token_address);
+        token_client.transfer(&from, &env.current_contract_address(), &amount);
+
         // Update balances
-        program_data.total_funds += amount;
-        program_data.remaining_balance += amount;
+        program_data.total_funds = program_data.total_funds.checked_add(amount).expect("Total funds overflow");
+        program_data.remaining_balance = program_data.remaining_balance.checked_add(amount).expect("Remaining balance overflow");
+
+        // Ensure invariant
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        if contract_balance < program_data.remaining_balance {
+            panic!("Invariant violation: token balance < remaining balance");
+        }
 
         // Store updated data
         env.storage().instance().set(&PROGRAM_DATA, &program_data);
@@ -948,17 +961,17 @@ impl ProgramEscrowContract {
     }
 
     /// Register or replace the contract admin. Can be called multiple times to rotate the admin.
-    pub fn set_admin(env: Env, admin: Address) {
+    pub fn setadmin(env: Env, admin: Address) {
         // If admin is already set, require auth from the current admin
         if env.storage().instance().has(&DataKey::Admin) {
-            let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-            current_admin.require_auth();
+            let currentadmin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            currentadmin.require_auth();
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
     /// Get the current admin
-    pub fn get_admin(env: Env) -> Option<Address> {
+    pub fn getadmin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
     }
 
@@ -1033,7 +1046,7 @@ impl ProgramEscrowContract {
     // ========================================================================
 
     /// Internal helper — gets the admin or panics with a user-friendly message.
-    fn require_admin(env: &Env) -> Address {
+    fn requireadmin(env: &Env) -> Address {
         env.storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::Admin)
@@ -1062,7 +1075,7 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If a dispute is already open
     pub fn open_dispute(env: Env, reason: String) {
-        let admin = Self::require_admin(&env);
+        let admin = Self::requireadmin(&env);
         admin.require_auth();
 
         // Reject if a dispute is already open
@@ -1112,7 +1125,7 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If no dispute is currently open
     pub fn resolve_dispute(env: Env) {
-        let admin = Self::require_admin(&env);
+        let admin = Self::requireadmin(&env);
         admin.require_auth();
 
         let mut record: DisputeRecord = env
@@ -1155,7 +1168,7 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If no dispute is currently open
     pub fn cancel_dispute(env: Env) {
-        let admin = Self::require_admin(&env);
+        let admin = Self::requireadmin(&env);
         admin.require_auth();
 
         let mut record: DisputeRecord = env
@@ -1212,17 +1225,17 @@ impl ProgramEscrowContract {
 
     // --- Circuit Breaker & Rate Limit ---
 
-    pub fn set_circuit_admin(env: Env, new_admin: Address, caller: Option<Address>) {
-        error_recovery::set_circuit_admin(&env, new_admin, caller);
+    pub fn set_circuitadmin(env: Env, newadmin: Address, caller: Option<Address>) {
+        error_recovery::set_circuitadmin(&env, newadmin, caller);
     }
 
-    pub fn get_circuit_admin(env: Env) -> Option<Address> {
-        error_recovery::get_circuit_admin(&env)
+    pub fn get_circuitadmin(env: Env) -> Option<Address> {
+        error_recovery::get_circuitadmin(&env)
     }
 
     pub fn reset_circuit_breaker(env: Env, caller: Address) {
         caller.require_auth();
-        let admin = error_recovery::get_circuit_admin(&env).expect("Circuit admin not set");
+        let admin = error_recovery::get_circuitadmin(&env).expect("Circuit admin not set");
         if caller != admin {
             panic!("Unauthorized: only circuit admin can reset");
         }
@@ -1237,7 +1250,7 @@ impl ProgramEscrowContract {
         _cooldown: u32,
     ) {
         caller.require_auth();
-        let admin = error_recovery::get_circuit_admin(&env).expect("Circuit admin not set");
+        let admin = error_recovery::get_circuitadmin(&env).expect("Circuit admin not set");
         if caller != admin {
             panic!("Unauthorized: only circuit admin can configure");
         }
@@ -1477,7 +1490,7 @@ impl ProgramEscrowContract {
         monitoring::track_operation(
             &env,
             symbol_short!("batchpay"),
-            program_data.authorized_payout_key,
+            program_data.authorized_payout_key.clone(),
             true,
         );
         monitoring::emit_performance(
@@ -1800,8 +1813,8 @@ impl ProgramEscrowContract {
         Self::get_program_info(env)
     }
 
-    pub fn lock_program_funds_v2(env: Env, _program_id: String, amount: i128) -> ProgramData {
-        Self::lock_program_funds(env, amount)
+    pub fn lock_program_funds_v2(env: Env, _program_id: String, from: Address, amount: i128) -> ProgramData {
+        Self::lock_program_funds(env, from, amount)
     }
 
     pub fn single_payout_v2(
@@ -2364,6 +2377,8 @@ mod integration_tests {
     fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::Client<'a> {
         let token_contract = env.register_stellar_asset_contract_v2(admin.clone());
         let token_address = token_contract.address();
+        let token_sac = token::StellarAssetClient::new(env, &token_address);
+        token_sac.mint(admin, &1_000_000_000_000_000_000);
         token::Client::new(env, &token_address)
     }
 
@@ -2387,8 +2402,8 @@ mod integration_tests {
 
         // // Create and fund token
         // let token_client = create_token_contract(env, authorized_key);
-        // let token_admin = token::StellarAssetClient::new(env, &token_client.address);
-        // token_admin.mint(authorized_key, &total_amount);
+        // let tokenadmin = token::StellarAssetClient::new(env, &token_client.address);
+        // tokenadmin.mint(authorized_key, &total_amount);
 
         // // Lock funds for program
         // token_client.approve(authorized_key, &env.current_contract_address(), &total_amount, &1000);
@@ -2396,17 +2411,16 @@ mod integration_tests {
 
         // Create and fund token first, then register the program with the real token address
         let token_client = create_token_contract(env, authorized_key);
-        let token_admin = token::StellarAssetClient::new(env, &token_client.address);
-        token_admin.mint(authorized_key, &total_amount);
+        let tokenadmin = token::StellarAssetClient::new(env, &token_client.address);
+        tokenadmin.mint(authorized_key, &total_amount);
 
         // Register program using the created token contract address
         client.initialize_program(&program_id, &authorized_key, &token_client.address);
 
         // Transfer tokens to contract first
-        token_client.transfer(&authorized_key, contract_id, &total_amount);
 
         // Lock funds for program (records the amount in program state)
-        client.lock_program_funds(&total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
 
         // Create release schedule
         client.create_program_release_schedule(&total_amount, &release_timestamp, winner);
@@ -2464,7 +2478,6 @@ mod integration_tests {
         let authorized_key = Address::generate(&env);
         let winner1 = Address::generate(&env);
         let winner2 = Address::generate(&env);
-        let token = Address::generate(&env);
         let program_id = String::from_str(&env, "Hackathon2024");
         let amount1 = 600_0000000;
         let amount2 = 400_0000000;
@@ -2472,19 +2485,18 @@ mod integration_tests {
 
         env.mock_all_auths();
 
-        // Register program
-        client.initialize_program(&program_id, &authorized_key, &token);
-
-        // Create and fund token
+        // Create and fund token BEFORE initialize_program
         let token_client = create_token_contract(&env, &authorized_key);
-        let token_admin = token::StellarAssetClient::new(&env, &token_client.address);
-        token_admin.mint(&authorized_key, &total_amount);
+
+        // Register program with real token
+        client.initialize_program(&program_id, &authorized_key, &token_client.address);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
 
         // Transfer tokens to contract first
-        token_client.transfer(&authorized_key, &contract_id, &total_amount);
 
         // Lock funds for program
-        client.lock_program_funds(&total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
 
         // Create first release schedule
         client.create_program_release_schedule(&amount1, &1000, &winner1);
@@ -2639,17 +2651,16 @@ mod integration_tests {
 
         // Create and fund token FIRST
         let token_client = create_token_contract(&env, &authorized_key);
-        let token_admin = token::StellarAssetClient::new(&env, &token_client.address);
-        token_admin.mint(&authorized_key, &total_amount);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
 
         // Register program with REAL token address
         client.initialize_program(&program_id, &authorized_key, &token_client.address);
 
         // Transfer tokens to contract first
-        token_client.transfer(&authorized_key, &contract_id, &total_amount);
 
         // Lock funds for program
-        client.lock_program_funds(&total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
 
         // Create first schedule
         client.create_program_release_schedule(&amount1, &1000, &winner1);
@@ -2714,17 +2725,16 @@ mod integration_tests {
 
         // Create and fund token FIRST
         let token_client = create_token_contract(&env, &authorized_key);
-        let token_admin = token::StellarAssetClient::new(&env, &token_client.address);
-        token_admin.mint(&authorized_key, &total_amount);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
 
         // Register program with REAL token address
         client.initialize_program(&program_id, &authorized_key, &token_client.address);
 
         // Transfer tokens to contract first
-        token_client.transfer(&authorized_key, &contract_id, &total_amount);
 
         // Lock funds for program
-        client.lock_program_funds(&total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
 
         // Create overlapping schedules (all at same timestamp)
         client.create_program_release_schedule(&amount1, &base_timestamp, &winner1.clone());
@@ -2887,6 +2897,8 @@ mod integration_tests {
         let contract_id = env.register_contract(None, ProgramEscrowContract);
         let client = ProgramEscrowContractClient::new(&env, &contract_id);
         let token_client = create_token_contract(&env, &admin);
+        let token_sac = token::StellarAssetClient::new(&env, &token_client.address);
+        token_sac.mint(&admin, &10_000_0000000);
 
         let backend = Address::generate(&env);
         let prog_id = String::from_str(&env, "Hackathon2024");
@@ -2896,7 +2908,7 @@ mod integration_tests {
 
         // Lock funds
         let amount = 10_000_0000000i128; // 10,000 USDC
-        let updated = client.lock_program_funds(&amount);
+        let updated = client.lock_program_funds(&admin, &amount);
 
         assert_eq!(updated.total_funds, amount);
         assert_eq!(client.get_remaining_balance(), amount);
@@ -2947,6 +2959,8 @@ mod integration_tests {
         let contract_id = env.register_contract(None, ProgramEscrowContract);
         let client = ProgramEscrowContractClient::new(&env, &contract_id);
         let token_client = create_token_contract(&env, &admin);
+        let token_sac = token::StellarAssetClient::new(&env, &token_client.address);
+        token_sac.mint(&admin, &10_000_0000000);
 
         let backend = Address::generate(&env);
         let prog_id = String::from_str(&env, "Hackathon2024");
@@ -2954,9 +2968,9 @@ mod integration_tests {
         client.initialize_program(&prog_id, &backend, &token_client.address);
 
         // Lock funds multiple times
-        client.lock_program_funds(&1_000_0000000);
-        client.lock_program_funds(&2_000_0000000);
-        client.lock_program_funds(&3_000_0000000);
+        client.lock_program_funds(&admin, &1_000_0000000);
+        client.lock_program_funds(&admin, &2_000_0000000);
+        client.lock_program_funds(&admin, &3_000_0000000);
 
         let info = client.get_program_info();
         assert_eq!(info.total_funds, 6_000_0000000);
@@ -2967,6 +2981,7 @@ mod integration_tests {
     #[should_panic(expected = "Amount must be greater than zero")]
     fn test_lock_zero_funds() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, ProgramEscrowContract);
         let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
@@ -2975,7 +2990,8 @@ mod integration_tests {
         let prog_id = String::from_str(&env, "Hackathon2024");
 
         client.initialize_program(&prog_id, &backend, &token);
-        client.lock_program_funds(&0);
+        let admin = Address::generate(&env);
+        client.lock_program_funds(&admin, &0);
     }
 
     // ========================================================================
@@ -2997,7 +3013,7 @@ mod integration_tests {
         let prog_id = String::from_str(&env, "Test");
 
         client.initialize_program(&prog_id, &backend, &token_client.address);
-        client.lock_program_funds(&10_000_0000000);
+        client.lock_program_funds(&admin, &10_000_0000000);
 
         let recipients = soroban_sdk::vec![&env, Address::generate(&env), Address::generate(&env)];
         let amounts = soroban_sdk::vec![&env, 1_000_0000000i128]; // Mismatch!
@@ -3020,7 +3036,7 @@ mod integration_tests {
         let prog_id = String::from_str(&env, "Test");
 
         client.initialize_program(&prog_id, &backend, &token_client.address);
-        client.lock_program_funds(&5_000_0000000);
+        client.lock_program_funds(&admin, &5_000_0000000);
 
         let recipients = soroban_sdk::vec![&env, Address::generate(&env)];
         let amounts = soroban_sdk::vec![&env, 10_000_0000000i128]; // More than available!
@@ -3048,7 +3064,7 @@ mod integration_tests {
         let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        client.setadmin(&admin);
 
         client.update_rate_limit_config(&7200, &5, &120);
 
@@ -3059,34 +3075,34 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_admin_rotation() {
+    fn testadmin_rotation() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, ProgramEscrowContract);
         let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
-        let old_admin = Address::generate(&env);
-        let new_admin = Address::generate(&env);
+        let oldadmin = Address::generate(&env);
+        let newadmin = Address::generate(&env);
 
-        // set_admin doesn't panic the first time
-        client.set_admin(&old_admin);
+        // setadmin doesn't panic the first time
+        client.setadmin(&oldadmin);
 
         // Rotation: set a different admin — also must not panic
-        client.set_admin(&new_admin);
+        client.setadmin(&newadmin);
     }
 
     #[test]
-    fn test_new_admin_can_update_config() {
+    fn test_newadmin_can_update_config() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, ProgramEscrowContract);
         let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
-        let old_admin = Address::generate(&env);
-        let new_admin = Address::generate(&env);
+        let oldadmin = Address::generate(&env);
+        let newadmin = Address::generate(&env);
 
-        client.set_admin(&old_admin);
-        client.set_admin(&new_admin);
+        client.setadmin(&oldadmin);
+        client.setadmin(&newadmin);
 
         client.update_rate_limit_config(&3600, &10, &30);
 
@@ -3098,7 +3114,7 @@ mod integration_tests {
 
     #[test]
     #[should_panic(expected = "Admin not set")]
-    fn test_non_admin_cannot_update_config() {
+    fn test_nonadmin_cannot_update_config() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, ProgramEscrowContract);

@@ -91,17 +91,17 @@ describe('SDK Client Error Handling', () => {
     describe('lockProgramFunds', () => {
       it('should throw ValidationError for zero amount', async () => {
         await expect(
-          client.lockProgramFunds(0n, mockKeypair)
+          client.lockProgramFunds(mockKeypair.publicKey(), 0n, mockKeypair)
         ).rejects.toThrow(ValidationError);
 
         await expect(
-          client.lockProgramFunds(0n, mockKeypair)
+          client.lockProgramFunds(mockKeypair.publicKey(), 0n, mockKeypair)
         ).rejects.toThrow('Amount must be greater than zero');
       });
 
       it('should throw ValidationError for negative amount', async () => {
         await expect(
-          client.lockProgramFunds(-100n, mockKeypair)
+          client.lockProgramFunds(mockKeypair.publicKey(), -100n, mockKeypair)
         ).rejects.toThrow(ValidationError);
       });
     });

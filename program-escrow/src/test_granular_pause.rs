@@ -29,11 +29,11 @@ use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String};
 /// Set up a contract + admin, register a token, init the program, and mint
 /// `initial_balance` tokens into the contract address.
 ///
-/// Returns `(client, token_client)`.
+/// Returns `(client, token_client, admin)`.
 fn setup(
     env: &Env,
     initial_balance: i128,
-) -> (ProgramEscrowContractClient<'static>, token::Client<'static>) {
+) -> (ProgramEscrowContractClient<'static>, token::Client<'static>, Address) {
     env.mock_all_auths();
 
     // Register escrow contract
@@ -58,12 +58,12 @@ fn setup(
     client.init_program(&program_id, &payout_key, &token_addr);
 
     // Fund the contract with tokens and lock them
+    token_sac.mint(&admin, &1_000_000_000);
     if initial_balance > 0 {
-        token_sac.mint(&contract_id, &initial_balance);
-        client.lock_program_funds(&initial_balance);
+        client.lock_program_funds(&admin, &initial_balance);
     }
 
-    (client, token_client)
+    (client, token_client, admin)
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ fn setup(
 #[test]
 fn test_default_all_flags_false() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     let flags = client.get_pause_flags();
     assert!(!flags.lock_paused, "lock_paused should default to false");
@@ -94,7 +94,7 @@ fn test_default_all_flags_false() {
 #[test]
 fn test_set_lock_paused_only() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&Some(true), &None, &None);
     let flags = client.get_pause_flags();
@@ -106,7 +106,7 @@ fn test_set_lock_paused_only() {
 #[test]
 fn test_set_release_paused_only() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&None, &Some(true), &None);
     let flags = client.get_pause_flags();
@@ -118,7 +118,7 @@ fn test_set_release_paused_only() {
 #[test]
 fn test_set_refund_paused_only() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&None, &None, &Some(true));
     let flags = client.get_pause_flags();
@@ -130,7 +130,7 @@ fn test_set_refund_paused_only() {
 #[test]
 fn test_unset_lock_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&Some(true), &None, &None);
     client.set_paused(&Some(false), &None, &None);
@@ -141,7 +141,7 @@ fn test_unset_lock_paused() {
 #[test]
 fn test_unset_release_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&None, &Some(true), &None);
     client.set_paused(&None, &Some(false), &None);
@@ -156,7 +156,7 @@ fn test_unset_release_paused() {
 #[test]
 fn test_partial_update_preserves_other_flags() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     // Pause all three
     client.set_paused(&Some(true), &Some(true), &Some(true));
@@ -180,17 +180,17 @@ fn test_partial_update_preserves_other_flags() {
 #[should_panic(expected = "Funds Paused")]
 fn test_lock_blocked_when_lock_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&Some(true), &None, &None);
-    client.lock_program_funds(&500);
+    client.lock_program_funds(&admin, &500);
 }
 
 /// lock_paused does NOT block single_payout
 #[test]
 fn test_release_allowed_when_only_lock_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&Some(true), &None, &None);
 
@@ -204,7 +204,7 @@ fn test_release_allowed_when_only_lock_paused() {
 #[test]
 fn test_batch_allowed_when_only_lock_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&Some(true), &None, &None);
 
@@ -222,7 +222,7 @@ fn test_batch_allowed_when_only_lock_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_single_payout_blocked_when_release_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&None, &Some(true), &None);
     let recipient = Address::generate(&env);
@@ -233,7 +233,7 @@ fn test_single_payout_blocked_when_release_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_batch_payout_blocked_when_release_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&None, &Some(true), &None);
     let r1 = Address::generate(&env);
@@ -244,12 +244,12 @@ fn test_batch_payout_blocked_when_release_paused() {
 #[test]
 fn test_lock_allowed_when_only_release_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&None, &Some(true), &None);
 
     // Should succeed — lock_paused is false
-    let data = client.lock_program_funds(&300);
+    let data = client.lock_program_funds(&admin, &300);
     assert_eq!(data.remaining_balance, 300);
 }
 
@@ -262,10 +262,10 @@ fn test_lock_allowed_when_only_release_paused() {
 #[test]
 fn test_lock_allowed_when_only_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&None, &None, &Some(true));
-    let data = client.lock_program_funds(&400);
+    let data = client.lock_program_funds(&admin, &400);
     assert_eq!(data.remaining_balance, 400);
 }
 
@@ -273,7 +273,7 @@ fn test_lock_allowed_when_only_refund_paused() {
 #[test]
 fn test_single_payout_allowed_when_only_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&None, &None, &Some(true));
     let recipient = Address::generate(&env);
@@ -285,7 +285,7 @@ fn test_single_payout_allowed_when_only_refund_paused() {
 #[test]
 fn test_batch_allowed_when_only_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&None, &None, &Some(true));
     let r1 = Address::generate(&env);
@@ -301,17 +301,17 @@ fn test_batch_allowed_when_only_refund_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_lock_blocked_when_lock_and_release_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&Some(true), &Some(true), &None);
-    client.lock_program_funds(&100);
+    client.lock_program_funds(&admin, &100);
 }
 
 #[test]
 #[should_panic(expected = "Funds Paused")]
 fn test_single_payout_blocked_when_lock_and_release_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 500);
+    let (client, _token, admin) = setup(&env, 500);
 
     client.set_paused(&Some(true), &Some(true), &None);
     let recipient = Address::generate(&env);
@@ -322,7 +322,7 @@ fn test_single_payout_blocked_when_lock_and_release_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_batch_payout_blocked_when_lock_and_release_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 500);
+    let (client, _token, admin) = setup(&env, 500);
 
     client.set_paused(&Some(true), &Some(true), &None);
     let r1 = Address::generate(&env);
@@ -337,16 +337,16 @@ fn test_batch_payout_blocked_when_lock_and_release_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_lock_blocked_when_lock_and_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&Some(true), &None, &Some(true));
-    client.lock_program_funds(&100);
+    client.lock_program_funds(&admin, &100);
 }
 
 #[test]
 fn test_single_payout_allowed_when_lock_and_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 500);
+    let (client, _token, admin) = setup(&env, 500);
 
     client.set_paused(&Some(true), &None, &Some(true));
     let recipient = Address::generate(&env);
@@ -357,7 +357,7 @@ fn test_single_payout_allowed_when_lock_and_refund_paused() {
 #[test]
 fn test_batch_allowed_when_lock_and_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 500);
+    let (client, _token, admin) = setup(&env, 500);
 
     client.set_paused(&Some(true), &None, &Some(true));
     let r1 = Address::generate(&env);
@@ -372,10 +372,10 @@ fn test_batch_allowed_when_lock_and_refund_paused() {
 #[test]
 fn test_lock_allowed_when_release_and_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&None, &Some(true), &Some(true));
-    let data = client.lock_program_funds(&600);
+    let data = client.lock_program_funds(&admin, &600);
     assert_eq!(data.remaining_balance, 600);
 }
 
@@ -383,7 +383,7 @@ fn test_lock_allowed_when_release_and_refund_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_single_payout_blocked_when_release_and_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 600);
+    let (client, _token, admin) = setup(&env, 600);
 
     client.set_paused(&None, &Some(true), &Some(true));
     let recipient = Address::generate(&env);
@@ -394,7 +394,7 @@ fn test_single_payout_blocked_when_release_and_refund_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_batch_blocked_when_release_and_refund_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 600);
+    let (client, _token, admin) = setup(&env, 600);
 
     client.set_paused(&None, &Some(true), &Some(true));
     let r1 = Address::generate(&env);
@@ -409,17 +409,17 @@ fn test_batch_blocked_when_release_and_refund_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_lock_blocked_when_all_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&Some(true), &Some(true), &Some(true));
-    client.lock_program_funds(&100);
+    client.lock_program_funds(&admin, &100);
 }
 
 #[test]
 #[should_panic(expected = "Funds Paused")]
 fn test_single_payout_blocked_when_all_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 500);
+    let (client, _token, admin) = setup(&env, 500);
 
     client.set_paused(&Some(true), &Some(true), &Some(true));
     let recipient = Address::generate(&env);
@@ -430,7 +430,7 @@ fn test_single_payout_blocked_when_all_paused() {
 #[should_panic(expected = "Funds Paused")]
 fn test_batch_payout_blocked_when_all_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 500);
+    let (client, _token, admin) = setup(&env, 500);
 
     client.set_paused(&Some(true), &Some(true), &Some(true));
     let r1 = Address::generate(&env);
@@ -444,22 +444,22 @@ fn test_batch_payout_blocked_when_all_paused() {
 #[test]
 fn test_lock_restored_after_unpause() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 0);
+    let (client, _token, admin) = setup(&env, 0);
 
     client.set_paused(&Some(true), &None, &None);
     // Confirm it's blocked
-    assert!(client.try_lock_program_funds(&200).is_err());
+    assert!(client.try_lock_program_funds(&admin, &200).is_err());
 
     client.set_paused(&Some(false), &None, &None);
     // Now it should succeed
-    let data = client.lock_program_funds(&200);
+    let data = client.lock_program_funds(&admin, &200);
     assert_eq!(data.remaining_balance, 200);
 }
 
 #[test]
 fn test_single_payout_restored_after_unpause() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&None, &Some(true), &None);
     let recipient = Address::generate(&env);
@@ -473,7 +473,7 @@ fn test_single_payout_restored_after_unpause() {
 #[test]
 fn test_batch_payout_restored_after_unpause() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 1_000);
+    let (client, _token, admin) = setup(&env, 1_000);
 
     client.set_paused(&None, &Some(true), &None);
     let r1 = Address::generate(&env);
@@ -493,7 +493,7 @@ fn test_batch_payout_restored_after_unpause() {
 #[test]
 fn test_query_functions_unaffected_when_all_paused() {
     let env = Env::default();
-    let (client, _token) = setup(&env, 500);
+    let (client, _token, admin) = setup(&env, 500);
 
     client.set_paused(&Some(true), &Some(true), &Some(true));
 

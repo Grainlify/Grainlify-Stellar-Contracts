@@ -32,7 +32,7 @@ fn test_set_governance_contract() {
     let admin = Address::generate(&env);
     let governance_addr = Address::generate(&env);
 
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Set governance contract
     client.set_governance_contract(&governance_addr);
@@ -51,7 +51,7 @@ fn test_set_min_governance_version() {
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Set minimum version
     client.set_min_governance_version(&2);
@@ -69,7 +69,7 @@ fn test_governance_version_check_with_mock() {
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Register mock governance contract
     let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
@@ -92,7 +92,7 @@ fn test_governance_version_check_fails_when_version_too_low() {
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Register mock governance contract (returns version 2)
     let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
@@ -106,7 +106,7 @@ fn test_governance_version_check_fails_when_version_too_low() {
 }
 
 #[test]
-fn test_admin_operations_work_without_governance() {
+fn testadmin_operations_work_without_governance() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -114,7 +114,7 @@ fn test_admin_operations_work_without_governance() {
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Admin operations should work without governance configured
     client.set_paused(&Some(true), &None, &None);
@@ -134,7 +134,7 @@ fn test_governance_integration_with_program_lifecycle() {
     let token = Address::generate(&env);
     let program_id = String::from_str(&env, "TestProgram");
 
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Register mock governance contract
     let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
@@ -160,7 +160,7 @@ fn test_governance_prevents_unauthorized_config_changes() {
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Register mock governance contract
     let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);

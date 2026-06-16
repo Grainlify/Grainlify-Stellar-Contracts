@@ -35,21 +35,22 @@ fn setup(
     let client = ProgramEscrowContractClient::new(env, &contract_id);
 
     let admin = Address::generate(env);
-    let token_admin_key = Address::generate(env);
+    let tokenadmin_key = Address::generate(env);
     let token_id = env
-        .register_stellar_asset_contract_v2(token_admin_key.clone())
+        .register_stellar_asset_contract_v2(tokenadmin_key.clone())
         .address();
-    let token_admin = token::StellarAssetClient::new(env, &token_id);
+    let tokenadmin = token::StellarAssetClient::new(env, &token_id);
 
     let program_id = String::from_str(env, "disp-test-program");
     client.init_program(&program_id, &admin, &token_id);
 
     // Set admin for dispute resolution
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     if initial_funds > 0 {
-        token_admin.mint(&contract_id, &initial_funds);
-        client.lock_program_funds(&initial_funds);
+        tokenadmin.mint(&admin, &1_000_000_000);
+        tokenadmin.mint(&admin, &initial_funds);
+        client.lock_program_funds(&admin, &initial_funds);
     }
 
     (client, admin, contract_id)
@@ -62,7 +63,7 @@ fn setup(
 #[should_panic(expected = "Dispute in progress")]
 fn test_open_dispute_blocks_payout() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 100_000);
+    let (client, admin, _cid) = setup(&env, 100_000);
 
     let reason = String::from_str(&env, "Winner address disputed by organiser");
     client.open_dispute(&reason);
@@ -78,7 +79,7 @@ fn test_open_dispute_blocks_payout() {
 #[test]
 fn test_resolve_dispute_allows_payout() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 100_000);
+    let (client, admin, _cid) = setup(&env, 100_000);
 
     let reason = String::from_str(&env, "Disputed submission");
     client.open_dispute(&reason);
@@ -103,7 +104,7 @@ fn test_resolve_dispute_allows_payout() {
 #[should_panic(expected = "Dispute in progress")]
 fn test_dispute_blocks_batch_payout() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 200_000);
+    let (client, admin, _cid) = setup(&env, 200_000);
 
     let reason = String::from_str(&env, "Batch payout disputed");
     client.open_dispute(&reason);
@@ -156,7 +157,7 @@ fn test_dispute_status_and_events() {
 /// Admin auth is required to open a dispute.
 /// Calling open_dispute without providing auth returns an error.
 #[test]
-fn test_open_dispute_non_admin_rejected() {
+fn test_open_dispute_nonadmin_rejected() {
     let env = Env::default();
     // Do NOT call mock_all_auths — auth will be enforced.
     let contract_id = env.register_contract(None, ProgramEscrowContract);
@@ -170,7 +171,7 @@ fn test_open_dispute_non_admin_rejected() {
     // Set up program with auth mocked only for setup steps
     env.mock_all_auths();
     client.init_program(&prog_id, &admin, &token_id);
-    client.set_admin(&admin);
+    client.setadmin(&admin);
 
     // Now try to open a dispute WITHOUT providing the admin's auth.
     // We do this by creating a new env without mock_all_auths and using try_
@@ -185,13 +186,13 @@ fn test_open_dispute_non_admin_rejected() {
     let prog_id2 = String::from_str(&env2, "prog2");
     env2.mock_all_auths();
     client2.init_program(&prog_id2, &admin2, &token_id2);
-    client2.set_admin(&admin2);
+    client2.setadmin(&admin2);
 
     // Use a fresh env with no mock — open_dispute needs admin auth, must fail
     let env3 = Env::default();
     let contract_id3 = env3.register_contract(None, ProgramEscrowContract);
     let client3 = ProgramEscrowContractClient::new(&env3, &contract_id3);
-    // Without set_admin and without mock_all_auths, require_admin panics:
+    // Without setadmin and without mock_all_auths, requireadmin panics:
     let result = client3.try_open_dispute(&String::from_str(&env3, "unauthorized"));
     // Should be an error (admin not set)
     assert!(result.is_err());
@@ -201,7 +202,7 @@ fn test_open_dispute_non_admin_rejected() {
 
 /// resolve_dispute requires admin auth — fails if admin not set.
 #[test]
-fn test_resolve_dispute_non_admin_rejected() {
+fn test_resolve_dispute_nonadmin_rejected() {
     let env = Env::default();
     let contract_id = env.register_contract(None, ProgramEscrowContract);
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
@@ -215,7 +216,7 @@ fn test_resolve_dispute_non_admin_rejected() {
 
 /// cancel_dispute requires admin auth — fails if admin not set.
 #[test]
-fn test_cancel_dispute_non_admin_rejected() {
+fn test_cancel_dispute_nonadmin_rejected() {
     let env = Env::default();
     let contract_id = env.register_contract(None, ProgramEscrowContract);
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
@@ -231,7 +232,7 @@ fn test_cancel_dispute_non_admin_rejected() {
 #[should_panic(expected = "No dispute to resolve")]
 fn test_resolve_when_no_dispute_panics() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 10_000);
+    let (client, admin, _cid) = setup(&env, 10_000);
     // No dispute opened — must panic
     client.resolve_dispute();
 }
@@ -242,7 +243,7 @@ fn test_resolve_when_no_dispute_panics() {
 #[should_panic(expected = "No dispute to cancel")]
 fn test_cancel_when_no_dispute_panics() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 10_000);
+    let (client, admin, _cid) = setup(&env, 10_000);
     client.cancel_dispute();
 }
 
@@ -252,7 +253,7 @@ fn test_cancel_when_no_dispute_panics() {
 #[should_panic(expected = "Dispute already open")]
 fn test_open_dispute_when_already_open_panics() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 50_000);
+    let (client, admin, _cid) = setup(&env, 50_000);
 
     let reason = String::from_str(&env, "First dispute");
     client.open_dispute(&reason);
@@ -270,7 +271,7 @@ fn test_open_dispute_when_already_open_panics() {
 fn test_dispute_blocks_trigger_releases() {
     let env = Env::default();
     env.ledger().set_timestamp(0);
-    let (client, _admin, _cid) = setup(&env, 100_000);
+    let (client, admin, _cid) = setup(&env, 100_000);
 
     // Create a schedule due in the future
     let recipient = Address::generate(&env);
@@ -292,7 +293,7 @@ fn test_dispute_blocks_trigger_releases() {
 #[test]
 fn test_cancel_dispute_allows_payout() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 80_000);
+    let (client, admin, _cid) = setup(&env, 80_000);
 
     let reason = String::from_str(&env, "Dispute under investigation");
     client.open_dispute(&reason);
@@ -355,13 +356,13 @@ fn test_dispute_lifecycle_full() {
 #[test]
 fn test_dispute_does_not_affect_lock_funds() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 50_000);
+    let (client, admin, _cid) = setup(&env, 50_000);
 
     let reason = String::from_str(&env, "Checking submission validity");
     client.open_dispute(&reason);
 
     // Lock additional funds — should succeed even during dispute
-    client.lock_program_funds(&25_000);
+    client.lock_program_funds(&admin, &25_000);
 
     let info = client.get_program_info();
     assert_eq!(info.total_funds, 75_000);
@@ -374,7 +375,7 @@ fn test_dispute_does_not_affect_lock_funds() {
 #[test]
 fn test_dispute_reason_stored_correctly() {
     let env = Env::default();
-    let (client, _admin, _cid) = setup(&env, 10_000);
+    let (client, admin, _cid) = setup(&env, 10_000);
 
     let expected_reason = String::from_str(
         &env,

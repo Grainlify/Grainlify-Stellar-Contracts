@@ -55,16 +55,16 @@ fn make_client(env: &Env) -> (ProgramEscrowContractClient<'static>, Address) {
 /// the token client and token contract id.
 fn fund_contract(
     env: &Env,
-    contract_id: &Address,
+    funder: &Address,
     amount: i128,
 ) -> (token::Client<'static>, Address) {
-    let token_admin = Address::generate(env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let tokenadmin = Address::generate(env);
+    let token_contract = env.register_stellar_asset_contract_v2(tokenadmin.clone());
     let token_id = token_contract.address();
     let token_client = token::Client::new(env, &token_id);
     let token_sac = token::StellarAssetClient::new(env, &token_id);
     if amount > 0 {
-        token_sac.mint(contract_id, &amount);
+        token_sac.mint(funder, &amount);
     }
     (token_client, token_id)
 }
@@ -82,12 +82,12 @@ fn setup_active_program(
 ) {
     env.mock_all_auths();
     let (client, contract_id) = make_client(env);
-    let (token_client, token_id) = fund_contract(env, &contract_id, amount);
     let admin = Address::generate(env);
+    let (token_client, token_id) = fund_contract(env, &admin, amount);
     let program_id = String::from_str(env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
     if amount > 0 {
-        client.lock_program_funds(&amount);
+    client.lock_program_funds(&admin, &amount);
     }
     (client, admin, contract_id, token_client)
 }
@@ -103,7 +103,8 @@ fn test_uninitialized_lock_funds_rejected() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _cid) = make_client(&env);
-    client.lock_program_funds(&1_000);
+    let admin = Address::generate(&env);
+    client.lock_program_funds(&admin, &1_000);
 }
 
 #[test]
@@ -234,8 +235,8 @@ fn test_initialized_to_active_via_lock_funds() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, contract_id) = make_client(&env);
-    let (_, token_id) = fund_contract(&env, &contract_id, 50_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 50_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
 
@@ -243,7 +244,7 @@ fn test_initialized_to_active_via_lock_funds() {
     assert_eq!(client.get_remaining_balance(), 0);
 
     // Transition: Initialized → Active
-    let data = client.lock_program_funds(&50_000);
+    let data = client.lock_program_funds(&admin, &50_000);
     assert_eq!(data.total_funds, 50_000);
     assert_eq!(data.remaining_balance, 50_000);
 
@@ -259,7 +260,7 @@ fn test_initialized_to_active_via_lock_funds() {
 #[test]
 fn test_active_single_payout_allowed() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 100_000);
     let recipient = Address::generate(&env);
 
     let data = client.single_payout(&recipient, &40_000);
@@ -271,7 +272,7 @@ fn test_active_single_payout_allowed() {
 #[test]
 fn test_active_batch_payout_allowed() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 100_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
 
@@ -290,15 +291,15 @@ fn test_active_top_up_lock_increases_balance() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, contract_id) = make_client(&env);
-    let (_, token_id) = fund_contract(&env, &contract_id, 200_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 200_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
 
-    client.lock_program_funds(&80_000);
+    client.lock_program_funds(&admin, &80_000);
     assert_eq!(client.get_remaining_balance(), 80_000);
 
-    client.lock_program_funds(&70_000);
+    client.lock_program_funds(&admin, &70_000);
     assert_eq!(client.get_remaining_balance(), 150_000);
 
     let info = client.get_program_info();
@@ -316,7 +317,7 @@ fn test_active_negative_lock_amount_rejected() {
     let admin = Address::generate(&env);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&-1);
+    client.lock_program_funds(&admin, &-1);
 }
 
 /// Payout exceeding balance must be rejected (Active state guard).
@@ -324,7 +325,7 @@ fn test_active_negative_lock_amount_rejected() {
 #[should_panic(expected = "Insufficient balance")]
 fn test_active_payout_exceeds_balance_rejected() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r = Address::generate(&env);
     client.single_payout(&r, &50_001); // 1 unit over balance
 }
@@ -334,7 +335,7 @@ fn test_active_payout_exceeds_balance_rejected() {
 #[should_panic(expected = "Insufficient balance")]
 fn test_active_batch_exceeds_balance_rejected() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     // 30_000 + 30_000 = 60_000 > 50_000
@@ -346,7 +347,7 @@ fn test_active_batch_exceeds_balance_rejected() {
 #[should_panic(expected = "Amount must be greater than zero")]
 fn test_active_zero_single_payout_rejected() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r = Address::generate(&env);
     client.single_payout(&r, &0);
 }
@@ -356,7 +357,7 @@ fn test_active_zero_single_payout_rejected() {
 #[should_panic(expected = "All amounts must be greater than zero")]
 fn test_active_zero_amount_in_batch_rejected() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     client.batch_payout(&vec![&env, r1, r2], &vec![&env, 100i128, 0i128]);
@@ -367,7 +368,7 @@ fn test_active_zero_amount_in_batch_rejected() {
 #[should_panic(expected = "Recipients and amounts vectors must have the same length")]
 fn test_active_batch_mismatched_lengths_rejected() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     client.batch_payout(&vec![&env, r1, r2], &vec![&env, 100i128]);
@@ -378,7 +379,7 @@ fn test_active_batch_mismatched_lengths_rejected() {
 #[should_panic(expected = "Cannot process empty batch")]
 fn test_active_empty_batch_rejected() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 50_000);
     client.batch_payout(&vec![&env], &vec![&env]);
 }
 
@@ -386,7 +387,7 @@ fn test_active_empty_batch_rejected() {
 #[test]
 fn test_active_payout_history_grows() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 100_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 100_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     let r3 = Address::generate(&env);
@@ -415,14 +416,14 @@ fn test_paused_lock_operation_blocked() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (_, token_id) = fund_contract(&env, &contract_id, 100_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 100_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
     client.initialize_contract(&admin);
     client.set_paused(&Some(true), &None, &None);
 
-    client.lock_program_funds(&10_000);
+    client.lock_program_funds(&admin, &10_000);
 }
 
 /// Pausing release prevents single_payout.
@@ -433,11 +434,11 @@ fn test_paused_single_payout_blocked() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (_, token_id) = fund_contract(&env, &contract_id, 100_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 100_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
     client.initialize_contract(&admin);
     client.set_paused(&None, &Some(true), &None);
 
@@ -453,11 +454,11 @@ fn test_paused_batch_payout_blocked() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (_, token_id) = fund_contract(&env, &contract_id, 100_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 100_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
     client.initialize_contract(&admin);
     client.set_paused(&None, &Some(true), &None);
 
@@ -472,11 +473,11 @@ fn test_paused_to_active_resume_via_unpause() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (token_client, token_id) = fund_contract(&env, &contract_id, 100_000);
     let admin = Address::generate(&env);
+    let (token_client, token_id) = fund_contract(&env, &admin, 100_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
     client.initialize_contract(&admin);
 
     // Transition: Active → Paused
@@ -501,11 +502,11 @@ fn test_paused_lock_does_not_block_release() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (token_client, token_id) = fund_contract(&env, &contract_id, 100_000);
     let admin = Address::generate(&env);
+    let (token_client, token_id) = fund_contract(&env, &admin, 100_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
     client.initialize_contract(&admin);
 
     // Only lock is paused; release must still succeed
@@ -527,11 +528,11 @@ fn test_paused_release_does_not_block_lock() {
 
     let (client, contract_id) = make_client(&env);
     // Mint enough for two lock operations
-    let (_, token_id) = fund_contract(&env, &contract_id, 200_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 200_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
     client.initialize_contract(&admin);
 
     // Only release is paused; lock must still succeed
@@ -539,7 +540,7 @@ fn test_paused_release_does_not_block_lock() {
     assert!(!client.get_pause_flags().lock_paused);
     assert!(client.get_pause_flags().release_paused);
 
-    let data = client.lock_program_funds(&50_000);
+    let data = client.lock_program_funds(&admin, &50_000);
     assert_eq!(data.total_funds, 150_000);
     assert_eq!(data.remaining_balance, 150_000);
 }
@@ -551,11 +552,11 @@ fn test_fully_paused_query_still_works() {
     env.mock_all_auths();
 
     let (client, contract_id) = make_client(&env);
-    let (_, token_id) = fund_contract(&env, &contract_id, 100_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 100_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
     client.initialize_contract(&admin);
     client.set_paused(&Some(true), &Some(true), &Some(true));
 
@@ -593,7 +594,7 @@ fn test_default_pause_flags_all_false() {
 #[test]
 fn test_drained_after_full_single_payout() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 50_000);
     let r = Address::generate(&env);
 
     let data = client.single_payout(&r, &50_000);
@@ -606,7 +607,7 @@ fn test_drained_after_full_single_payout() {
 #[test]
 fn test_drained_after_full_batch_payout() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 90_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 90_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     let r3 = Address::generate(&env);
@@ -626,7 +627,7 @@ fn test_drained_after_full_batch_payout() {
 #[should_panic(expected = "Insufficient balance")]
 fn test_drained_further_payout_rejected() {
     let env = Env::default();
-    let (client, _admin, _cid, _token) = setup_active_program(&env, 50_000);
+    let (client, admin, _cid, _token) = setup_active_program(&env, 50_000);
     let r = Address::generate(&env);
     client.single_payout(&r, &50_000); // drains to 0
     client.single_payout(&r, &1); // must panic
@@ -639,11 +640,11 @@ fn test_drained_to_active_via_top_up() {
     env.mock_all_auths();
     let (client, contract_id) = make_client(&env);
     // Mint enough for both initial lock and top-up
-    let (token_client, token_id) = fund_contract(&env, &contract_id, 200_000);
     let admin = Address::generate(&env);
+    let (token_client, token_id) = fund_contract(&env, &admin, 200_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
 
     // Drain
     let r = Address::generate(&env);
@@ -651,7 +652,7 @@ fn test_drained_to_active_via_top_up() {
     assert_eq!(client.get_remaining_balance(), 0);
 
     // Re-activate: Drained → Active
-    let data = client.lock_program_funds(&80_000);
+    let data = client.lock_program_funds(&admin, &80_000);
     assert_eq!(data.remaining_balance, 80_000);
     assert_eq!(data.total_funds, 180_000); // cumulative total
 
@@ -668,13 +669,13 @@ fn test_payout_history_preserved_across_states() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, contract_id) = make_client(&env);
-    let (_, token_id) = fund_contract(&env, &contract_id, 300_000);
     let admin = Address::generate(&env);
+    let (_, token_id) = fund_contract(&env, &admin, 300_000);
     let program_id = String::from_str(&env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
 
     // Active: first batch of payouts
-    client.lock_program_funds(&200_000);
+    client.lock_program_funds(&admin, &200_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     client.single_payout(&r1, &100_000);
@@ -686,7 +687,7 @@ fn test_payout_history_preserved_across_states() {
     assert_eq!(info.payout_history.len(), 2);
 
     // Re-activate and pay out more
-    client.lock_program_funds(&100_000);
+    client.lock_program_funds(&admin, &100_000);
     let r3 = Address::generate(&env);
     client.single_payout(&r3, &50_000);
 
@@ -706,7 +707,7 @@ fn test_payout_history_preserved_across_states() {
 #[test]
 fn test_schedule_before_timestamp_not_triggered() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 100_000);
     let recipient = Address::generate(&env);
 
     let now = env.ledger().timestamp();
@@ -723,7 +724,7 @@ fn test_schedule_before_timestamp_not_triggered() {
 #[test]
 fn test_schedule_triggered_at_exact_timestamp() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 100_000);
     let recipient = Address::generate(&env);
 
     let now = env.ledger().timestamp();
@@ -740,7 +741,7 @@ fn test_schedule_triggered_at_exact_timestamp() {
 #[test]
 fn test_schedule_not_released_twice() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 100_000);
     let recipient = Address::generate(&env);
 
     let now = env.ledger().timestamp();
@@ -760,7 +761,7 @@ fn test_schedule_not_released_twice() {
 #[test]
 fn test_multiple_schedules_same_timestamp_all_released() {
     let env = Env::default();
-    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 100_000);
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
     let r3 = Address::generate(&env);
@@ -792,8 +793,8 @@ fn test_complete_lifecycle_all_transitions() {
 
     let (client, contract_id) = make_client(&env);
     // Fund exactly 400_000 = 300_000 (initial lock) + 100_000 (top-up)
-    let (token_client, token_id) = fund_contract(&env, &contract_id, 400_000);
     let admin = Address::generate(&env);
+    let (token_client, token_id) = fund_contract(&env, &admin, 400_000);
     let program_id = String::from_str(&env, "hack-2026");
 
     // Uninitialized → Initialized
@@ -802,7 +803,7 @@ fn test_complete_lifecycle_all_transitions() {
     assert_eq!(data.remaining_balance, 0);
 
     // Initialized → Active
-    let data = client.lock_program_funds(&300_000);
+    let data = client.lock_program_funds(&admin, &300_000);
     assert_eq!(data.total_funds, 300_000);
     assert_eq!(data.remaining_balance, 300_000);
 
@@ -828,7 +829,7 @@ fn test_complete_lifecycle_all_transitions() {
     assert_eq!(client.get_remaining_balance(), 0);
 
     // Drained → Active (top-up)
-    let data = client.lock_program_funds(&100_000);
+    let data = client.lock_program_funds(&admin, &100_000);
     assert_eq!(data.remaining_balance, 100_000);
 
     // Active: final payout — drains again

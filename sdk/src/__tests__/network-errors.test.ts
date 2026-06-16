@@ -86,11 +86,11 @@ describe('SDK Network Error Handling', () => {
       };
 
       await expect(
-        client.lockProgramFunds(1000n, mockKeypair)
+        client.lockProgramFunds(mockKeypair.publicKey(), 1000n, mockKeypair)
       ).rejects.toThrow(NetworkError);
 
       try {
-        await client.lockProgramFunds(1000n, mockKeypair);
+        await client.lockProgramFunds(mockKeypair.publicKey(), 1000n, mockKeypair);
       } catch (error: any) {
         expect(error.statusCode).toBe(400);
       }

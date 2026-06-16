@@ -4,15 +4,15 @@ use super::*;
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 
-fn setup_with_admin(env: &Env) -> (ProgramEscrowContract, Address) {
+fn setup_withadmin(env: &Env) -> (ProgramEscrowContract, Address) {
     let contract = ProgramEscrowContract;
     let admin = Address::generate(env);
     contract.initialize_contract(env, admin.clone());
     (contract, admin)
 }
 
-fn setup_program_with_admin(env: &Env) -> (ProgramEscrowContract, Address, Address, String) {
-    let (contract, admin) = setup_with_admin(env);
+fn setup_program_withadmin(env: &Env) -> (ProgramEscrowContract, Address, Address, String) {
+    let (contract, admin) = setup_withadmin(env);
     let payout_key = Address::generate(env);
     let token = Address::generate(env);
     let program_id = String::from_str(env, "pause-test-prog");
@@ -25,7 +25,7 @@ fn setup_program_with_admin(env: &Env) -> (ProgramEscrowContract, Address, Addre
 #[test]
 fn test_default_pause_flags_are_all_false() {
     let env = Env::default();
-    let (contract, _admin) = setup_with_admin(&env);
+    let (contract, admin) = setup_withadmin(&env);
 
     let flags = contract.get_pause_flags(&env);
     assert_eq!(flags.lock_paused, false);
@@ -39,7 +39,7 @@ fn test_default_pause_flags_are_all_false() {
 fn test_set_paused_lock() {
     let env = Env::default();
     env.mock_all_auths();
-    let (contract, _admin) = setup_with_admin(&env);
+    let (contract, admin) = setup_withadmin(&env);
 
     contract.set_paused(&env, Some(true), None, None);
 
@@ -53,7 +53,7 @@ fn test_set_paused_lock() {
 fn test_unset_paused_lock() {
     let env = Env::default();
     env.mock_all_auths();
-    let (contract, _admin) = setup_with_admin(&env);
+    let (contract, admin) = setup_withadmin(&env);
 
     contract.set_paused(&env, Some(true), None, None);
     contract.set_paused(&env, Some(false), None, None);
@@ -68,7 +68,7 @@ fn test_unset_paused_lock() {
 fn test_set_paused_release() {
     let env = Env::default();
     env.mock_all_auths();
-    let (contract, _admin) = setup_with_admin(&env);
+    let (contract, admin) = setup_withadmin(&env);
 
     contract.set_paused(&env, None, Some(true), None);
 
@@ -84,7 +84,7 @@ fn test_set_paused_release() {
 fn test_mixed_pause_states() {
     let env = Env::default();
     env.mock_all_auths();
-    let (contract, _admin) = setup_with_admin(&env);
+    let (contract, admin) = setup_withadmin(&env);
 
     // Pause lock and release, leave refund unpaused
     contract.set_paused(&env, Some(true), Some(true), Some(false));
@@ -110,10 +110,10 @@ fn test_mixed_pause_states() {
 fn test_lock_program_funds_paused() {
     let env = Env::default();
     env.mock_all_auths();
-    let (contract, _admin, _payout_key, program_id) = setup_program_with_admin(&env);
+    let (contract, admin, _payout_key, program_id) = setup_program_withadmin(&env);
 
     contract.set_paused(&env, Some(true), None, None);
-    contract.lock_program_funds(&env, program_id, 1000);
+    contract.lock_program_funds(&env, program_id, &admin, 1000);
 }
 
 // --- single_payout enforcement ---
@@ -123,7 +123,7 @@ fn test_lock_program_funds_paused() {
 fn test_single_payout_paused() {
     let env = Env::default();
     env.mock_all_auths();
-    let (contract, _admin, _payout_key, program_id) = setup_program_with_admin(&env);
+    let (contract, admin, _payout_key, program_id) = setup_program_withadmin(&env);
     let recipient = Address::generate(&env);
 
     contract.set_paused(&env, None, Some(true), None);
@@ -137,7 +137,7 @@ fn test_single_payout_paused() {
 fn test_batch_payout_paused() {
     let env = Env::default();
     env.mock_all_auths();
-    let (contract, _admin, _payout_key, program_id) = setup_program_with_admin(&env);
+    let (contract, admin, _payout_key, program_id) = setup_program_withadmin(&env);
     let recipient = Address::generate(&env);
 
     let recipients = soroban_sdk::vec![&env, recipient];

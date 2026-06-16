@@ -41,7 +41,7 @@ Initialize a new program escrow.
 
 **Events:** `ProgramInitialized`
 
-#### `lock_program_funds(amount)`
+#### `lock_program_funds(from, amount)`
 
 Lock funds into the escrow. Updates both `total_funds` and `remaining_balance`.
 
@@ -233,7 +233,7 @@ let program_data = contract.init_program(
 );
 
 // Lock funds (50,000 XLM in stroops)
-contract.lock_program_funds(&env, 50_000_000_000);
+contract.lock_program_funds(&env, &admin, &50_000_000_000);
 
 // Batch payout to winners
 let recipients = vec![&env, winner1, winner2, winner3];
