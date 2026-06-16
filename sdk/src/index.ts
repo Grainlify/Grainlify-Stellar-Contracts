@@ -6,6 +6,18 @@ export type {
   ProgramReleaseSchedule 
 } from './program-escrow-client';
 
+export { BountyEscrowClient } from './bounty-escrow-client';
+export type {
+  BountyEscrowConfig,
+  LockFundsItem,
+  ReleaseFundsItem,
+  RefundRecord,
+  ClaimRecord,
+  Escrow,
+  FeeConfig,
+  PauseFlags
+} from './bounty-escrow-client';
+
 export { 
   SDKError,
   ContractError,

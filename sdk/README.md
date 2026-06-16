@@ -18,6 +18,33 @@ npm install @grainlify/contracts-sdk
 
 ## Usage
 
+### Bounty Escrow
+
+See `sdk/examples/bounty-lock-release.ts` for a full walkthrough of the bounty lifecycle.
+
+```typescript
+import { BountyEscrowClient } from '@grainlify/contracts-sdk';
+import { Keypair } from '@stellar/stellar-sdk';
+
+const client = new BountyEscrowClient({
+  contractId: 'YOUR_CONTRACT_ID',
+  rpcUrl: 'https://soroban-testnet.stellar.org',
+  networkPassphrase: 'Test SDF Network ; September 2015'
+});
+
+const sourceKeypair = Keypair.fromSecret('YOUR_SECRET_KEY');
+
+await client.lockFunds(
+  'GDEPOSITOR...',
+  1n, // Bounty ID
+  10000000n, // Amount
+  Math.floor(Date.now() / 1000) + 86400, // Deadline
+  sourceKeypair
+);
+```
+
+### Program Escrow
+
 ### Initialize the Client
 
 ```typescript
