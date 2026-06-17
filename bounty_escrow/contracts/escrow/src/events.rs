@@ -61,6 +61,24 @@ pub fn emit_funds_refunded(env: &Env, event: FundsRefunded) {
     env.events().publish(topics, event.clone());
 }
 
+/// Emitted when a sweep observes an expired bounty immediately before
+/// refunding the remaining locked funds to the depositor.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BountyExpired {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub depositor: Address,
+    pub amount: i128,
+    pub deadline: u64,
+    pub expired_at: u64,
+}
+
+pub fn emit_bounty_expired(env: &Env, event: BountyExpired) {
+    let topics = (symbol_short!("b_exp"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FeeOperationType {

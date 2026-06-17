@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use crate::{BountyEscrowContract, BountyEscrowContractClient, EscrowStatus};
+use crate::{BountyEscrowContract, BountyEscrowContractClient, Error, EscrowStatus, LockFundsItem};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, Address, Env,
+    testutils::{Address as _, Events, Ledger},
+    token, vec, Address, Env, Map, Symbol, TryFromVal, Val, Vec,
 };
 
 fn create_token_contract<'a>(
@@ -59,6 +59,36 @@ impl<'a> TestSetup<'a> {
             escrow,
         }
     }
+}
+
+fn try_sweep_direct(setup: &TestSetup<'_>, bounty_ids: Vec<u64>) -> Result<u32, Error> {
+    setup.env.as_contract(&setup.escrow.address, || {
+        BountyEscrowContract::sweep_expired_refunds(setup.env.clone(), bounty_ids)
+    })
+}
+
+fn saw_bounty_expired_event(env: &Env, bounty_id: u64, expired_at: u64) -> bool {
+    let events = env.events().all();
+    for (_contract, _topics, data) in events.iter() {
+        if let Ok(data_map) = Map::<Symbol, Val>::try_from_val(env, &data) {
+            let version_val = data_map.get(Symbol::new(env, "version"));
+            let bounty_id_val = data_map.get(Symbol::new(env, "bounty_id"));
+            let expired_at_val = data_map.get(Symbol::new(env, "expired_at"));
+
+            if let (Some(version_val), Some(bounty_id_val), Some(expired_at_val)) =
+                (version_val, bounty_id_val, expired_at_val)
+            {
+                let version = u32::try_from_val(env, &version_val).unwrap_or(0);
+                let event_bounty_id = u64::try_from_val(env, &bounty_id_val).unwrap_or(0);
+                let event_expired_at = u64::try_from_val(env, &expired_at_val).unwrap_or(0);
+
+                if version == 2 && event_bounty_id == bounty_id && event_expired_at == expired_at {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[test]
@@ -177,6 +207,177 @@ fn test_missed_claim_window_requires_admin_cancel_then_refund() {
     assert_eq!(final_escrow.status, EscrowStatus::Refunded);
     assert_eq!(setup.token.balance(&setup.depositor), 10_000_000);
     assert_eq!(setup.token.balance(&setup.escrow.address), 0);
+}
+
+#[test]
+fn test_sweep_expired_refunds_batch_and_emits_expiry_event() {
+    let setup = TestSetup::new();
+    let now = setup.env.ledger().timestamp();
+    let first_bounty = 21_u64;
+    let second_bounty = 22_u64;
+    let first_amount = 1_000_i128;
+    let second_amount = 2_000_i128;
+    let first_deadline = now + 100;
+    let second_deadline = now + 200;
+
+    setup.escrow.lock_funds(
+        &setup.depositor,
+        &first_bounty,
+        &first_amount,
+        &first_deadline,
+    );
+    setup.escrow.lock_funds(
+        &setup.depositor,
+        &second_bounty,
+        &second_amount,
+        &second_deadline,
+    );
+
+    let sweep_at = second_deadline + 1;
+    setup.env.ledger().set_timestamp(sweep_at);
+
+    let ids = vec![&setup.env, first_bounty, second_bounty];
+    let swept = setup.escrow.sweep_expired_refunds(&ids);
+
+    assert_eq!(swept, 2);
+    assert_eq!(
+        setup.escrow.get_escrow_info(&first_bounty).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(
+        setup.escrow.get_escrow_info(&second_bounty).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(setup.token.balance(&setup.depositor), 10_000_000);
+    assert_eq!(setup.token.balance(&setup.escrow.address), 0);
+    assert!(saw_bounty_expired_event(&setup.env, first_bounty, sweep_at));
+    assert!(saw_bounty_expired_event(
+        &setup.env,
+        second_bounty,
+        sweep_at
+    ));
+}
+
+#[test]
+fn test_sweep_expired_refunds_at_exact_deadline_succeeds() {
+    let setup = TestSetup::new();
+    let bounty_id = 23_u64;
+    let amount = 1_500_i128;
+    let deadline = setup.env.ledger().timestamp() + 100;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    setup.env.ledger().set_timestamp(deadline);
+
+    let ids = vec![&setup.env, bounty_id];
+    assert_eq!(setup.escrow.sweep_expired_refunds(&ids), 1);
+    assert_eq!(
+        setup.escrow.get_escrow_info(&bounty_id).status,
+        EscrowStatus::Refunded
+    );
+}
+
+#[test]
+fn test_sweep_expired_refunds_mixed_active_rejects_atomically() {
+    let setup = TestSetup::new();
+    let now = setup.env.ledger().timestamp();
+    let expired_bounty = 24_u64;
+    let active_bounty = 25_u64;
+    let amount = 1_000_i128;
+    let expired_deadline = now + 100;
+    let active_deadline = now + 1_000;
+
+    setup.escrow.lock_funds(
+        &setup.depositor,
+        &expired_bounty,
+        &amount,
+        &expired_deadline,
+    );
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &active_bounty, &amount, &active_deadline);
+
+    setup.env.ledger().set_timestamp(expired_deadline + 1);
+    let ids = vec![&setup.env, expired_bounty, active_bounty];
+    let result = try_sweep_direct(&setup, ids);
+
+    assert_eq!(result, Err(Error::DeadlineNotPassed));
+    assert_eq!(
+        setup.escrow.get_escrow_info(&expired_bounty).status,
+        EscrowStatus::Locked
+    );
+    assert_eq!(
+        setup.escrow.get_escrow_info(&active_bounty).status,
+        EscrowStatus::Locked
+    );
+    assert_eq!(setup.token.balance(&setup.escrow.address), amount * 2);
+    assert_eq!(
+        setup.token.balance(&setup.depositor),
+        10_000_000 - amount * 2
+    );
+}
+
+#[test]
+fn test_sweep_expired_refunds_rejects_over_max_batch_size() {
+    let setup = TestSetup::new();
+    let mut ids = vec![&setup.env];
+    for bounty_id in 0_u64..21_u64 {
+        ids.push_back(bounty_id);
+    }
+
+    let result = try_sweep_direct(&setup, ids);
+    assert_eq!(result, Err(Error::InvalidBatchSize));
+}
+
+#[test]
+fn test_sweep_expired_refunds_max_batch_boundary_succeeds() {
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 100;
+    let mut items = vec![&setup.env];
+    let mut ids = vec![&setup.env];
+
+    for offset in 0_u64..20_u64 {
+        let bounty_id = 1_000_u64 + offset;
+        items.push_back(LockFundsItem {
+            bounty_id,
+            depositor: setup.depositor.clone(),
+            amount: 10,
+            deadline,
+        });
+        ids.push_back(bounty_id);
+    }
+
+    setup.escrow.batch_lock_funds(&items);
+    setup.env.ledger().set_timestamp(deadline + 1);
+
+    assert_eq!(setup.escrow.sweep_expired_refunds(&ids), 20);
+    assert_eq!(setup.token.balance(&setup.depositor), 10_000_000);
+    assert_eq!(setup.token.balance(&setup.escrow.address), 0);
+}
+
+#[test]
+fn test_sweep_expired_refunds_respects_refund_pause() {
+    let setup = TestSetup::new();
+    let bounty_id = 26_u64;
+    let amount = 1_000_i128;
+    let deadline = setup.env.ledger().timestamp() + 100;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    setup.escrow.set_paused(&None, &None, &Some(true));
+    setup.env.ledger().set_timestamp(deadline + 1);
+
+    let ids = vec![&setup.env, bounty_id];
+    let result = try_sweep_direct(&setup, ids);
+
+    assert_eq!(result, Err(Error::FundsPaused));
+    assert_eq!(
+        setup.escrow.get_escrow_info(&bounty_id).status,
+        EscrowStatus::Locked
+    );
+    assert_eq!(setup.token.balance(&setup.escrow.address), amount);
 }
 
 // Resolution order must be explicit: can't skip the cancel step
