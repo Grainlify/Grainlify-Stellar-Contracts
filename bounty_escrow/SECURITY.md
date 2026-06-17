@@ -7,7 +7,8 @@ This document outlines the security measures implemented in the Bounty Escrow co
 
 ### 1. Reentrancy Protection
 - **Mechanism**: A boolean flag `ReentrancyGuard` is stored in the contract instance storage.
-- **Coverage (Bounty Escrow)**: All state-modifying public functions (`lock_funds`, `release_funds`, `refund`, `batch_lock_funds`, `batch_release_funds`) are protected.
+- **Acquisition Timing**: To prevent the contract from being bricked, the guard is acquired *after* non-mutating validation checks (e.g., existence and status checks). This ensures that early `Err` returns (which commit state in Soroban) do not leak the guard into storage.
+- **Coverage (Bounty Escrow)**: All mutating entry points are protected, including `release_funds`, `partial_release`, `claim`, and `batch_release_funds`.
 - **Coverage (Program Escrow)**: Core state-modifying functions (`lock_program_funds`, `batch_payout`, `single_payout`) are reviewed for reentrancy risks and follow checks-effects-interactions with no internal callbacks.
 - **Behavior**: If reentrancy is detected, the contract panics, reverting the transaction.
 
