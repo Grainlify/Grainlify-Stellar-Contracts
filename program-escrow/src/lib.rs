@@ -1477,7 +1477,7 @@ impl ProgramEscrowContract {
         monitoring::track_operation(
             &env,
             symbol_short!("batchpay"),
-            program_data.authorized_payout_key,
+            program_data.authorized_payout_key.clone(),
             true,
         );
         monitoring::emit_performance(

@@ -1,6 +1,4 @@
-use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, Symbol,
-};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Map, Symbol};
 
 // --- Enums y Structs permanecen igual ---
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,11 +92,12 @@ pub enum Error {
     ProposalExpired = 14,
 }
 
-// --- CLAVE: Añadir macro #[contract] ---
-#[contract]
+// Keep the standalone governance client for native tests, but avoid exporting
+// duplicate contract symbols from the grainlify-core wasm artifact.
+#[cfg_attr(not(target_arch = "wasm32"), soroban_sdk::contract)]
 pub struct GovernanceContract;
 
-#[contractimpl]
+#[cfg_attr(not(target_arch = "wasm32"), soroban_sdk::contractimpl)]
 impl GovernanceContract {
     pub fn init_governance(
         env: Env,
