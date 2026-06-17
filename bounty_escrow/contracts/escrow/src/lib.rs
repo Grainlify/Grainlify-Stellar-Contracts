@@ -2965,6 +2965,8 @@ mod test_lifecycle;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
+mod proptest_invariants;
+#[cfg(test)]
 mod test_query_filters;
 #[cfg(test)]
 mod test_governance_integration;
