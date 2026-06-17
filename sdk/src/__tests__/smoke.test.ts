@@ -54,7 +54,7 @@ describe('SDK Example Smoke Tests', () => {
         const result = await lockFundsExample(client, mockKeypair);
         expect(result).toBeDefined();
         //@ts-ignore - accessing private field
-        expect(client.invokeContract).toHaveBeenCalledWith('lock_program_funds', [10000000n], mockKeypair);
+        expect(client.invokeContract).toHaveBeenCalledWith('lock_program_funds', [mockKeypair.publicKey(), 10000000n], mockKeypair);
     });
 
     it('should run release-funds example successfully', async () => {

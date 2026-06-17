@@ -19,11 +19,14 @@ export interface ReleaseFundsItem {
   contributor: string;
 }
 
+export type EscrowStatus = 'Locked' | 'Released' | 'Refunded' | 'PartiallyRefunded';
+export type RefundMode = 'Full' | 'Partial';
+
 export interface RefundRecord {
   amount: bigint;
   recipient: string;
   timestamp: number;
-  mode: string; // "Full" | "Partial"
+  mode: RefundMode;
 }
 
 export interface ClaimRecord {
@@ -38,9 +41,50 @@ export interface Escrow {
   depositor: string;
   amount: bigint;
   remaining_amount: bigint;
-  status: string; // "Locked" | "Released" | "Refunded" | "PartiallyRefunded"
+  status: EscrowStatus;
   deadline: number;
   refund_history: RefundRecord[];
+}
+
+export interface EscrowWithId {
+  bounty_id: bigint;
+  escrow: Escrow;
+}
+
+export interface EscrowQueryFilter {
+  has_status_filter: boolean;
+  status: EscrowStatus;
+  has_depositor_filter: boolean;
+  depositor: string;
+  min_amount: bigint;
+  max_amount: bigint;
+  min_deadline: number;
+  max_deadline: number;
+}
+
+export interface AggregateStats {
+  total_locked: bigint;
+  total_released: bigint;
+  total_refunded: bigint;
+  count_locked: number;
+  count_released: number;
+  count_refunded: number;
+}
+
+export interface RefundApproval {
+  bounty_id: bigint;
+  amount: bigint;
+  recipient: string;
+  mode: RefundMode;
+  approved_by: string;
+  approved_at: number;
+}
+
+export interface RefundEligibility {
+  can_refund: boolean;
+  deadline_passed: boolean;
+  remaining_amount: bigint;
+  approval?: RefundApproval;
 }
 
 export interface FeeConfig {
@@ -166,15 +210,17 @@ export class BountyEscrowClient {
     bountyId: bigint,
     amount: bigint,
     recipient: string,
+    mode: RefundMode,
     sourceKeypair: Keypair
   ): Promise<void> {
     this.validateAddress(recipient, 'recipient');
     if (amount <= 0n) {
       throw new ValidationError('Amount must be greater than zero', 'amount');
     }
+    this.validateRefundMode(mode);
 
     try {
-      await this.invokeContract('approve_refund', [bountyId, amount, recipient], sourceKeypair);
+      await this.invokeContract('approve_refund', [bountyId, amount, recipient, mode], sourceKeypair);
     } catch (error) {
       throw this.handleError(error);
     }
@@ -212,6 +258,24 @@ export class BountyEscrowClient {
   }
 
   /**
+   * Set the global claim window in seconds. Admin-only on chain.
+   */
+  async setClaimWindow(
+    claimWindow: number,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    if (!Number.isInteger(claimWindow) || claimWindow < 0) {
+      throw new ValidationError('Claim window must be a non-negative integer', 'claimWindow');
+    }
+
+    try {
+      await this.invokeContract('set_claim_window', [claimWindow], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
    * Execute a claim for a bounty
    */
   async claim(
@@ -220,6 +284,20 @@ export class BountyEscrowClient {
   ): Promise<void> {
     try {
       await this.invokeContract('claim', [bountyId], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Cancel a pending claim. Admin-only on chain.
+   */
+  async cancelPendingClaim(
+    bountyId: bigint,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    try {
+      await this.invokeContract('cancel_pending_claim', [bountyId], sourceKeypair);
     } catch (error) {
       throw this.handleError(error);
     }
@@ -287,12 +365,227 @@ export class BountyEscrowClient {
   }
 
   /**
+   * Get the pending claim for a bounty.
+   */
+  async getPendingClaim(bountyId: bigint): Promise<ClaimRecord> {
+    try {
+      const result = await this.invokeContract('get_pending_claim', [bountyId]);
+      return result as ClaimRecord;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
    * Get the current contract balance
    */
   async getBalance(): Promise<bigint> {
     try {
       const result = await this.invokeContract('get_balance', []);
       return BigInt(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Query escrows by status.
+   */
+  async queryEscrowsByStatus(
+    status: EscrowStatus,
+    offset = 0,
+    limit = 50
+  ): Promise<EscrowWithId[]> {
+    this.validatePagination(offset, limit);
+
+    try {
+      const result = await this.invokeContract('query_escrows_by_status', [status, offset, limit]);
+      return result as EscrowWithId[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Query escrows by amount range.
+   */
+  async queryEscrowsByAmount(
+    minAmount: bigint,
+    maxAmount: bigint,
+    offset = 0,
+    limit = 50
+  ): Promise<EscrowWithId[]> {
+    if (minAmount < 0n || maxAmount < minAmount) {
+      throw new ValidationError('Amount range is invalid', 'amount');
+    }
+    this.validatePagination(offset, limit);
+
+    try {
+      const result = await this.invokeContract('query_escrows_by_amount', [minAmount, maxAmount, offset, limit]);
+      return result as EscrowWithId[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Query escrows by deadline range.
+   */
+  async queryEscrowsByDeadline(
+    minDeadline: number,
+    maxDeadline: number,
+    offset = 0,
+    limit = 50
+  ): Promise<EscrowWithId[]> {
+    if (!Number.isInteger(minDeadline) || !Number.isInteger(maxDeadline) || minDeadline < 0 || maxDeadline < minDeadline) {
+      throw new ValidationError('Deadline range is invalid', 'deadline');
+    }
+    this.validatePagination(offset, limit);
+
+    try {
+      const result = await this.invokeContract('query_escrows_by_deadline', [minDeadline, maxDeadline, offset, limit]);
+      return result as EscrowWithId[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Query escrows by depositor.
+   */
+  async queryEscrowsByDepositor(
+    depositor: string,
+    offset = 0,
+    limit = 50
+  ): Promise<EscrowWithId[]> {
+    this.validateAddress(depositor, 'depositor');
+    this.validatePagination(offset, limit);
+
+    try {
+      const result = await this.invokeContract('query_escrows_by_depositor', [depositor, offset, limit]);
+      return result as EscrowWithId[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Query escrows with the composite on-chain filter.
+   */
+  async queryEscrows(
+    filter: EscrowQueryFilter,
+    offset = 0,
+    limit = 50
+  ): Promise<EscrowWithId[]> {
+    if (filter.has_depositor_filter) {
+      this.validateAddress(filter.depositor, 'filter.depositor');
+    }
+    if (filter.min_amount < 0n || filter.max_amount < filter.min_amount) {
+      throw new ValidationError('Filter amount range is invalid', 'filter.amount');
+    }
+    if (filter.min_deadline < 0 || filter.max_deadline < filter.min_deadline) {
+      throw new ValidationError('Filter deadline range is invalid', 'filter.deadline');
+    }
+    this.validatePagination(offset, limit);
+
+    try {
+      const result = await this.invokeContract('query_escrows', [filter, offset, limit]);
+      return result as EscrowWithId[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get aggregate escrow statistics.
+   */
+  async getAggregateStats(): Promise<AggregateStats> {
+    try {
+      const result = await this.invokeContract('get_aggregate_stats', []);
+      return result as AggregateStats;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the total number of indexed escrows.
+   */
+  async getEscrowCount(): Promise<number> {
+    try {
+      const result = await this.invokeContract('get_escrow_count', []);
+      return Number(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get escrow IDs matching a status filter.
+   */
+  async getEscrowIdsByStatus(
+    status: EscrowStatus,
+    offset = 0,
+    limit = 50
+  ): Promise<bigint[]> {
+    this.validatePagination(offset, limit);
+
+    try {
+      const result = await this.invokeContract('get_escrow_ids_by_status', [status, offset, limit]);
+      return result as bigint[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get refund history for a bounty.
+   */
+  async getRefundHistory(bountyId: bigint): Promise<RefundRecord[]> {
+    try {
+      const result = await this.invokeContract('get_refund_history', [bountyId]);
+      return result as RefundRecord[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get refund eligibility and optional approval details for a bounty.
+   */
+  async getRefundEligibility(bountyId: bigint): Promise<RefundEligibility> {
+    try {
+      const result = await this.invokeContract('get_refund_eligibility', [bountyId]);
+      if (Array.isArray(result)) {
+        return {
+          can_refund: Boolean(result[0]),
+          deadline_passed: Boolean(result[1]),
+          remaining_amount: BigInt(result[2]),
+          approval: result[3] ?? undefined,
+        };
+      }
+      return result as RefundEligibility;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Query locked or partially refunded bounties whose deadline is at or before maxDeadline.
+   */
+  async queryExpiringBounties(
+    maxDeadline: number,
+    offset = 0,
+    limit = 50
+  ): Promise<bigint[]> {
+    if (!Number.isInteger(maxDeadline) || maxDeadline < 0) {
+      throw new ValidationError('Max deadline must be a non-negative integer', 'maxDeadline');
+    }
+    this.validatePagination(offset, limit);
+
+    try {
+      const result = await this.invokeContract('query_expiring_bounties', [maxDeadline, offset, limit]);
+      return result as bigint[];
     } catch (error) {
       throw this.handleError(error);
     }
@@ -329,6 +622,21 @@ export class BountyEscrowClient {
     // Basic Stellar address validation (starts with G and is 56 chars)
     if (!address.match(/^G[A-Z0-9]{55}$/)) {
       throw new ValidationError(`${fieldName} is not a valid Stellar address`, fieldName);
+    }
+  }
+
+  private validateRefundMode(mode: RefundMode): void {
+    if (mode !== 'Full' && mode !== 'Partial') {
+      throw new ValidationError('Refund mode must be Full or Partial', 'mode');
+    }
+  }
+
+  private validatePagination(offset: number, limit: number): void {
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new ValidationError('Offset must be a non-negative integer', 'offset');
+    }
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new ValidationError('Limit must be a positive integer', 'limit');
     }
   }
 

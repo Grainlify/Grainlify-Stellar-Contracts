@@ -11,9 +11,16 @@ export type {
   BountyEscrowConfig,
   LockFundsItem,
   ReleaseFundsItem,
+  EscrowStatus,
+  RefundMode,
   RefundRecord,
   ClaimRecord,
   Escrow,
+  EscrowWithId,
+  EscrowQueryFilter,
+  AggregateStats,
+  RefundApproval,
+  RefundEligibility,
   FeeConfig,
   PauseFlags
 } from './bounty-escrow-client';

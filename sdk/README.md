@@ -14,7 +14,7 @@ npm install @grainlify/contracts-sdk
 - Comprehensive error handling with typed errors
 - Network error detection and reporting
 - Input validation
-- Support for all ProgramEscrow contract functions
+- Support for ProgramEscrow and BountyEscrow lifecycle, claim, refund, batch, and query functions
 
 ## Usage
 
@@ -41,6 +41,28 @@ await client.lockFunds(
   Math.floor(Date.now() / 1000) + 86400, // Deadline
   sourceKeypair
 );
+```
+
+The bounty client wraps the core contract lifecycle:
+
+- `lockFunds`, `releaseFunds`, `partialRelease`, `refund`
+- `approveRefund`, `setClaimWindow`, `authorizeClaim`, `claim`, `cancelPendingClaim`
+- `batchLockFunds`, `batchReleaseFunds`
+- `getEscrowInfo`, `getPendingClaim`, `getRefundHistory`, `getRefundEligibility`
+- `queryEscrowsByStatus`, `queryEscrowsByAmount`, `queryEscrowsByDeadline`, `queryEscrowsByDepositor`, `queryEscrows`, `queryExpiringBounties`
+- `getAggregateStats`, `getEscrowCount`, `getEscrowIdsByStatus`, `getFeeConfig`, `getPauseFlags`
+
+State-changing methods require a signing `Keypair`; read/query methods do not.
+
+```typescript
+await client.setClaimWindow(3600, sourceKeypair);
+await client.authorizeClaim(1n, 'GRECIPIENT...', sourceKeypair);
+const claim = await client.getPendingClaim(1n);
+const recipientKeypair = Keypair.fromSecret('RECIPIENT_SECRET_KEY');
+await client.claim(claim.bounty_id, recipientKeypair);
+
+await client.approveRefund(2n, 5000000n, 'GDEPOSITOR...', 'Partial', sourceKeypair);
+const eligibility = await client.getRefundEligibility(2n);
 ```
 
 ### Program Escrow
@@ -213,6 +235,9 @@ try {
 - `EMPTY_BATCH` - Cannot process empty batch
 - `LENGTH_MISMATCH` - Recipients and amounts arrays must match
 - `OVERFLOW` - Payout amount overflow
+- `BOUNTY_AMOUNT_BELOW_MINIMUM` - Bounty amount is below the configured policy minimum
+- `BOUNTY_AMOUNT_ABOVE_MAXIMUM` - Bounty amount is above the configured policy maximum
+- `BOUNTY_CIRCUIT_BREAKER_OPEN` - Bounty escrow circuit breaker is open
 
 ## Testing
 

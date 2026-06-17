@@ -84,6 +84,9 @@ Source: `contracts/bounty_escrow/contracts/escrow/src/lib.rs`
 | 16 | `BOUNTY_INSUFFICIENT_FUNDS` | InsufficientFunds | Insufficient funds in the escrow for this operation |
 | 17 | `BOUNTY_REFUND_NOT_APPROVED` | RefundNotApproved | Refund has not been approved by an admin |
 | 18 | `BOUNTY_FUNDS_PAUSED` | FundsPaused | Bounty fund operations are currently paused |
+| 19 | `BOUNTY_AMOUNT_BELOW_MINIMUM` | AmountBelowMinimum | Bounty amount is below the configured minimum |
+| 20 | `BOUNTY_AMOUNT_ABOVE_MAXIMUM` | AmountAboveMaximum | Bounty amount is above the configured maximum |
+| 21 | `BOUNTY_CIRCUIT_BREAKER_OPEN` | CircuitBreakerOpen | Bounty escrow circuit breaker is open |
 
 ### Governance Contract
 
