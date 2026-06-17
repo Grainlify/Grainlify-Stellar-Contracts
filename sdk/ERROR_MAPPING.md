@@ -59,6 +59,7 @@ Invalid input         → ValidationError → Application
 | `EMPTY_BATCH` | "empty batch" | Cannot process empty batch |
 | `LENGTH_MISMATCH` | "same length" | Recipients and amounts vectors must have the same length |
 | `OVERFLOW` | "overflow" | Payout amount overflow |
+| `GOVERNANCE_VERSION_TOO_LOW` | code 4, GovernanceVersionTooLow, "Governance version requirement not met" | Linked governance contract version is below the required minimum |
 
 ### Bounty-Escrow Contract
 
@@ -84,6 +85,7 @@ Source: `contracts/bounty_escrow/contracts/escrow/src/lib.rs`
 | 16 | `BOUNTY_INSUFFICIENT_FUNDS` | InsufficientFunds | Insufficient funds in the escrow for this operation |
 | 17 | `BOUNTY_REFUND_NOT_APPROVED` | RefundNotApproved | Refund has not been approved by an admin |
 | 18 | `BOUNTY_FUNDS_PAUSED` | FundsPaused | Bounty fund operations are currently paused |
+| 23 | `BOUNTY_GOVERNANCE_VERSION_TOO_LOW` | GovernanceVersionTooLow | Linked governance contract version is below the bounty escrow minimum |
 
 ### Governance Contract
 

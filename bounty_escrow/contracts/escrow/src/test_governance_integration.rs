@@ -1,10 +1,7 @@
 #![cfg(test)]
 
-use crate::{BountyEscrowContract, BountyEscrowContractClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, Env,
-};
+use crate::{BountyEscrowContract, BountyEscrowContractClient, Error};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 // Mock governance contract for testing
 mod mock_governance {
@@ -88,7 +85,6 @@ fn test_governance_version_check_with_mock() {
 }
 
 #[test]
-#[should_panic(expected = "Governance version requirement not met")]
 fn test_governance_version_check_fails_when_version_too_low() {
     let env = Env::default();
     env.mock_all_auths();
@@ -108,8 +104,30 @@ fn test_governance_version_check_fails_when_version_too_low() {
     let _ = client.set_governance_contract(&gov_contract_id);
     let _ = client.set_min_governance_version(&3);
 
-    // This should panic because governance version (2) < required version (3)
-    let _ = client.set_paused(&Some(true), &None, &None);
+    // This should return a typed error because governance version (2) < required version (3)
+    let result = client.try_set_paused(&Some(true), &None, &None);
+    assert_eq!(result, Err(Ok(Error::GovernanceVersionTooLow)));
+}
+
+#[test]
+fn test_governance_version_too_low_blocks_fee_config_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let _ = client.init(&admin, &token);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let _ = client.set_governance_contract(&gov_contract_id);
+    let _ = client.set_min_governance_version(&3);
+
+    let result = client.try_update_fee_config(&Some(100), &None, &None, &None);
+    assert_eq!(result, Err(Ok(Error::GovernanceVersionTooLow)));
 }
 
 #[test]

@@ -387,6 +387,8 @@ pub enum Error {
     AmountAboveMaximum = 20,
     /// Returned when circuit breaker is open and operations are paused
     CircuitBreakerOpen = 21,
+    /// Returned when the linked governance contract version is below the configured minimum
+    GovernanceVersionTooLow = 23,
 }
 
 #[contracttype]
@@ -664,7 +666,7 @@ impl BountyEscrowContract {
         admin.require_auth();
 
         // Check governance requirements
-        Self::check_governance_requirements(&env);
+        Self::check_governance_requirements(&env)?;
 
         let mut fee_config = Self::get_fee_config_internal(&env);
 
@@ -723,7 +725,7 @@ impl BountyEscrowContract {
         admin.require_auth();
 
         // Check governance requirements
-        Self::check_governance_requirements(&env);
+        Self::check_governance_requirements(&env)?;
 
         let mut flags = Self::get_pause_flags(&env);
 
@@ -2218,10 +2220,11 @@ impl BountyEscrowContract {
     }
 
     /// Check if governance requirements are met before admin operations
-    fn check_governance_requirements(env: &Env) {
+    fn check_governance_requirements(env: &Env) -> Result<(), Error> {
         if !governance_integration::check_governance_version(env) {
-            panic!("Governance version requirement not met");
+            return Err(Error::GovernanceVersionTooLow);
         }
+        Ok(())
     }
 
     /// Gets refund eligibility information for a bounty.
