@@ -73,8 +73,29 @@ Without one of these controls, a voter may temporarily acquire tokens, vote, and
 - **Double-Voting Prevention:** Each address can vote only once per proposal.
 - **Configured Token Reads:** Token-weighted power and stake checks use only `GovernanceConfig::governance_token`.
 - **Zero-Power Rejection:** Accounts with no scheme-valid voting power cannot vote.
-- **Minimum Stake Requirement:** Proposal creation can require governance-token ownership.
 - **Quorum Enforcement:** Participation is checked before approval threshold math.
+- **Time-locked Upgrades:** The execution delay provides a safety buffer for stakeholders to react to approved changes.
+- **Minimum Stake Requirement:** Proposal creation can require governance-token ownership, preventing spam proposals by requiring a significant commitment from the proposer.
+- **Immutable Logic:** Proposals cannot be modified once created.
+- **Action-Bound Multisig Execution:** Multisig upgrade proposals store the exact `ProposalAction::Upgrade(wasm_hash)` that signers approve. The `execute_upgrade` entrypoint replays that stored action in one call and marks the proposal executed only after the WASM update call is made.
+- **Signer/Threshold Snapshots:** Each multisig proposal snapshots the signer set and threshold at creation time. Later configuration changes cannot retroactively make a pending proposal executable or authorize a signer that was not part of the original proposal.
+- **Replay Protection:** Executed proposals reject further approvals and cannot be executed a second time.
+
+## Multisig Upgrade Execution
+
+The multisig upgrade path is intentionally payload-bound:
+
+1. `propose_upgrade(proposer, wasm_hash)` creates a multisig proposal whose action is `Upgrade(wasm_hash)`.
+2. `approve_upgrade(proposal_id, signer)` records approvals against the proposal's original signer snapshot.
+3. `execute_upgrade(proposal_id)` verifies the proposal is not executed, confirms the stored action is the expected upgrade payload, checks the proposal snapshot threshold, performs `update_current_contract_wasm(wasm_hash)`, and then stores `executed = true`.
+
+This removes the previous decoupling between approval and effect. A proposal can no longer be marked executed without the approved action being run, and callers cannot execute a different WASM hash than the one signers approved.
+
+## TODO / Future Enhancements
+
+- [ ] Integrate with a native Soroban token for precise `TokenWeighted` voting power.
+- [ ] Implement a dynamic quorum based on historical participation.
+- [ ] Add a formal "veto" mechanism for high-stakes upgrades.
 
 ---
 
