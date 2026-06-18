@@ -2,6 +2,12 @@
 
 TypeScript SDK for interacting with Grainlify Soroban smart contracts on the Stellar network.
 
+## Documentation
+
+Detailed documentation for the SDK is available in the [`docs/`](../docs/index.md) directory:
+
+- [Error Mapping](../docs/sdk/ERROR_MAPPING.md)
+
 ## Installation
 
 ```bash
@@ -213,6 +219,8 @@ try {
 - `EMPTY_BATCH` - Cannot process empty batch
 - `LENGTH_MISMATCH` - Recipients and amounts arrays must match
 - `OVERFLOW` - Payout amount overflow
+- `GOVERNANCE_VERSION_TOO_LOW` - Linked governance contract version is below the program escrow minimum
+- `BOUNTY_GOVERNANCE_VERSION_TOO_LOW` - Linked governance contract version is below the bounty escrow minimum
 
 ## Testing
 
