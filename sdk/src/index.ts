@@ -35,6 +35,7 @@ export {
   parseContractError,
   parseContractErrorByCode,
   getContractErrorMessage,
+  PROGRAM_ESCROW_ERROR_MAP,
   BOUNTY_ESCROW_ERROR_MAP,
   GOVERNANCE_ERROR_MAP,
   CIRCUIT_BREAKER_ERROR_MAP,

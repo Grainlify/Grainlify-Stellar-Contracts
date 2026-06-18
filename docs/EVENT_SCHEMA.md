@@ -347,6 +347,49 @@ pub struct FundsRefunded {
 
 ---
 
+### 5.4.1 `BountyExpired`
+
+**Emitted by:** `emit_bounty_expired()`
+**Topics:** `(symbol_short!("b_exp"), event.bounty_id)`
+**Struct:** `BountyExpired`
+**Lifecycle phase:** Expired bounty sweep, immediately before the refund event
+
+```rust
+#[contracttype]
+pub struct BountyExpired {
+    pub version:    u32,
+    pub bounty_id:  u64,
+    pub depositor:  Address,
+    pub amount:     i128,
+    pub deadline:   u64,
+    pub expired_at: u64,
+}
+```
+
+#### v2 Payload Example
+
+```json
+{
+  "version":    2,
+  "bounty_id":  42,
+  "depositor":  "GABC...",
+  "amount":     1000000000,
+  "deadline":   1740199900,
+  "expired_at": 1740200000
+}
+```
+
+| Field        | Rust type | v1 required | v2 required | Description |
+|--------------|-----------|-------------|-------------|-------------|
+| `version`    | `u32`     | N/A         | **Yes**     | Always `2` |
+| `bounty_id`  | `u64`     | N/A         | **Yes**     | Bounty identifier; also in topic[1] |
+| `depositor`  | `Address` | N/A         | **Yes**     | Original depositor that will receive the refund |
+| `amount`     | `i128`    | N/A         | **Yes**     | Remaining amount being swept back to the depositor |
+| `deadline`   | `u64`     | N/A         | **Yes**     | Refund deadline that has been reached or passed |
+| `expired_at` | `u64`     | N/A         | **Yes**     | Ledger timestamp when the sweep observed the expiry |
+
+---
+
 ### 5.5 `FeeCollected`
 
 **Emitted by:** `emit_fee_collected()`
@@ -932,6 +975,7 @@ Complete lookup table of every `env.events().publish(topics, …)` call in this 
 | `bounty_escrow`  | `(symbol_short!("f_lock"), bounty_id)`                  | `"f_lock"` + u64          | `FundsLocked`             |
 | `bounty_escrow`  | `(symbol_short!("f_rel"), bounty_id)`                   | `"f_rel"` + u64           | `FundsReleased`           |
 | `bounty_escrow`  | `(symbol_short!("f_ref"), bounty_id)`                   | `"f_ref"` + u64           | `FundsRefunded`           |
+| `bounty_escrow`  | `(symbol_short!("b_exp"), bounty_id)`                   | `"b_exp"` + u64           | `BountyExpired`           |
 | `bounty_escrow`  | `(symbol_short!("fee"),)`                               | `"fee"`                   | `FeeCollected`            |
 | `bounty_escrow`  | `(symbol_short!("b_lock"),)`                            | `"b_lock"`                | `BatchFundsLocked`        |
 | `bounty_escrow`  | `(symbol_short!("b_rel"),)`                             | `"b_rel"`                 | `BatchFundsReleased`      |
@@ -1003,7 +1047,7 @@ Five events in `bounty_escrow` are **permanently v1** (no `version` field was ev
 Parsers must never require `version` on these events.
 
 For events that do carry `version` (`BountyEscrowInitialized`, `FundsLocked`, `FundsReleased`,
-`FundsRefunded` in bounty_escrow; all events in `program_escrow`):
+`FundsRefunded`, `BountyExpired` in bounty_escrow; all events in `program_escrow`):
 
 1. **Detect version.** Read `version` from payload. If absent → treat as `1`.
 2. **`amount` is always safe.** Both v1 and v2 include `amount` on value-transfer events.
@@ -1113,6 +1157,7 @@ cargo tarpaulin --out Html --output-dir coverage/
 | `FundsLocked` (bounty) | `emit_funds_locked()` | `contracts/bounty_escrow/src/events.rs` line ~26 |
 | `FundsReleased` (bounty) | `emit_funds_released()` | `contracts/bounty_escrow/src/events.rs` line ~39 |
 | `FundsRefunded` | `emit_funds_refunded()` | `contracts/bounty_escrow/src/events.rs` line ~52 |
+| `BountyExpired` | `emit_bounty_expired()` | `contracts/bounty_escrow/src/events.rs` line ~70 |
 | `FeeCollected` | `emit_fee_collected()` | `contracts/bounty_escrow/src/events.rs` line ~79 |
 | `BatchFundsLocked` | `emit_batch_funds_locked()` | `contracts/bounty_escrow/src/events.rs` line ~91 |
 | `FeeConfigUpdated` | `emit_fee_config_updated()` | `contracts/bounty_escrow/src/events.rs` line ~104 |

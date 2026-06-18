@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
 pub const EVENT_VERSION_V2: u32 = 2;
 
@@ -58,6 +58,24 @@ pub struct FundsRefunded {
 
 pub fn emit_funds_refunded(env: &Env, event: FundsRefunded) {
     let topics = (symbol_short!("f_ref"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
+/// Emitted when a sweep observes an expired bounty immediately before
+/// refunding the remaining locked funds to the depositor.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BountyExpired {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub depositor: Address,
+    pub amount: i128,
+    pub deadline: u64,
+    pub expired_at: u64,
+}
+
+pub fn emit_bounty_expired(env: &Env, event: BountyExpired) {
+    let topics = (symbol_short!("b_exp"), event.bounty_id);
     env.events().publish(topics, event.clone());
 }
 
@@ -164,6 +182,7 @@ pub struct ClaimCancelled {
     pub amount: i128,
     pub cancelled_at: u64,
     pub cancelled_by: Address,
+    pub reason: Symbol,
 }
 
 pub fn emit_pause_state_changed(env: &Env, event: crate::PauseStateChanged) {

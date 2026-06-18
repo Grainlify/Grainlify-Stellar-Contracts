@@ -17,4 +17,4 @@ For event consumers in this repository:
 - Backward compatibility: SDK parsing tests cover legacy/unversioned payloads.
 - Forward compatibility: SDK parsing tests cover newer version tags with additive fields.
 - Contract emission correctness: contract tests assert emitted payloads include `version: 2` tags on current emitters.
-
+- Expiry/refund sweeps emit `BountyExpired` as a v2 payload before each `FundsRefunded` event so indexers can react without polling `query_expiring_bounties`.
