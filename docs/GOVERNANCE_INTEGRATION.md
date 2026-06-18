@@ -319,9 +319,9 @@ Potential improvements for future versions:
 
 ## References
 
-- [Grainlify Core Governance](../grainlify-core/GOVERNANCE.md)
+- [Grainlify Core Governance](grainlify-core/GOVERNANCE.md)
 - [Program Escrow README](../program-escrow/README.md)
-- [Bounty Escrow Security](../bounty_escrow/SECURITY.md)
+- [Bounty Escrow Security](bounty_escrow/SECURITY.md)
 - [Soroban Documentation](https://soroban.stellar.org/docs)
 
 ## Changelog

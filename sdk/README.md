@@ -2,6 +2,12 @@
 
 TypeScript SDK for interacting with Grainlify Soroban smart contracts on the Stellar network.
 
+## Documentation
+
+Detailed documentation for the SDK is available in the [`docs/`](../docs/index.md) directory:
+
+- [Error Mapping](../docs/sdk/ERROR_MAPPING.md)
+
 ## Installation
 
 ```bash

@@ -28,7 +28,8 @@ const PROGRAM_ESCROW_DISCRIMINANTS: number[] = [4];
 
 /** contracts/bounty_escrow/contracts/escrow/src/lib.rs — Error enum */
 const BOUNTY_ESCROW_DISCRIMINANTS: number[] = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, /* gap at 15 */ 16, 17, 18, 23,
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, /* gap at 15 */ 16, 17, 18,
+  19, 20, 21, 22, 23,
 ];
 
 /** contracts/grainlify-core/src/governance.rs — Error enum */
@@ -92,7 +93,7 @@ describe('Numeric error code tables', () => {
   });
 
   describe('Bounty-escrow', () => {
-    it('maps every contract discriminant required by the SDK audit', () => {
+    it('maps every contract discriminant (1-23, excluding 15)', () => {
       for (const code of BOUNTY_ESCROW_DISCRIMINANTS) {
         expect(BOUNTY_ESCROW_ERROR_MAP[code]).toBeDefined();
       }
@@ -196,6 +197,7 @@ describe('parseContractError string matching', () => {
     ['BountyExists',                                   ContractErrorCode.BOUNTY_EXISTS],
     ['Bounty not found',                               ContractErrorCode.BOUNTY_NOT_FOUND],
     ['FundsNotLocked',                                 ContractErrorCode.BOUNTY_FUNDS_NOT_LOCKED],
+    ['ClaimExpired',                                  ContractErrorCode.BOUNTY_CLAIM_EXPIRED],
     ['DeadlineNotPassed',                              ContractErrorCode.BOUNTY_DEADLINE_NOT_PASSED],
     ['InvalidFeeRate',                                 ContractErrorCode.BOUNTY_INVALID_FEE_RATE],
     ['Fee recipient address not set',                  ContractErrorCode.BOUNTY_FEE_RECIPIENT_NOT_SET],
@@ -207,6 +209,7 @@ describe('parseContractError string matching', () => {
     ['InsufficientFunds',                              ContractErrorCode.BOUNTY_INSUFFICIENT_FUNDS],
     ['RefundNotApproved',                              ContractErrorCode.BOUNTY_REFUND_NOT_APPROVED],
     ['FundsPaused',                                    ContractErrorCode.BOUNTY_FUNDS_PAUSED],
+    ['CircuitBreakerOpen',                             ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN],
     ['Bounty GovernanceVersionTooLow',                 ContractErrorCode.BOUNTY_GOVERNANCE_VERSION_TOO_LOW],
   ];
 
@@ -290,6 +293,8 @@ describe('Cross-layer consistency', () => {
       [4,  'Bounty not found'],
       [13, 'Bounty amount is invalid'],
       [16, 'InsufficientFunds'],
+      [21, 'CircuitBreakerOpen'],
+      [22, 'ClaimExpired'],
       [23, 'Bounty GovernanceVersionTooLow'],
     ];
 
@@ -322,16 +327,16 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 11 program-escrow + 18 bounty-escrow + 14 governance + 3 circuit-breaker = 46
-    expect(count).toBe(46);
+    // 11 program-escrow + 22 bounty-escrow + 14 governance + 3 circuit-breaker = 50
+    expect(count).toBe(50);
   });
 
   it('PROGRAM_ESCROW_ERROR_MAP has 1 entry', () => {
     expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(1);
   });
 
-  it('BOUNTY_ESCROW_ERROR_MAP has 18 entries', () => {
-    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(18);
+  it('BOUNTY_ESCROW_ERROR_MAP has 22 entries', () => {
+    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(22);
   });
 
   it('GOVERNANCE_ERROR_MAP has 14 entries', () => {
