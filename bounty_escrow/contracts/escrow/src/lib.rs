@@ -387,6 +387,8 @@ pub enum Error {
     AmountAboveMaximum = 20,
     /// Returned when circuit breaker is open and operations are paused
     CircuitBreakerOpen = 21,
+    /// Returned when an authorized claim is attempted after its claim window expires
+    ClaimExpired = 22,
 }
 
 #[contracttype]
@@ -1334,7 +1336,7 @@ impl BountyEscrowContract {
 
         let now = env.ledger().timestamp();
         if now > claim.expires_at {
-            return Err(Error::DeadlineNotPassed); // reuse or add ClaimExpired error
+            return Err(Error::ClaimExpired);
         }
         if claim.claimed {
             return Err(Error::FundsNotLocked);
@@ -1401,6 +1403,13 @@ impl BountyEscrowContract {
             return Err(Error::FundsNotLocked);
         }
 
+        let cancelled_at = env.ledger().timestamp();
+        let reason = if cancelled_at > claim.expires_at {
+            symbol_short!("expired")
+        } else {
+            symbol_short!("manual")
+        };
+
         env.storage()
             .persistent()
             .remove(&DataKey::PendingClaim(bounty_id));
@@ -1411,8 +1420,9 @@ impl BountyEscrowContract {
                 bounty_id,
                 recipient: claim.recipient,
                 amount: claim.amount,
-                cancelled_at: env.ledger().timestamp(),
+                cancelled_at,
                 cancelled_by: admin,
+                reason,
             },
         );
         Ok(())
@@ -2967,6 +2977,8 @@ mod test_granular_pause;
 mod test_lifecycle;
 #[cfg(test)]
 mod test_pause;
+#[cfg(test)]
+mod proptest_invariants;
 #[cfg(test)]
 mod test_query_filters;
 #[cfg(test)]

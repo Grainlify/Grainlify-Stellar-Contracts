@@ -169,6 +169,9 @@ mod test_granular_pause;
 #[cfg(test)]
 mod test_lifecycle;
 
+#[cfg(test)]
+mod budget_profiling_tests;
+
 mod test_analytics_events;
 #[cfg(test)]
 mod test_governance_integration;

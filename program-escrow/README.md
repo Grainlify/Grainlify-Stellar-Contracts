@@ -2,6 +2,14 @@
 
 A Soroban smart contract for managing program-level escrow funds for hackathons and grant programs. This contract handles prize pools, tracks balances, and enables automated batch payouts to multiple contributors.
 
+## Documentation
+
+Detailed documentation for this contract is available in the [`docs/`](../docs/index.md) directory:
+
+- [Reentrancy Guard](../docs/program-escrow/REENTRANCY_GUARD_DOCUMENTATION.md)
+- [Analytics Events](../docs/program-escrow/ANALYTICS_EVENTS.md)
+- [Implementation Summary](../docs/program-escrow/IMPLEMENTATION_SUMMARY.md)
+
 ## Features
 
 - **Program Initialization**: Create a new escrow program with authorized payout key
@@ -162,8 +170,36 @@ footprint bounded for large batches.
 The test suite includes:
 - `test_batch_payout_stress_large_batch_event_footprint_is_bounded`
 - `test_batch_payout_gas_proxy_improves_vs_legacy_model_for_large_batch`
+- `budget_profiling_batch_payout_scales_linearly_to_max_batch_size`
+- `budget_profiling_single_payout_and_trigger_releases_stay_under_regression_ceiling`
+- `budget_profiling_gas_proxy_fields_match_operation_counts`
 
-These validate bounded event growth and improved proxy metrics for large batches.
+These validate bounded event growth, improved proxy metrics for large batches,
+and real Soroban `env.budget()` CPU/memory regression ceilings.
+
+### Budget Profiling
+
+Run the profiling guard with:
+
+```bash
+cargo test budget_profiling -- --nocapture
+```
+
+Current native testutils measurements, excluding setup/mint/init cost:
+
+| Operation | Size | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `batch_payout` | 1 | 355,276 | 54,175 |
+| `batch_payout` | 10 | 1,877,730 | 277,195 |
+| `batch_payout` | 50 | 9,889,779 | 1,658,435 |
+| `batch_payout` | 100 (`MAX_BATCH_SIZE`) | 22,491,709 | 4,280,485 |
+| `single_payout` | 1 | 345,503 | 53,351 |
+| `trigger_program_releases` | 10 due schedules | 2,370,396 | 385,935 |
+
+The regression test resets `env.budget()` immediately before each measured call,
+then asserts CPU and memory stay below documented ceilings. The Soroban SDK notes
+that native Rust test execution can underestimate WASM costs, so these numbers
+are CI regression guards rather than mainnet fee quotes.
 
 ## Usage Flow
 
