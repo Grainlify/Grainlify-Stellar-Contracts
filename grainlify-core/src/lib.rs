@@ -157,7 +157,7 @@ mod multisig;
 pub use governance::{
     Error as GovError, GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme,
 };
-use multisig::MultiSig;
+use multisig::{MultiSig, ProposalAction};
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
@@ -383,9 +383,6 @@ enum DataKey {
     /// Current version number (increments with upgrades)
     Version,
 
-    // NEW: store wasm hash per proposal
-    UpgradeProposal(u64),
-
     /// Migration state tracking - prevents double migration
     MigrationState,
 
@@ -603,13 +600,7 @@ impl GrainlifyContract {
     /// # Returns
     /// * `u64` - The proposal ID
     pub fn propose_upgrade(env: Env, proposer: Address, wasm_hash: BytesN<32>) -> u64 {
-        let proposal_id = MultiSig::propose(&env, proposer);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::UpgradeProposal(proposal_id), &wasm_hash);
-
-        proposal_id
+        MultiSig::propose(&env, proposer, ProposalAction::Upgrade(wasm_hash))
     }
 
     /// Approves an upgrade proposal (multisig version).
@@ -720,19 +711,17 @@ impl GrainlifyContract {
     /// * `env` - The contract environment
     /// * `proposal_id` - The ID of the upgrade proposal to execute
     pub fn execute_upgrade(env: Env, proposal_id: u64) {
-        if !MultiSig::can_execute(&env, proposal_id) {
-            panic!("Threshold not met");
-        }
+        let action = MultiSig::get_action(&env, proposal_id);
+        let wasm_hash = match action.clone() {
+            ProposalAction::Upgrade(wasm_hash) => wasm_hash,
+        };
+        let upgrade_env = env.clone();
 
-        let wasm_hash: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeProposal(proposal_id))
-            .expect("Missing upgrade proposal");
-
-        env.deployer().update_current_contract_wasm(wasm_hash);
-
-        MultiSig::mark_executed(&env, proposal_id);
+        MultiSig::execute(&env, proposal_id, action, || {
+            upgrade_env
+                .deployer()
+                .update_current_contract_wasm(wasm_hash);
+        });
     }
 
     /// Upgrades the contract to new WASM code (single admin version).

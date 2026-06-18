@@ -104,14 +104,18 @@ The following admin operations now check governance requirements:
 ### Governance Check Flow
 
 ```rust
-fn check_governance_requirements(env: &Env) {
+fn check_governance_requirements(env: &Env) -> Result<(), Error> {
     if !governance_integration::check_governance_version(env) {
-        panic!("Governance version requirement not met");
+        return Err(Error::GovernanceVersionTooLow);
     }
+    Ok(())
 }
 ```
 
-This check is called at the beginning of protected admin operations.
+This check is called at the beginning of protected admin operations. A configured
+governance contract whose version is lower than `MIN_GOV_VERSION` returns a
+typed error instead of panicking, so callers and SDKs can distinguish governance
+gating from authorization or validation failures.
 
 ## Usage Examples
 
@@ -137,8 +141,17 @@ escrow_client.set_min_governance_version(&2);
 // This will check governance version before executing
 escrow_client.set_paused(&Some(true), &None, &None);
 
-// If governance version < min_version, operation will panic
+// If governance version < min_version, operation returns GovernanceVersionTooLow
 ```
+
+### Recovering from a Version Mismatch
+
+When a protected admin operation returns `GovernanceVersionTooLow`:
+
+1. Query the linked governance contract version.
+2. Lower `min_governance_version` only if the configured minimum was incorrect.
+3. Upgrade the governance contract or link the escrow to the intended governance contract.
+4. Retry the admin operation after the version check passes.
 
 ### 3. Upgrading with Governance
 
@@ -206,7 +219,7 @@ The system validates governance version before critical operations:
 
 ```rust
 if version < min_version {
-    panic!("Governance version requirement not met");
+    return Err(Error::GovernanceVersionTooLow);
 }
 ```
 
@@ -297,7 +310,7 @@ cargo test
 
 ### Common Issues
 
-1. **"Governance version requirement not met"**
+1. **`GovernanceVersionTooLow`**
    - Check governance contract version
    - Verify minimum version setting
    - Ensure governance contract is deployed
@@ -322,9 +335,9 @@ Potential improvements for future versions:
 
 ## References
 
-- [Grainlify Core Governance](../grainlify-core/GOVERNANCE.md)
+- [Grainlify Core Governance](grainlify-core/GOVERNANCE.md)
 - [Program Escrow README](../program-escrow/README.md)
-- [Bounty Escrow Security](../bounty_escrow/SECURITY.md)
+- [Bounty Escrow Security](bounty_escrow/SECURITY.md)
 - [Soroban Documentation](https://soroban.stellar.org/docs)
 
 ## Changelog
