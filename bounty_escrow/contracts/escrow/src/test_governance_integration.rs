@@ -1,14 +1,11 @@
 #![cfg(test)]
 
-use crate::{BountyEscrowContract, BountyEscrowContractClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, Env,
-};
+use crate::{governance_integration, BountyEscrowContract, BountyEscrowContractClient};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
 
 // Mock governance contract for testing
 mod mock_governance {
-    use soroban_sdk::{contract, contractimpl, Env};
+    use soroban_sdk::{contract, contractimpl, BytesN, Env};
 
     #[contract]
     pub struct MockGovernanceContract;
@@ -17,6 +14,10 @@ mod mock_governance {
     impl MockGovernanceContract {
         pub fn get_ver(_env: Env) -> u32 {
             2
+        }
+
+        pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
+            wasm_hash == BytesN::from_array(&env, &[7u8; 32])
         }
     }
 }
@@ -110,6 +111,50 @@ fn test_governance_version_check_fails_when_version_too_low() {
 
     // This should panic because governance version (2) < required version (3)
     let _ = client.set_paused(&Some(true), &None, &None);
+}
+
+#[test]
+fn test_upgrade_approval_requires_matching_executed_governance_hash() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let _ = client.init(&admin, &token);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let _ = client.set_governance_contract(&gov_contract_id);
+    let _ = client.set_min_governance_version(&2);
+
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+    let wrong_hash = BytesN::from_array(&env, &[9u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_upgrade_approval(
+            &env,
+            &approved_hash,
+        ));
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &wrong_hash,
+        ));
+    });
+}
+
+#[test]
+fn test_upgrade_approval_denies_when_governance_is_not_configured() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_upgrade_approval(
+            &env, &wasm_hash,
+        ));
+    });
 }
 
 #[test]

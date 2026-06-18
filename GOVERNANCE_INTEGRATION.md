@@ -39,7 +39,7 @@ The governance integration follows a modular design that allows escrow contracts
 The escrow contracts honor the following governance hooks:
 
 - **Version Check**: Ensures the governance contract meets minimum version requirements
-- **Upgrade Approvals**: Validates that upgrades are approved through governance
+- **Upgrade Approvals**: Validates that the exact upgrade WASM hash was executed through governance
 - **Configuration Control**: Respects governance decisions for critical configuration changes
 
 ### 2. Storage Keys
@@ -74,6 +74,17 @@ fn check_governance_version(env: &Env) -> bool
 ```
 
 Internal function that validates the governance contract version meets requirements.
+
+#### Upgrade Approval Check
+
+```rust
+fn check_upgrade_approval(env: &Env, wasm_hash: &BytesN<32>) -> bool
+```
+
+Internal function that validates the configured governance contract positively
+reports an executed proposal for the exact `wasm_hash`. The escrow contracts
+use a Soroban `contractclient` interface to call the governance contract's
+short `is_upg_ok(wasm_hash)` query after the minimum version check passes.
 
 ## Integration Points
 
@@ -143,19 +154,23 @@ let proposal_id = gov_client.create_proposal(
 gov_client.cast_vote(&voter1, &proposal_id, &VoteType::For);
 gov_client.cast_vote(&voter2, &proposal_id, &VoteType::For);
 
-// Finalize and execute
+// Finalize and execute after the configured execution delay
 gov_client.finalize_proposal(&proposal_id);
+gov_client.execute_proposal(&proposal_id);
 
-// Upgrade is now approved and can be executed
+// Upgrade is now approved only for this exact wasm hash
+assert!(gov_client.is_upg_ok(&new_wasm_hash));
 ```
 
 ## Backward Compatibility
 
-The governance integration is designed to be backward compatible:
+The governance integration keeps admin configuration operations backward
+compatible while making upgrade approval fail closed:
 
-1. **Optional Governance**: Contracts work without governance configured
-2. **Gradual Migration**: Governance can be added to existing deployments
-3. **Version Flexibility**: Minimum version can be adjusted as needed
+1. **Optional Governance for admin operations**: Pause, fee, rate-limit, and other protected admin operations still work without governance configured.
+2. **Fail-closed upgrades**: `check_upgrade_approval` returns `false` when no governance contract is configured or when governance cannot confirm an executed matching-hash proposal.
+3. **Gradual Migration**: Governance can be added to existing deployments
+4. **Version Flexibility**: Minimum version can be adjusted as needed
 
 ### Migration Path
 
@@ -197,19 +212,21 @@ if version < min_version {
 
 ### 3. Upgrade Safety
 
-Upgrades must be approved through governance when configured:
+Upgrades must be approved through governance. A version check alone is not
+approval; the governance contract must have an executed proposal for the exact
+WASM hash:
 
 ```rust
 pub fn check_upgrade_approval(env: &Env, wasm_hash: &BytesN<32>) -> bool {
-    if let Some(gov_addr) = get_governance_contract(env) {
-        // Check governance approval
-        check_governance_version(env)
-    } else {
-        // No governance, allow upgrade
-        true
-    }
+    let Some(gov_addr) = get_governance_contract(env) else {
+        return false;
+    };
+    check_governance_version(env) && GovernanceClient::new(env, &gov_addr).is_upg_ok(wasm_hash)
 }
 ```
+
+The `is_upg_ok` query returns `true` only when the matching proposal is
+`Executed` and the proposal's `execution_delay` has elapsed.
 
 ## Testing
 
@@ -231,6 +248,7 @@ The integration includes comprehensive tests:
    - Full lifecycle with governance
    - Admin operations with governance
    - Upgrade scenarios
+   - Matching-hash approval, wrong-hash rejection, and missing-governance rejection
 
 ### Running Tests
 
@@ -298,11 +316,9 @@ cargo test
 
 Potential improvements for future versions:
 
-1. **Proposal-Specific Approvals**: Check specific proposal approvals for upgrades
-2. **Multi-Contract Governance**: Support governance across multiple contracts
-3. **Timelock Integration**: Add timelock delays for critical operations
-4. **Veto Mechanism**: Allow governance to veto admin actions
-5. **Delegation**: Support vote delegation in governance
+1. **Multi-Contract Governance**: Support governance across multiple contracts
+2. **Veto Mechanism**: Allow governance to veto admin actions
+3. **Delegation**: Support vote delegation in governance
 
 ## References
 
@@ -313,7 +329,12 @@ Potential improvements for future versions:
 
 ## Changelog
 
-### Version 1.0.0 (Current)
+### Version 1.1.0
+- Hash-specific upgrade approval through executed governance proposals
+- Execution-delay enforcement before upgrade approval is visible
+- Fail-closed behavior when no governance contract is configured for upgrades
+
+### Version 1.0.0
 - Initial governance integration
 - Version checking
 - Admin operation protection

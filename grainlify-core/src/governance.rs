@@ -262,6 +262,56 @@ impl GovernanceContract {
         env.storage().instance().set(&PROPOSALS, &proposals);
         Ok(proposal.status)
     }
+
+    /// Marks an approved proposal as executed after its execution delay has elapsed.
+    pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), Error> {
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&PROPOSALS)
+            .ok_or(Error::ProposalsNotFound)?;
+        let mut proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+
+        if proposal.status != ProposalStatus::Approved {
+            return Err(Error::ProposalNotApproved);
+        }
+
+        let executable_at = proposal.voting_end.saturating_add(proposal.execution_delay);
+        if env.ledger().timestamp() < executable_at {
+            return Err(Error::ExecutionDelayNotMet);
+        }
+
+        proposal.status = ProposalStatus::Executed;
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&PROPOSALS, &proposals);
+        Ok(())
+    }
+
+    /// Returns true when an executed governance proposal approved `wasm_hash`.
+    pub fn is_upgrade_approved(env: Env, wasm_hash: BytesN<32>) -> bool {
+        let proposals: Map<u32, Proposal> = match env.storage().instance().get(&PROPOSALS) {
+            Some(proposals) => proposals,
+            None => return false,
+        };
+        let proposal_count: u32 = env.storage().instance().get(&PROPOSAL_COUNT).unwrap_or(0);
+        let now = env.ledger().timestamp();
+
+        let mut proposal_id = 0;
+        while proposal_id < proposal_count {
+            if let Some(proposal) = proposals.get(proposal_id) {
+                let executable_at = proposal.voting_end.saturating_add(proposal.execution_delay);
+                if proposal.new_wasm_hash == wasm_hash
+                    && proposal.status == ProposalStatus::Executed
+                    && now >= executable_at
+                {
+                    return true;
+                }
+            }
+            proposal_id += 1;
+        }
+
+        false
+    }
 }
 
 #[cfg(test)]
@@ -365,5 +415,48 @@ mod test {
         let status = client.finalize_proposal(&prop_id);
 
         assert_eq!(status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn test_upgrade_approval_requires_executed_matching_hash_after_delay() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+        let other_hash = BytesN::from_array(&env, &[9u8; 32]);
+
+        let config = GovernanceConfig {
+            voting_period: 100,
+            execution_delay: 50,
+            quorum_percentage: 1000,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::OnePersonOneVote,
+        };
+
+        env.mock_all_auths();
+        client.init_governance(&admin, &config);
+        let proposal_id =
+            client.create_proposal(&proposer, &approved_hash, &symbol_short!("upgrade"));
+        client.cast_vote(&proposer, &proposal_id, &VoteType::For);
+
+        env.ledger().with_mut(|li| li.timestamp = 101);
+        assert_eq!(
+            client.finalize_proposal(&proposal_id),
+            ProposalStatus::Approved
+        );
+        assert!(!client.is_upgrade_approved(&approved_hash));
+        assert_eq!(
+            client.try_execute_proposal(&proposal_id),
+            Err(Ok(Error::ExecutionDelayNotMet)),
+        );
+
+        env.ledger().with_mut(|li| li.timestamp = 150);
+        client.execute_proposal(&proposal_id);
+
+        assert!(client.is_upgrade_approved(&approved_hash));
+        assert!(!client.is_upgrade_approved(&other_hash));
     }
 }

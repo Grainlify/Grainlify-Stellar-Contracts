@@ -527,6 +527,44 @@ impl GrainlifyContract {
         governance::GovernanceContract::init_governance(env, admin, config)
     }
 
+    /// Create a governance proposal for a candidate upgrade WASM hash.
+    pub fn create_proposal(
+        env: Env,
+        proposer: Address,
+        new_wasm_hash: BytesN<32>,
+        description: Symbol,
+    ) -> Result<u32, governance::Error> {
+        governance::GovernanceContract::create_proposal(env, proposer, new_wasm_hash, description)
+    }
+
+    /// Cast a governance vote for a proposal.
+    pub fn cast_vote(
+        env: Env,
+        voter: Address,
+        proposal_id: u32,
+        vote_type: governance::VoteType,
+    ) -> Result<(), governance::Error> {
+        governance::GovernanceContract::cast_vote(env, voter, proposal_id, vote_type)
+    }
+
+    /// Finalize voting and move the proposal to Approved or Rejected.
+    pub fn finalize_proposal(
+        env: Env,
+        proposal_id: u32,
+    ) -> Result<governance::ProposalStatus, governance::Error> {
+        governance::GovernanceContract::finalize_proposal(env, proposal_id)
+    }
+
+    /// Mark an approved governance proposal as executed after its delay.
+    pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), governance::Error> {
+        governance::GovernanceContract::execute_proposal(env, proposal_id)
+    }
+
+    /// Query whether governance executed an upgrade proposal for `wasm_hash`.
+    pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
+        governance::GovernanceContract::is_upgrade_approved(env, wasm_hash)
+    }
+
     /// Initializes the contract with a single admin address.
     ///
     /// # Arguments
@@ -770,6 +808,11 @@ impl GrainlifyContract {
     /// Very Low - Single storage read
     pub fn get_version(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
+    }
+
+    /// Short alias used by escrow governance integration cross-contract calls.
+    pub fn get_ver(env: Env) -> u32 {
+        Self::get_version(env)
     }
 
     /// Returns the semantic version string (e.g., "1.0.0").
