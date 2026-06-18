@@ -55,9 +55,9 @@ export class ValidationError extends SDKError {
  *   - Governance ..............................  GOV_*
  *   - Circuit-breaker / error-recovery .......  CIRCUIT_*
  *
- * AMOUNT_BELOW_MIN and AMOUNT_ABOVE_MAX map to the on-chain errors
- *   Error::AmountBelowMinimum = 8
- *   Error::AmountAboveMaximum = 9
+ * Program-level AMOUNT_BELOW_MIN / AMOUNT_ABOVE_MAX are kept for the
+ * program-escrow surface. Bounty-escrow uses its own BOUNTY_* variants for
+ * the contract discriminants at 19 and 20.
  */
 export enum ContractErrorCode {
   // ── Program-Escrow (original) ──────────────────────────────────────────
@@ -90,6 +90,9 @@ export enum ContractErrorCode {
   BOUNTY_INSUFFICIENT_FUNDS  = 'BOUNTY_INSUFFICIENT_FUNDS',    // 16
   BOUNTY_REFUND_NOT_APPROVED = 'BOUNTY_REFUND_NOT_APPROVED',   // 17
   BOUNTY_FUNDS_PAUSED        = 'BOUNTY_FUNDS_PAUSED',          // 18
+  BOUNTY_AMOUNT_BELOW_MINIMUM = 'BOUNTY_AMOUNT_BELOW_MINIMUM', // 19
+  BOUNTY_AMOUNT_ABOVE_MAXIMUM = 'BOUNTY_AMOUNT_ABOVE_MAXIMUM', // 20
+  BOUNTY_CIRCUIT_BREAKER_OPEN = 'BOUNTY_CIRCUIT_BREAKER_OPEN', // 21
 
   // ── Governance (contracts/grainlify-core/governance) ───────────────────
   GOV_NOT_INITIALIZED        = 'GOV_NOT_INITIALIZED',          // 1
@@ -148,6 +151,9 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.BOUNTY_INSUFFICIENT_FUNDS]:  'Insufficient funds in the escrow for this operation',
   [ContractErrorCode.BOUNTY_REFUND_NOT_APPROVED]: 'Refund has not been approved by an admin',
   [ContractErrorCode.BOUNTY_FUNDS_PAUSED]:        'Bounty fund operations are currently paused',
+  [ContractErrorCode.BOUNTY_AMOUNT_BELOW_MINIMUM]: 'Bounty lock amount is below the configured policy minimum',
+  [ContractErrorCode.BOUNTY_AMOUNT_ABOVE_MAXIMUM]: 'Bounty lock amount is above the configured policy maximum',
+  [ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN]: 'Bounty escrow circuit breaker is open',
 
   // Governance
   [ContractErrorCode.GOV_NOT_INITIALIZED]:        'Governance contract has not been initialized',
@@ -194,6 +200,9 @@ export const BOUNTY_ESCROW_ERROR_MAP: Record<number, ContractErrorCode> = {
   16: ContractErrorCode.BOUNTY_INSUFFICIENT_FUNDS,
   17: ContractErrorCode.BOUNTY_REFUND_NOT_APPROVED,
   18: ContractErrorCode.BOUNTY_FUNDS_PAUSED,
+  19: ContractErrorCode.BOUNTY_AMOUNT_BELOW_MINIMUM,
+  20: ContractErrorCode.BOUNTY_AMOUNT_ABOVE_MAXIMUM,
+  21: ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN,
 };
 
 /** Governance #[contracterror] discriminants → SDK code */
@@ -274,6 +283,18 @@ export function parseContractErrorByCode(
  */
 export function parseContractError(error: any): ContractError {
   const errorMessage = error?.message || error?.toString() || 'Unknown contract error';
+
+  // ── Bounty-escrow specific policy/circuit patterns ─────────────────────
+  // These must run before the generic program-escrow min/max patterns below.
+  if (/BountyAmountBelowMinimum|bounty.*below.*min(imum)?/i.test(errorMessage)) {
+    return createContractError(ContractErrorCode.BOUNTY_AMOUNT_BELOW_MINIMUM);
+  }
+  if (/BountyAmountAboveMaximum|bounty.*(above|max|exceed).*max(imum)?/i.test(errorMessage)) {
+    return createContractError(ContractErrorCode.BOUNTY_AMOUNT_ABOVE_MAXIMUM);
+  }
+  if (/BountyCircuitBreakerOpen|bounty.*circuit breaker/i.test(errorMessage)) {
+    return createContractError(ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN);
+  }
 
   // ── Program-escrow patterns ────────────────────────────────────────────
   if (errorMessage.includes('not initialized') || errorMessage.includes('Program not initialized')) {

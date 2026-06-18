@@ -214,6 +214,11 @@ try {
 - `LENGTH_MISMATCH` - Recipients and amounts arrays must match
 - `OVERFLOW` - Payout amount overflow
 
+Bounty-escrow errors are also mapped by their on-chain numeric codes, including
+the intentional gap at code 15 and the policy/circuit errors at codes 19-21:
+`BOUNTY_AMOUNT_BELOW_MINIMUM`, `BOUNTY_AMOUNT_ABOVE_MAXIMUM`, and
+`BOUNTY_CIRCUIT_BREAKER_OPEN`. See `ERROR_MAPPING.md` for the full table.
+
 ## Testing
 
 Run the test suite:
