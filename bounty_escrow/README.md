@@ -1,3 +1,22 @@
+# Bounty Escrow Contract
+
+A Soroban smart contract for managing bounty escrow funds on the Stellar network.
+
+## Documentation
+
+Detailed documentation for this contract is available in the [`docs/`](../docs/index.md) directory:
+
+- [Security](../docs/bounty_escrow/SECURITY.md)
+- [Circuit Breaker](../docs/bounty_escrow/CIRCUIT_BREAKER.md)
+- [Analytics](../docs/bounty_escrow/ANALYTICS_DOCUMENTATION.md)
+- [Implementation Checklist](../docs/bounty_escrow/IMPLEMENTATION_CHECKLIST.md)
+- [Feature Completion Report](../docs/bounty_escrow/FEATURE_COMPLETION_REPORT.md)
+- [Analytics Implementation Summary](../docs/bounty_escrow/ANALYTICS_IMPLEMENTATION_SUMMARY.md)
+- [Auto Refund Tests](../docs/bounty_escrow/contracts/escrow/AUTO_REFUND_TESTS.md)
+- [CI Checks Summary](../docs/bounty_escrow/contracts/escrow/CI_CHECKS_SUMMARY.md)
+
+---
+
 # Soroban Project
 
 ## Project Structure

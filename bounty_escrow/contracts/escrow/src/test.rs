@@ -601,7 +601,7 @@ fn test_claim_within_window_transfers_funds() {
 /// Authorize a claim then advance time past the window. Calling claim() must
 /// fail — funds must NOT leave the contract and escrow must stay Locked.
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // DeadlineNotPassed reused for ClaimExpired
+#[should_panic(expected = "Error(Contract, #22)")] // ClaimExpired
 fn test_claim_after_window_expires_panics() {
     let setup = TestSetup::new();
     let bounty_id = 101_u64;
@@ -781,7 +781,7 @@ fn test_claim_does_not_affect_other_bounties() {
 /// When no claim window is explicitly set (default 0) authorize_claim creates a
 /// claim that expires immediately (expires_at == now). Any claim() call must fail.
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // DeadlineNotPassed / ClaimExpired
+#[should_panic(expected = "Error(Contract, #22)")] // ClaimExpired
 fn test_authorize_claim_zero_window_expires_immediately() {
     let setup = TestSetup::new();
     let bounty_id = 108_u64;

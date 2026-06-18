@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use crate::{BountyEscrowContract, BountyEscrowContractClient, EscrowStatus};
+use crate::{BountyEscrowContract, BountyEscrowContractClient, Error, EscrowStatus};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, Address, Env,
+    testutils::{Address as _, Events, Ledger},
+    token, Address, Env, Map, Symbol, TryFromVal, Val,
 };
 
 fn create_token_contract<'a>(
@@ -130,6 +130,77 @@ fn test_beneficiary_claims_within_window_succeeds() {
     assert_eq!(escrow.status, EscrowStatus::Released);
     assert_eq!(setup.token.balance(&setup.contributor), amount);
     assert_eq!(setup.token.balance(&setup.escrow.address), 0);
+}
+
+// A claim one ledger second after expires_at must fail with the dedicated
+// ClaimExpired error and must not move funds or mark the claim as used.
+#[test]
+fn test_claim_one_second_after_window_returns_claim_expired() {
+    let setup = TestSetup::new();
+    let bounty_id = 21;
+    let amount = 1_500;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 2_000;
+    let claim_window = 500;
+
+    setup.escrow.set_claim_window(&claim_window);
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    let claim = setup.escrow.get_pending_claim(&bounty_id);
+    setup.env.ledger().set_timestamp(claim.expires_at + 1);
+
+    let result = setup.env.as_contract(&setup.escrow.address, || {
+        BountyEscrowContract::claim(setup.env.clone(), bounty_id)
+    });
+
+    assert_eq!(result, Err(Error::ClaimExpired));
+    assert_eq!(setup.token.balance(&setup.escrow.address), amount);
+    assert_eq!(setup.token.balance(&setup.contributor), 0);
+
+    let escrow = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, EscrowStatus::Locked);
+
+    let pending_after = setup.escrow.get_pending_claim(&bounty_id);
+    assert!(!pending_after.claimed);
+}
+
+#[test]
+fn test_cancel_expired_claim_emits_expired_reason() {
+    let setup = TestSetup::new();
+    let bounty_id = 22;
+    let amount = 2_500;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 2_000;
+    let claim_window = 500;
+
+    setup.escrow.set_claim_window(&claim_window);
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    let claim = setup.escrow.get_pending_claim(&bounty_id);
+    setup.env.ledger().set_timestamp(claim.expires_at + 1);
+
+    setup.escrow.cancel_pending_claim(&bounty_id);
+
+    let events = setup.env.events().all();
+    let (_contract, _topics, data) = events.last().expect("cancel should emit an event");
+    let data_map: Map<Symbol, Val> =
+        Map::try_from_val(&setup.env, &data).expect("event payload should be a map");
+    let reason_val = data_map
+        .get(Symbol::new(&setup.env, "reason"))
+        .expect("ClaimCancelled should include a reason");
+    let reason = Symbol::try_from_val(&setup.env, &reason_val).expect("reason should be a symbol");
+
+    assert_eq!(reason, Symbol::new(&setup.env, "expired"));
 }
 
 // Beneficiary misses claim window - admin must cancel then refund
