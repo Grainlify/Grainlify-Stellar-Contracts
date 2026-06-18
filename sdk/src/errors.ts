@@ -55,9 +55,11 @@ export class ValidationError extends SDKError {
  *   - Governance ..............................  GOV_*
  *   - Circuit-breaker / error-recovery .......  CIRCUIT_*
  *
- * AMOUNT_BELOW_MIN and AMOUNT_ABOVE_MAX map to the on-chain errors
+ * Program AMOUNT_BELOW_MIN and AMOUNT_ABOVE_MAX map to the on-chain errors
  *   Error::AmountBelowMinimum = 8
  *   Error::AmountAboveMaximum = 9
+ * Bounty-specific min/max, circuit-breaker, and claim-expiry errors use
+ * separate BOUNTY_* codes because their on-chain discriminants differ.
  */
 export enum ContractErrorCode {
   // ── Program-Escrow (original) ──────────────────────────────────────────
@@ -90,6 +92,10 @@ export enum ContractErrorCode {
   BOUNTY_INSUFFICIENT_FUNDS  = 'BOUNTY_INSUFFICIENT_FUNDS',    // 16
   BOUNTY_REFUND_NOT_APPROVED = 'BOUNTY_REFUND_NOT_APPROVED',   // 17
   BOUNTY_FUNDS_PAUSED        = 'BOUNTY_FUNDS_PAUSED',          // 18
+  BOUNTY_AMOUNT_BELOW_MINIMUM = 'BOUNTY_AMOUNT_BELOW_MINIMUM', // 19
+  BOUNTY_AMOUNT_ABOVE_MAXIMUM = 'BOUNTY_AMOUNT_ABOVE_MAXIMUM', // 20
+  BOUNTY_CIRCUIT_BREAKER_OPEN = 'BOUNTY_CIRCUIT_BREAKER_OPEN', // 21
+  BOUNTY_CLAIM_EXPIRED        = 'BOUNTY_CLAIM_EXPIRED',        // 22
 
   // ── Governance (contracts/grainlify-core/governance) ───────────────────
   GOV_NOT_INITIALIZED        = 'GOV_NOT_INITIALIZED',          // 1
@@ -148,6 +154,10 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.BOUNTY_INSUFFICIENT_FUNDS]:  'Insufficient funds in the escrow for this operation',
   [ContractErrorCode.BOUNTY_REFUND_NOT_APPROVED]: 'Refund has not been approved by an admin',
   [ContractErrorCode.BOUNTY_FUNDS_PAUSED]:        'Bounty fund operations are currently paused',
+  [ContractErrorCode.BOUNTY_AMOUNT_BELOW_MINIMUM]: 'Bounty amount is below the configured minimum',
+  [ContractErrorCode.BOUNTY_AMOUNT_ABOVE_MAXIMUM]: 'Bounty amount exceeds the configured maximum',
+  [ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN]: 'Bounty escrow circuit breaker is open',
+  [ContractErrorCode.BOUNTY_CLAIM_EXPIRED]:        'Authorized bounty claim window has expired',
 
   // Governance
   [ContractErrorCode.GOV_NOT_INITIALIZED]:        'Governance contract has not been initialized',
@@ -194,6 +204,10 @@ export const BOUNTY_ESCROW_ERROR_MAP: Record<number, ContractErrorCode> = {
   16: ContractErrorCode.BOUNTY_INSUFFICIENT_FUNDS,
   17: ContractErrorCode.BOUNTY_REFUND_NOT_APPROVED,
   18: ContractErrorCode.BOUNTY_FUNDS_PAUSED,
+  19: ContractErrorCode.BOUNTY_AMOUNT_BELOW_MINIMUM,
+  20: ContractErrorCode.BOUNTY_AMOUNT_ABOVE_MAXIMUM,
+  21: ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN,
+  22: ContractErrorCode.BOUNTY_CLAIM_EXPIRED,
 };
 
 /** Governance #[contracterror] discriminants → SDK code */
@@ -317,6 +331,9 @@ export function parseContractError(error: any): ContractError {
   if (errorMessage.includes('FundsNotLocked') || errorMessage.includes('funds have not been locked')) {
     return createContractError(ContractErrorCode.BOUNTY_FUNDS_NOT_LOCKED);
   }
+  if (errorMessage.includes('ClaimExpired') || errorMessage.includes('claim window has expired')) {
+    return createContractError(ContractErrorCode.BOUNTY_CLAIM_EXPIRED);
+  }
   if (errorMessage.includes('DeadlineNotPassed') || errorMessage.includes('deadline has not passed')) {
     return createContractError(ContractErrorCode.BOUNTY_DEADLINE_NOT_PASSED);
   }
@@ -349,6 +366,9 @@ export function parseContractError(error: any): ContractError {
   }
   if (errorMessage.includes('FundsPaused') || errorMessage.includes('funds are currently paused')) {
     return createContractError(ContractErrorCode.BOUNTY_FUNDS_PAUSED);
+  }
+  if (errorMessage.includes('CircuitBreakerOpen')) {
+    return createContractError(ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN);
   }
 
   // ── Governance patterns ────────────────────────────────────────────────
