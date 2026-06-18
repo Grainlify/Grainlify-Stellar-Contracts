@@ -11,7 +11,7 @@ export async function batchLockExample(client: ProgramEscrowClient, sourceKeypai
 
     for (const amount of lockAmounts) {
         process.stdout.write(`Locking ${amount} stroops... `);
-        await client.lockProgramFunds(amount, sourceKeypair);
+        await client.lockProgramFunds(sourceKeypair.publicKey(), amount, sourceKeypair);
         console.log('Done.');
     }
 

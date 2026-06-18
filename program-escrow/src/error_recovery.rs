@@ -340,9 +340,9 @@ pub fn close_circuit(env: &Env) {
 /// The caller must have already verified admin authorization before calling this.
 pub fn reset_circuit_breaker(env: &Env, admin: &Address) {
     // Verify admin is registered
-    let stored_admin: Option<Address> = env.storage().persistent().get(&CircuitBreakerKey::Admin);
+    let storedadmin: Option<Address> = env.storage().persistent().get(&CircuitBreakerKey::Admin);
 
-    match stored_admin {
+    match storedadmin {
         Some(ref a) if a == admin => {
             admin.require_auth();
         }
@@ -358,7 +358,7 @@ pub fn reset_circuit_breaker(env: &Env, admin: &Address) {
 
 /// Register (or update) the admin address for circuit breaker resets.
 /// Can only be set once, or updated by the existing admin.
-pub fn set_circuit_admin(env: &Env, new_admin: Address, caller: Option<Address>) {
+pub fn set_circuitadmin(env: &Env, newadmin: Address, caller: Option<Address>) {
     let existing: Option<Address> = env.storage().persistent().get(&CircuitBreakerKey::Admin);
 
     if let Some(ref current) = existing {
@@ -372,11 +372,11 @@ pub fn set_circuit_admin(env: &Env, new_admin: Address, caller: Option<Address>)
 
     env.storage()
         .persistent()
-        .set(&CircuitBreakerKey::Admin, &new_admin);
+        .set(&CircuitBreakerKey::Admin, &newadmin);
 }
 
 /// Returns the circuit breaker admin address, if set.
-pub fn get_circuit_admin(env: &Env) -> Option<Address> {
+pub fn get_circuitadmin(env: &Env) -> Option<Address> {
     env.storage().persistent().get(&CircuitBreakerKey::Admin)
 }
 

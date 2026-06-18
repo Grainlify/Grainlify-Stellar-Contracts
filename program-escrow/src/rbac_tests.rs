@@ -25,9 +25,9 @@ impl<'a> RbacSetup<'a> {
         let pauser = Address::generate(&env);
         let random = Address::generate(&env);
 
-        let token_admin = Address::generate(&env);
+        let tokenadmin = Address::generate(&env);
         let token_id = env
-            .register_stellar_asset_contract_v2(token_admin.clone())
+            .register_stellar_asset_contract_v2(tokenadmin.clone())
             .address();
 
         let program_id = String::from_str(&env, "RBAC-Test");
@@ -41,7 +41,7 @@ impl<'a> RbacSetup<'a> {
 
         // Initialize circuit breaker with pauser
         // caller is None for first setting
-        client.set_circuit_admin(&pauser, &None);
+        client.set_circuitadmin(&pauser, &None);
 
         Self {
             env,
@@ -61,7 +61,7 @@ impl<'a> RbacSetup<'a> {
 // ─────────────────────────────────────────────────────────
 
 #[test]
-fn test_admin_permissions() {
+fn testadmin_permissions() {
     let setup = RbacSetup::new();
 
     // Admin should be able to pause/unpause
@@ -94,7 +94,7 @@ fn test_operator_permissions() {
 
 #[test]
 #[should_panic]
-fn test_admin_cannot_trigger_releases() {
+fn testadmin_cannot_trigger_releases() {
     let setup = RbacSetup::new();
     // No mock_all_auths()
 
@@ -121,7 +121,7 @@ fn test_pauser_permissions() {
 
 #[test]
 #[should_panic]
-fn test_admin_cannot_reset_circuit() {
+fn testadmin_cannot_reset_circuit() {
     let setup = RbacSetup::new();
     setup.env.mock_all_auths();
 

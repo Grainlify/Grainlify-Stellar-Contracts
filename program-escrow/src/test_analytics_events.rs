@@ -21,20 +21,20 @@ fn setup_program(
     let client = ProgramEscrowContractClient::new(env, &contract_id);
 
     let admin = Address::generate(env);
-    let token_admin = Address::generate(env);
-    let token_id = env.register_stellar_asset_contract(token_admin.clone());
+    let tokenadmin = Address::generate(env);
+    let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
     let token_client = token::Client::new(env, &token_id);
-    let token_admin_client = token::StellarAssetClient::new(env, &token_id);
+    let tokenadmin_client = token::StellarAssetClient::new(env, &token_id);
 
     let program_id = SorobanString::from_str(env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
 
     if initial_amount > 0 {
-        token_admin_client.mint(&client.address, &initial_amount);
-        client.lock_program_funds(&initial_amount);
+        tokenadmin_client.mint(&admin, &initial_amount);
+        client.lock_program_funds(&admin, &initial_amount);
     }
 
-    (client, admin, token_client, token_admin_client)
+    (client, admin, token_client, tokenadmin_client)
 }
 
 fn find_event_by_topic(env: &Env, topic: Symbol) -> Option<(Vec<Val>, Val)> {
@@ -67,7 +67,7 @@ fn assert_event_has_version(env: &Env, data: &Val) {
 #[test]
 fn test_aggregate_stats_event_on_single_payout() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
     client.single_payout(&recipient, &30_000);
@@ -105,7 +105,7 @@ fn test_aggregate_stats_event_on_single_payout() {
 #[test]
 fn test_aggregate_stats_event_on_batch_payout() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 150_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 150_000);
 
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
@@ -148,7 +148,7 @@ fn test_aggregate_stats_event_on_batch_payout() {
 #[test]
 fn test_large_payout_event_emitted_above_threshold() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
     // Payout 15% of total funds (above 10% threshold)
@@ -178,7 +178,7 @@ fn test_large_payout_event_emitted_above_threshold() {
 #[test]
 fn test_large_payout_event_not_emitted_below_threshold() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
     // Payout 5% of total funds (below 10% threshold)
@@ -195,7 +195,7 @@ fn test_large_payout_event_not_emitted_below_threshold() {
 #[test]
 fn test_large_payout_event_in_batch() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
@@ -232,7 +232,7 @@ fn test_large_payout_event_in_batch() {
 #[test]
 fn test_schedule_triggered_event_automatic() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
     let release_timestamp = 1000;
@@ -267,7 +267,7 @@ fn test_schedule_triggered_event_automatic() {
 #[test]
 fn test_schedule_triggered_event_manual() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
     let release_timestamp = 1000;
@@ -290,7 +290,7 @@ fn test_schedule_triggered_event_manual() {
 #[test]
 fn test_multiple_schedule_triggers_emit_multiple_events() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
@@ -329,7 +329,7 @@ fn test_multiple_schedule_triggers_emit_multiple_events() {
 #[test]
 fn test_aggregate_stats_includes_scheduled_count() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let r1 = Address::generate(&env);
     let r2 = Address::generate(&env);
@@ -358,7 +358,7 @@ fn test_aggregate_stats_includes_scheduled_count() {
 #[test]
 fn test_aggregate_stats_after_schedule_release() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
 
@@ -403,7 +403,7 @@ fn test_aggregate_stats_after_schedule_release() {
 #[test]
 fn test_event_payload_compactness() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
     client.single_payout(&recipient, &30_000);
@@ -428,7 +428,7 @@ fn test_event_payload_compactness() {
 #[test]
 fn test_all_analytics_events_have_program_id() {
     let env = Env::default();
-    let (client, _admin, _token, _token_admin) = setup_program(&env, 100_000);
+    let (client, admin, _token, _tokenadmin) = setup_program(&env, 100_000);
 
     let recipient = Address::generate(&env);
 

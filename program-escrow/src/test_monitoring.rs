@@ -21,7 +21,9 @@ fn test_monitoring_analytics_and_health() {
     assert_eq!(initial_health.total_operations, 0);
 
     let backend = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
     let prog_id = String::from_str(&env, "TestHealth");
 
     // Test init metric
@@ -37,13 +39,16 @@ fn test_monitoring_analytics_and_health() {
 
     // Test lock metric
     env.ledger().set_timestamp(200);
-    client.lock_program_funds(&5000);
+    let admin = Address::generate(&env);
+    token_sac.mint(&admin, &5000);
+    client.lock_program_funds(&admin, &5000);
 
     let analytics2 = client.get_monitoring_analytics();
     assert_eq!(analytics2.operation_count, 2);
 
     // Test lock error metric (trigger panic)
-    let result = client.try_lock_program_funds(&0);
+    let admin = Address::generate(&env);
+    let result = client.try_lock_program_funds(&admin, &0);
     assert!(result.is_err());
 
     let analytics3 = client.get_monitoring_analytics();

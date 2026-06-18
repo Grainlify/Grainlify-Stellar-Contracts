@@ -86,6 +86,7 @@ export class ProgramEscrowClient {
    * Lock funds into the program escrow
    */
   async lockProgramFunds(
+    from: string,
     amount: bigint,
     sourceKeypair: Keypair
   ): Promise<ProgramData> {
@@ -96,7 +97,7 @@ export class ProgramEscrowClient {
     try {
       const result = await this.invokeContract(
         'lock_program_funds',
-        [amount],
+        [from, amount],
         sourceKeypair
       );
       return this.parseProgramData(result);

@@ -2,6 +2,14 @@
 
 A Soroban smart contract for managing program-level escrow funds for hackathons and grant programs. This contract handles prize pools, tracks balances, and enables automated batch payouts to multiple contributors.
 
+## Documentation
+
+Detailed documentation for this contract is available in the [`docs/`](../docs/index.md) directory:
+
+- [Reentrancy Guard](../docs/program-escrow/REENTRANCY_GUARD_DOCUMENTATION.md)
+- [Analytics Events](../docs/program-escrow/ANALYTICS_EVENTS.md)
+- [Implementation Summary](../docs/program-escrow/IMPLEMENTATION_SUMMARY.md)
+
 ## Features
 
 - **Program Initialization**: Create a new escrow program with authorized payout key
@@ -41,7 +49,7 @@ Initialize a new program escrow.
 
 **Events:** `ProgramInitialized`
 
-#### `lock_program_funds(amount)`
+#### `lock_program_funds(from, amount)`
 
 Lock funds into the escrow. Updates both `total_funds` and `remaining_balance`.
 
@@ -233,7 +241,7 @@ let program_data = contract.init_program(
 );
 
 // Lock funds (50,000 XLM in stroops)
-contract.lock_program_funds(&env, 50_000_000_000);
+contract.lock_program_funds(&env, &admin, &50_000_000_000);
 
 // Batch payout to winners
 let recipients = vec![&env, winner1, winner2, winner3];

@@ -6,9 +6,9 @@ use soroban_sdk::testutils::Address as TestAddress;
 use soroban_sdk::{contract, contractimpl, symbol_short, testutils::Ledger, Address, Env, String};
 
 use crate::error_recovery::{
-    check_and_allow, close_circuit, execute_with_retry, get_circuit_admin, get_config,
+    check_and_allow, close_circuit, execute_with_retry, get_circuitadmin, get_config,
     get_error_log, get_failure_count, get_state, get_status, get_success_count, half_open_circuit,
-    open_circuit, record_failure, record_success, reset_circuit_breaker, set_circuit_admin,
+    open_circuit, record_failure, record_success, reset_circuit_breaker, set_circuitadmin,
     set_config, CircuitBreakerConfig, CircuitState, RetryConfig, ERR_CIRCUIT_OPEN,
     ERR_TRANSFER_FAILED,
 };
@@ -38,12 +38,12 @@ fn setup_env() -> (Env, Address) {
 
 /// Create a fresh Env, register an admin, and configure the circuit breaker.
 /// Returns (env, admin_address, contract_id).
-fn setup_with_admin(failure_threshold: u32) -> (Env, Address, Address) {
+fn setup_withadmin(failure_threshold: u32) -> (Env, Address, Address) {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
 
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
+        set_circuitadmin(&env, admin.clone(), None);
         set_config(
             &env,
             CircuitBreakerConfig {
@@ -96,7 +96,7 @@ fn test_check_and_allow_passes_when_closed() {
 
 #[test]
 fn test_single_failure_does_not_open_circuit() {
-    let (env, _admin, contract_id) = setup_with_admin(3);
+    let (env, admin, contract_id) = setup_withadmin(3);
     simulate_failures(&env, &contract_id, 1);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Closed);
@@ -107,7 +107,7 @@ fn test_single_failure_does_not_open_circuit() {
 
 #[test]
 fn test_failures_below_threshold_keep_circuit_closed() {
-    let (env, _admin, contract_id) = setup_with_admin(5);
+    let (env, admin, contract_id) = setup_withadmin(5);
     simulate_failures(&env, &contract_id, 4);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Closed);
@@ -122,7 +122,7 @@ fn test_failures_below_threshold_keep_circuit_closed() {
 
 #[test]
 fn test_circuit_opens_at_threshold() {
-    let (env, _admin, contract_id) = setup_with_admin(3);
+    let (env, admin, contract_id) = setup_withadmin(3);
     simulate_failures(&env, &contract_id, 3);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Open);
@@ -132,7 +132,7 @@ fn test_circuit_opens_at_threshold() {
 
 #[test]
 fn test_circuit_opens_exactly_at_threshold_not_before() {
-    let (env, _admin, contract_id) = setup_with_admin(3);
+    let (env, admin, contract_id) = setup_withadmin(3);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         assert_eq!(
@@ -153,7 +153,7 @@ fn test_circuit_opens_exactly_at_threshold_not_before() {
 
 #[test]
 fn test_opened_at_timestamp_recorded() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     env.ledger().set_timestamp(5000);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
@@ -169,7 +169,7 @@ fn test_opened_at_timestamp_recorded() {
 
 #[test]
 fn test_circuit_open_rejects_operations() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Open);
@@ -181,7 +181,7 @@ fn test_circuit_open_rejects_operations() {
 
 #[test]
 fn test_circuit_stays_open_across_multiple_check_attempts() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         for _ in 0..10 {
@@ -194,7 +194,7 @@ fn test_circuit_stays_open_across_multiple_check_attempts() {
 
 #[test]
 fn test_additional_failures_after_open_do_not_change_state() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         let prog = String::from_str(&env, "TestProg");
@@ -207,7 +207,7 @@ fn test_additional_failures_after_open_do_not_change_state() {
 
 #[test]
 fn test_success_record_while_open_is_ignored() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Open);
@@ -222,7 +222,7 @@ fn test_success_record_while_open_is_ignored() {
 
 #[test]
 fn test_reset_open_to_half_open() {
-    let (env, admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Open);
@@ -233,7 +233,7 @@ fn test_reset_open_to_half_open() {
 
 #[test]
 fn test_half_open_allows_one_operation_through() {
-    let (env, admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         reset_circuit_breaker(&env, &admin);
@@ -243,7 +243,7 @@ fn test_half_open_allows_one_operation_through() {
 
 #[test]
 fn test_success_count_reset_on_half_open() {
-    let (env, admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         reset_circuit_breaker(&env, &admin);
@@ -258,7 +258,7 @@ fn test_success_count_reset_on_half_open() {
 
 #[test]
 fn test_success_in_half_open_closes_circuit() {
-    let (env, admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         reset_circuit_breaker(&env, &admin);
@@ -271,7 +271,7 @@ fn test_success_in_half_open_closes_circuit() {
 
 #[test]
 fn test_circuit_closed_fully_operational_after_half_open_recovery() {
-    let (env, admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         reset_circuit_breaker(&env, &admin);
@@ -287,7 +287,7 @@ fn test_multi_success_threshold_half_open() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
+        set_circuitadmin(&env, admin.clone(), None);
         set_config(
             &env,
             CircuitBreakerConfig {
@@ -327,7 +327,7 @@ fn test_multi_success_threshold_half_open() {
 
 #[test]
 fn test_failure_in_half_open_reopens_circuit() {
-    let (env, admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         reset_circuit_breaker(&env, &admin);
@@ -340,7 +340,7 @@ fn test_failure_in_half_open_reopens_circuit() {
 
 #[test]
 fn test_reopen_after_half_open_failure_rejects_immediately() {
-    let (env, admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         reset_circuit_breaker(&env, &admin);
@@ -352,7 +352,7 @@ fn test_reopen_after_half_open_failure_rejects_immediately() {
 
 // #[test]
 // fn test_half_open_can_be_reset_again_after_reopen() {
-//     let (env, admin, contract_id) = setup_with_admin(2);
+//     let (env, admin, contract_id) = setup_withadmin(2);
 //     simulate_failures(&env, &contract_id, 2);
 //     env.as_contract(&contract_id, || {
 //         reset_circuit_breaker(&env, &admin);
@@ -372,7 +372,7 @@ fn test_reopen_after_half_open_failure_rejects_immediately() {
 
 // #[test]
 // fn test_reset_half_open_goes_to_closed() {
-//     let (env, admin, contract_id) = setup_with_admin(2);
+//     let (env, admin, contract_id) = setup_withadmin(2);
 //     simulate_failures(&env, &contract_id, 2);
 //     env.as_contract(&contract_id, || {
 //         reset_circuit_breaker(&env, &admin); // Open → HalfOpen
@@ -384,7 +384,7 @@ fn test_reopen_after_half_open_failure_rejects_immediately() {
 
 #[test]
 fn test_reset_from_closed_stays_closed() {
-    let (env, admin, contract_id) = setup_with_admin(3);
+    let (env, admin, contract_id) = setup_withadmin(3);
     env.as_contract(&contract_id, || {
         reset_circuit_breaker(&env, &admin);
         assert_eq!(get_state(&env), CircuitState::Closed);
@@ -397,7 +397,7 @@ fn test_reset_from_closed_stays_closed() {
 
 #[test]
 fn test_error_log_populated_on_failure() {
-    let (env, _admin, contract_id) = setup_with_admin(10);
+    let (env, admin, contract_id) = setup_withadmin(10);
     env.as_contract(&contract_id, || {
         let prog = String::from_str(&env, "TestProg");
         let op = symbol_short!("op");
@@ -415,7 +415,7 @@ fn test_error_log_capped_at_max() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
+        set_circuitadmin(&env, admin.clone(), None);
         set_config(
             &env,
             CircuitBreakerConfig {
@@ -439,7 +439,7 @@ fn test_error_log_contains_latest_errors_when_capped() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
+        set_circuitadmin(&env, admin.clone(), None);
         set_config(
             &env,
             CircuitBreakerConfig {
@@ -469,7 +469,7 @@ fn test_retry_exhaustion_opens_circuit() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
+        set_circuitadmin(&env, admin.clone(), None);
         set_config(
             &env,
             CircuitBreakerConfig {
@@ -491,7 +491,7 @@ fn test_retry_exhaustion_opens_circuit() {
 
 #[test]
 fn test_retry_circuit_open_stops_immediately() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Open);
@@ -514,7 +514,7 @@ fn test_retry_success_on_second_attempt_resets_failures() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
+        set_circuitadmin(&env, admin.clone(), None);
         set_config(
             &env,
             CircuitBreakerConfig {
@@ -549,7 +549,7 @@ fn test_retry_success_on_second_attempt_resets_failures() {
 #[test]
 #[should_panic(expected = "Unauthorized")]
 fn test_unauthorized_reset_panics() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     let impostor = Address::generate(&env);
     env.as_contract(&contract_id, || {
@@ -559,7 +559,7 @@ fn test_unauthorized_reset_panics() {
 
 #[test]
 #[should_panic(expected = "Unauthorized")]
-fn test_reset_with_no_admin_set_panics() {
+fn test_reset_with_noadmin_set_panics() {
     let (env, contract_id) = setup_env();
     let random = Address::generate(&env);
     env.as_contract(&contract_id, || {
@@ -573,7 +573,7 @@ fn test_reset_with_no_admin_set_panics() {
 
 #[test]
 fn test_config_change_threshold_takes_effect() {
-    let (env, _admin, contract_id) = setup_with_admin(10);
+    let (env, admin, contract_id) = setup_withadmin(10);
     simulate_failures(&env, &contract_id, 5);
     env.as_contract(&contract_id, || {
         assert_eq!(
@@ -621,7 +621,7 @@ fn test_get_config_returns_set_values() {
 //     let (env, contract_id) = setup_env();
 //     let admin = Address::generate(&env);
 //     env.as_contract(&contract_id, || {
-//         set_circuit_admin(&env, admin.clone(), None);
+//         set_circuitadmin(&env, admin.clone(), None);
 //         set_config(
 //             &env,
 //             CircuitBreakerConfig {
@@ -690,7 +690,7 @@ fn test_get_config_returns_set_values() {
 
 #[test]
 fn test_status_snapshot_reflects_state() {
-    let (env, admin, contract_id) = setup_with_admin(3);
+    let (env, admin, contract_id) = setup_withadmin(3);
     env.ledger().set_timestamp(9999);
     simulate_failures(&env, &contract_id, 3);
     env.as_contract(&contract_id, || {
@@ -728,7 +728,7 @@ fn test_direct_open_circuit() {
 
 #[test]
 fn test_direct_close_circuit_resets_counters() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         assert_eq!(get_state(&env), CircuitState::Open);
@@ -742,7 +742,7 @@ fn test_direct_close_circuit_resets_counters() {
 
 #[test]
 fn test_direct_half_open_circuit() {
-    let (env, _admin, contract_id) = setup_with_admin(2);
+    let (env, admin, contract_id) = setup_withadmin(2);
     simulate_failures(&env, &contract_id, 2);
     env.as_contract(&contract_id, || {
         half_open_circuit(&env);
@@ -757,36 +757,36 @@ fn test_direct_half_open_circuit() {
 // ─────────────────────────────────────────────────────────
 
 #[test]
-fn test_set_and_get_circuit_admin() {
+fn test_set_and_get_circuitadmin() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
-        assert_eq!(get_circuit_admin(&env), Some(admin));
+        set_circuitadmin(&env, admin.clone(), None);
+        assert_eq!(get_circuitadmin(&env), Some(admin));
     });
 }
 
 #[test]
 #[should_panic(expected = "Unauthorized")]
-fn test_non_admin_cannot_change_admin() {
+fn test_nonadmin_cannot_changeadmin() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
     let impostor = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
-        set_circuit_admin(&env, impostor.clone(), Some(impostor));
+        set_circuitadmin(&env, admin.clone(), None);
+        set_circuitadmin(&env, impostor.clone(), Some(impostor));
     });
 }
 
 #[test]
-fn test_admin_can_update_admin() {
+fn testadmin_can_updateadmin() {
     let (env, contract_id) = setup_env();
     let admin = Address::generate(&env);
-    let new_admin = Address::generate(&env);
+    let newadmin = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        set_circuit_admin(&env, admin.clone(), None);
-        set_circuit_admin(&env, new_admin.clone(), Some(admin));
-        assert_eq!(get_circuit_admin(&env), Some(new_admin));
+        set_circuitadmin(&env, admin.clone(), None);
+        set_circuitadmin(&env, newadmin.clone(), Some(admin));
+        assert_eq!(get_circuitadmin(&env), Some(newadmin));
     });
 }
 
@@ -796,7 +796,7 @@ fn test_admin_can_update_admin() {
 
 #[test]
 fn test_many_successes_in_closed_state_never_open() {
-    let (env, _admin, contract_id) = setup_with_admin(3);
+    let (env, admin, contract_id) = setup_withadmin(3);
     env.as_contract(&contract_id, || {
         for _ in 0..100 {
             record_success(&env);
@@ -808,7 +808,7 @@ fn test_many_successes_in_closed_state_never_open() {
 
 #[test]
 fn test_interleaved_failures_and_successes_do_not_open_if_never_hit_threshold() {
-    let (env, _admin, contract_id) = setup_with_admin(5);
+    let (env, admin, contract_id) = setup_withadmin(5);
     env.as_contract(&contract_id, || {
         let prog = String::from_str(&env, "TestProg");
         let op = symbol_short!("op");
