@@ -347,6 +347,49 @@ pub struct FundsRefunded {
 
 ---
 
+### 5.4a `BountyExpired`
+
+**Emitted by:** `emit_bounty_expired()`
+**Topics:** `(symbol_short!("expired"), event.bounty_id)`
+**Struct:** `BountyExpired`
+**Lifecycle phase:** Bounty deadline expiry / sweep refund
+
+```rust
+#[contracttype]
+pub struct BountyExpired {
+    pub version:   u32,
+    pub bounty_id: u64,
+    pub amount:    i128,
+    pub depositor: Address,
+    pub deadline:  u64,
+    pub timestamp: u64,
+}
+```
+
+#### v2 Payload Example
+
+```json
+{
+  "version":   2,
+  "bounty_id": 42,
+  "amount":    1000000000,
+  "depositor": "GABC…",
+  "deadline":  1740199000,
+  "timestamp": 1740200000
+}
+```
+
+| Field       | Rust type | v1 required | v2 required | Description |
+|-------------|-----------|-------------|-------------|-------------|
+| `version`   | `u32`     | No          | **Yes**     | Always `2` |
+| `bounty_id` | `u64`     | **Yes**     | **Yes**     | Bounty identifier; also in topic[1] |
+| `amount`    | `i128`    | **Yes**     | **Yes**     | Remaining amount swept back to the depositor |
+| `depositor` | `Address` | **Yes**     | **Yes**     | Original depositor receiving the expiry refund |
+| `deadline`  | `u64`     | **Yes**     | **Yes**     | Bounty deadline that made the refund sweep eligible |
+| `timestamp` | `u64`     | **Yes**     | **Yes**     | Ledger timestamp at sweep/refund |
+
+---
+
 ### 5.5 `FeeCollected`
 
 **Emitted by:** `emit_fee_collected()`

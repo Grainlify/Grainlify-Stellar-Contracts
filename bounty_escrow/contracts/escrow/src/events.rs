@@ -62,6 +62,22 @@ pub fn emit_funds_refunded(env: &Env, event: FundsRefunded) {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct BountyExpired {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub amount: i128,
+    pub depositor: Address,
+    pub deadline: u64,
+    pub timestamp: u64,
+}
+
+pub fn emit_bounty_expired(env: &Env, event: BountyExpired) {
+    let topics = (symbol_short!("expired"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FeeOperationType {
     Lock,

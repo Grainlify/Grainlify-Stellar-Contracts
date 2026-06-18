@@ -17,4 +17,4 @@ For event consumers in this repository:
 - Backward compatibility: SDK parsing tests cover legacy/unversioned payloads.
 - Forward compatibility: SDK parsing tests cover newer version tags with additive fields.
 - Contract emission correctness: contract tests assert emitted payloads include `version: 2` tags on current emitters.
-
+- Expiry lifecycle additions such as `BountyExpired` are additive v2 payloads and must keep `bounty_id`, `amount`, `depositor`, `deadline`, and `timestamp` stable for indexers.
