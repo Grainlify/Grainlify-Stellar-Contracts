@@ -1,14 +1,11 @@
 #![cfg(test)]
 
-use crate::{ProgramEscrowContract, ProgramEscrowContractClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, Env, String,
-};
+use crate::{governance_integration, Error, ProgramEscrowContract, ProgramEscrowContractClient};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 // Mock governance contract for testing
 mod mock_governance {
-    use soroban_sdk::{contract, contractimpl, Env};
+    use soroban_sdk::{contract, contractimpl, BytesN, Env};
 
     #[contract]
     pub struct MockGovernanceContract;
@@ -17,6 +14,10 @@ mod mock_governance {
     impl MockGovernanceContract {
         pub fn get_ver(_env: Env) -> u32 {
             2
+        }
+
+        pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
+            wasm_hash == BytesN::from_array(&env, &[7u8; 32])
         }
     }
 }
@@ -83,7 +84,6 @@ fn test_governance_version_check_with_mock() {
 }
 
 #[test]
-#[should_panic(expected = "Governance version requirement not met")]
 fn test_governance_version_check_fails_when_version_too_low() {
     let env = Env::default();
     env.mock_all_auths();
@@ -101,8 +101,71 @@ fn test_governance_version_check_fails_when_version_too_low() {
     client.set_governance_contract(&gov_contract_id);
     client.set_min_governance_version(&3);
 
-    // This should panic because governance version (2) < required version (3)
-    client.set_paused(&Some(true), &None, &None);
+    // This should return a typed error because governance version (2) < required version (3)
+    let result = client.try_set_paused(&Some(true), &None, &None);
+    assert_eq!(result, Err(Ok(Error::GovernanceVersionTooLow)));
+}
+
+#[test]
+fn test_governance_version_too_low_blocks_rate_limit_config_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&3);
+
+    let result = client.try_update_rate_limit_config(&3600, &10, &60);
+    assert_eq!(result, Err(Ok(Error::GovernanceVersionTooLow)));
+}
+
+#[test]
+fn test_upgrade_approval_requires_matching_executed_governance_hash() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+    let wrong_hash = BytesN::from_array(&env, &[9u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_upgrade_approval(
+            &env,
+            &approved_hash,
+        ));
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &wrong_hash,
+        ));
+    });
+}
+
+#[test]
+fn test_upgrade_approval_denies_when_governance_is_not_configured() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_upgrade_approval(
+            &env, &wasm_hash,
+        ));
+    });
 }
 
 #[test]
