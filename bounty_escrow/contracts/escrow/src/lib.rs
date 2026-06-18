@@ -1184,6 +1184,8 @@ impl BountyEscrowContract {
         );
 
         escrow.status = EscrowStatus::Released;
+        // Zero remaining_amount to maintain SAC ≡ Σ remaining_amount invariant.
+        escrow.remaining_amount = 0;
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
@@ -2537,8 +2539,9 @@ impl BountyEscrowContract {
             // Transfer funds to contributor
             client.transfer(&contract_address, &item.contributor, &escrow.amount);
 
-            // Update escrow status
+            // Update escrow status; zero remaining_amount to maintain invariant.
             escrow.status = EscrowStatus::Released;
+            escrow.remaining_amount = 0;
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(item.bounty_id), &escrow);
@@ -2988,3 +2991,6 @@ mod test_gas_proxy;
 
 #[cfg(test)]
 mod test_reentrancy;
+
+#[cfg(test)]
+mod test_balance_invariant;

@@ -2208,7 +2208,7 @@ impl ProgramEscrowContract {
 
     pub fn release_program_schedule_manual(env: Env, schedule_id: u64) {
         let mut schedules = Self::get_program_release_schedules(env.clone());
-        let program_data = Self::get_program_info(env.clone());
+        let mut program_data = Self::get_program_info(env.clone());
 
         program_data.authorized_payout_key.require_auth();
 
@@ -2227,6 +2227,9 @@ impl ProgramEscrowContract {
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
+
+                // Maintain SAC ≡ remaining_balance invariant.
+                program_data.remaining_balance -= s.amount;
 
                 s.released = true;
                 s.released_at = Some(now);
@@ -2256,6 +2259,8 @@ impl ProgramEscrowContract {
         }
 
         env.storage().instance().set(&SCHEDULES, &schedules);
+        // Persist the updated remaining_balance.
+        env.storage().instance().set(&PROGRAM_DATA, &program_data);
 
         // Write to release history
         if let Some(s) = released_schedule {
@@ -2277,7 +2282,7 @@ impl ProgramEscrowContract {
 
     pub fn release_prog_schedule_automatic(env: Env, schedule_id: u64) {
         let mut schedules = Self::get_program_release_schedules(env.clone());
-        let program_data = Self::get_program_info(env.clone());
+        let mut program_data = Self::get_program_info(env.clone());
         let now = env.ledger().timestamp();
         let mut released_schedule: Option<ProgramReleaseSchedule> = None;
 
@@ -2295,6 +2300,9 @@ impl ProgramEscrowContract {
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
+
+                // Maintain SAC ≡ remaining_balance invariant.
+                program_data.remaining_balance -= s.amount;
 
                 s.released = true;
                 s.released_at = Some(now);
@@ -2324,6 +2332,8 @@ impl ProgramEscrowContract {
         }
 
         env.storage().instance().set(&SCHEDULES, &schedules);
+        // Persist the updated remaining_balance.
+        env.storage().instance().set(&PROGRAM_DATA, &program_data);
 
         // Write to release history
         if let Some(s) = released_schedule {
@@ -3129,3 +3139,6 @@ mod integration_tests {
 #[cfg(test)]
 mod rbac_tests;
 mod test;
+
+#[cfg(test)]
+mod test_balance_invariant;
