@@ -387,6 +387,10 @@ pub enum Error {
     AmountAboveMaximum = 20,
     /// Returned when circuit breaker is open and operations are paused
     CircuitBreakerOpen = 21,
+    /// Returned when an authorized claim is attempted after its claim window expires
+    ClaimExpired = 22,
+    /// Returned when the linked governance contract version is below the configured minimum
+    GovernanceVersionTooLow = 23,
 }
 
 #[contracttype]
@@ -664,7 +668,7 @@ impl BountyEscrowContract {
         admin.require_auth();
 
         // Check governance requirements
-        Self::check_governance_requirements(&env);
+        Self::check_governance_requirements(&env)?;
 
         let mut fee_config = Self::get_fee_config_internal(&env);
 
@@ -723,7 +727,7 @@ impl BountyEscrowContract {
         admin.require_auth();
 
         // Check governance requirements
-        Self::check_governance_requirements(&env);
+        Self::check_governance_requirements(&env)?;
 
         let mut flags = Self::get_pause_flags(&env);
 
@@ -1182,6 +1186,8 @@ impl BountyEscrowContract {
         );
 
         escrow.status = EscrowStatus::Released;
+        // Zero remaining_amount to maintain SAC ≡ Σ remaining_amount invariant.
+        escrow.remaining_amount = 0;
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
@@ -1332,7 +1338,7 @@ impl BountyEscrowContract {
 
         let now = env.ledger().timestamp();
         if now > claim.expires_at {
-            return Err(Error::DeadlineNotPassed); // reuse or add ClaimExpired error
+            return Err(Error::ClaimExpired);
         }
         if claim.claimed {
             return Err(Error::FundsNotLocked);
@@ -1399,6 +1405,13 @@ impl BountyEscrowContract {
             return Err(Error::FundsNotLocked);
         }
 
+        let cancelled_at = env.ledger().timestamp();
+        let reason = if cancelled_at > claim.expires_at {
+            symbol_short!("expired")
+        } else {
+            symbol_short!("manual")
+        };
+
         env.storage()
             .persistent()
             .remove(&DataKey::PendingClaim(bounty_id));
@@ -1409,8 +1422,9 @@ impl BountyEscrowContract {
                 bounty_id,
                 recipient: claim.recipient,
                 amount: claim.amount,
-                cancelled_at: env.ledger().timestamp(),
+                cancelled_at,
                 cancelled_by: admin,
+                reason,
             },
         );
         Ok(())
@@ -2378,10 +2392,11 @@ impl BountyEscrowContract {
     }
 
     /// Check if governance requirements are met before admin operations
-    fn check_governance_requirements(env: &Env) {
+    fn check_governance_requirements(env: &Env) -> Result<(), Error> {
         if !governance_integration::check_governance_version(env) {
-            panic!("Governance version requirement not met");
+            return Err(Error::GovernanceVersionTooLow);
         }
+        Ok(())
     }
 
     /// Gets refund eligibility information for a bounty.
@@ -2687,8 +2702,9 @@ impl BountyEscrowContract {
             // Transfer funds to contributor
             client.transfer(&contract_address, &item.contributor, &escrow.amount);
 
-            // Update escrow status
+            // Update escrow status; zero remaining_amount to maintain invariant.
             escrow.status = EscrowStatus::Released;
+            escrow.remaining_amount = 0;
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(item.bounty_id), &escrow);
@@ -3125,6 +3141,8 @@ mod test_lifecycle;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
+mod proptest_invariants;
+#[cfg(test)]
 mod test_query_filters;
 #[cfg(test)]
 mod test_governance_integration;
@@ -3136,3 +3154,6 @@ mod test_gas_proxy;
 
 #[cfg(test)]
 mod test_reentrancy;
+
+#[cfg(test)]
+mod test_balance_invariant;

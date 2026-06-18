@@ -1,0 +1,102 @@
+# Grainlify Governance System
+
+## Overview
+
+The Grainlify governance system enables decentralized decision-making for contract upgrades through proposals, authenticated voting, quorum checks, and approval thresholds. Governance configuration explicitly selects either one-person-one-vote or token-weighted voting.
+
+## Key Parameters
+
+- **Voting Period:** Duration during which votes can be cast.
+- **Execution Delay:** Time-lock period after a proposal is approved before it can be executed.
+- **Quorum:** Minimum percentage, in basis points, of the scheme-specific total voting power that must participate.
+- **Approval Threshold:** Minimum percentage, in basis points, of non-abstaining voting power that must vote `For`.
+- **Minimum Proposal Stake:** Minimum balance of the configured governance token required to create a proposal.
+- **Governance Token:** Soroban token address used for token-weighted voting and proposal-stake checks.
+- **Token Total Voting Power:** Total token voting power used as the denominator for token-weighted quorum. This should match the selected snapshot or stake-lock set.
+
+## Voting Power
+
+### OnePersonOneVote
+
+`OnePersonOneVote` assigns every authenticated voter a constant voting power of `1`. The contract prevents the same address from voting more than once on the same proposal.
+
+Because the contract does not maintain an on-chain voter registry, quorum for this scheme is calculated against `one_person_total_voters` from `GovernanceConfig`. Deployments must keep this value aligned with the eligible electorate.
+
+### TokenWeighted
+
+`TokenWeighted` derives each vote's `voting_power` by reading the voter's balance from the configured governance token contract at vote time:
+
+```text
+voting_power = governance_token.balance(voter)
+```
+
+The contract rejects votes with zero voting power. Token-weighted quorum is calculated against `GovernanceConfig::token_total_voting_power`, which should represent the total governance-token power eligible at the selected snapshot or stake-lock point.
+
+## Snapshot And Balance Semantics
+
+The standard Soroban token interface exposes current balances, not historical balances. `GovernanceConfig::snapshot_ledger` records the ledger selected by governance policy for a snapshot or stake-lock process, but the contract cannot independently query historical token balances from a normal token contract.
+
+Production token-weighted governance should use one of these mitigations:
+
+- Lock voting stake for the full voting window before proposals can be voted on.
+- Use a governance token wrapper that exposes snapshot balances for the configured snapshot ledger.
+- Ensure token supply and transferable balances cannot be cheaply manipulated during the voting window.
+
+Without one of these controls, a voter may temporarily acquire tokens, vote, and transfer them away before finalization. The contract mitigates zero-balance voting and uses the configured token address for all reads, but current-balance voting alone does not prevent flash-loan style power inflation.
+
+## Governance Flow
+
+1. **Proposal Creation**
+   - The proposer must authorize the call.
+   - If `min_proposal_stake > 0`, the proposer must hold at least that much of the configured governance token.
+   - Voting starts immediately upon creation.
+
+2. **Voting Period**
+   - Eligible voters cast `For`, `Against`, or `Abstain`.
+   - The contract derives voting power according to the configured voting scheme.
+   - Each address can vote once per proposal.
+   - Zero-power votes are rejected.
+
+3. **Finalization**
+   - After the voting period ends, anyone can call `finalize_proposal`.
+   - Quorum is checked against the scheme-correct total voting power.
+   - Approval threshold is checked against `For + Against` voting power, excluding abstentions.
+   - If quorum is not met, the proposal is stored as `Rejected`.
+
+4. **Execution**
+   - Approved proposals enter the configured execution delay before upgrade execution.
+   - Execution logic should preserve the existing time-lock and audit requirements.
+
+## Security Features
+
+- **Authenticated Voting:** `require_auth()` is called for voters and proposers.
+- **Double-Voting Prevention:** Each address can vote only once per proposal.
+- **Configured Token Reads:** Token-weighted power and stake checks use only `GovernanceConfig::governance_token`.
+- **Zero-Power Rejection:** Accounts with no scheme-valid voting power cannot vote.
+- **Quorum Enforcement:** Participation is checked before approval threshold math.
+- **Time-locked Upgrades:** The execution delay provides a safety buffer for stakeholders to react to approved changes.
+- **Minimum Stake Requirement:** Proposal creation can require governance-token ownership, preventing spam proposals by requiring a significant commitment from the proposer.
+- **Immutable Logic:** Proposals cannot be modified once created.
+- **Action-Bound Multisig Execution:** Multisig upgrade proposals store the exact `ProposalAction::Upgrade(wasm_hash)` that signers approve. The `execute_upgrade` entrypoint replays that stored action in one call and marks the proposal executed only after the WASM update call is made.
+- **Signer/Threshold Snapshots:** Each multisig proposal snapshots the signer set and threshold at creation time. Later configuration changes cannot retroactively make a pending proposal executable or authorize a signer that was not part of the original proposal.
+- **Replay Protection:** Executed proposals reject further approvals and cannot be executed a second time.
+
+## Multisig Upgrade Execution
+
+The multisig upgrade path is intentionally payload-bound:
+
+1. `propose_upgrade(proposer, wasm_hash)` creates a multisig proposal whose action is `Upgrade(wasm_hash)`.
+2. `approve_upgrade(proposal_id, signer)` records approvals against the proposal's original signer snapshot.
+3. `execute_upgrade(proposal_id)` verifies the proposal is not executed, confirms the stored action is the expected upgrade payload, checks the proposal snapshot threshold, performs `update_current_contract_wasm(wasm_hash)`, and then stores `executed = true`.
+
+This removes the previous decoupling between approval and effect. A proposal can no longer be marked executed without the approved action being run, and callers cannot execute a different WASM hash than the one signers approved.
+
+## TODO / Future Enhancements
+
+- [ ] Integrate with a native Soroban token for precise `TokenWeighted` voting power.
+- [ ] Implement a dynamic quorum based on historical participation.
+- [ ] Add a formal "veto" mechanism for high-stakes upgrades.
+
+---
+
+*Grainlify Governance - Empowering Decentralized Evolution*

@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
 pub const EVENT_VERSION_V2: u32 = 2;
 
@@ -182,6 +182,7 @@ pub struct ClaimCancelled {
     pub amount: i128,
     pub cancelled_at: u64,
     pub cancelled_by: Address,
+    pub reason: Symbol,
 }
 
 pub fn emit_pause_state_changed(env: &Env, event: crate::PauseStateChanged) {

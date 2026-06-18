@@ -169,139 +169,12 @@ mod test_granular_pause;
 #[cfg(test)]
 mod test_lifecycle;
 
+#[cfg(test)]
+mod budget_profiling_tests;
+
 mod test_analytics_events;
 #[cfg(test)]
 mod test_governance_integration;
-
-// ── Step 2: Add these public contract functions to the ProgramEscrowContract
-//    impl block (alongside the existing admin functions) ──────────────────
-
-// ========================================================================
-// Circuit Breaker Management
-// ========================================================================
-
-/// Register the circuit breaker admin. Can only be set once, or changed
-/// by the existing admin.
-///
-/// # Arguments
-/// * `newadmin` - Address to register as circuit breaker admin
-/// * `caller`    - Existing admin (None if setting for the first time)
-pub fn set_circuitadmin(env: Env, newadmin: Address, caller: Option<Address>) {
-    error_recovery::set_circuitadmin(&env, newadmin, caller);
-}
-
-/// Returns the registered circuit breaker admin, if any.
-pub fn get_circuitadmin(env: Env) -> Option<Address> {
-    error_recovery::get_circuitadmin(&env)
-}
-
-/// Returns the full circuit breaker status snapshot.
-///
-/// # Returns
-/// * `CircuitBreakerStatus` with state, failure/success counts, timestamps
-pub fn get_circuit_status(env: Env) -> error_recovery::CircuitBreakerStatus {
-    error_recovery::get_status(&env)
-}
-
-/// Admin resets the circuit breaker.
-///
-/// Transitions:
-/// - Open     → HalfOpen  (probe mode)
-/// - HalfOpen → Closed    (hard reset)
-/// - Closed   → Closed    (no-op reset)
-///
-/// # Panics
-/// * If caller is not the registered circuit breaker admin
-pub fn reset_circuit_breaker(env: Env, admin: Address) {
-    error_recovery::reset_circuit_breaker(&env, &admin);
-}
-
-/// Updates the circuit breaker configuration. Admin only.
-///
-/// # Arguments
-/// * `failure_threshold` - Consecutive failures needed to open circuit
-/// * `success_threshold` - Consecutive successes in HalfOpen to close it
-/// * `max_error_log`     - Maximum error log entries to retain
-pub fn configure_circuit_breaker(
-    env: Env,
-    admin: Address,
-    failure_threshold: u32,
-    success_threshold: u32,
-    max_error_log: u32,
-) {
-    let stored = error_recovery::get_circuitadmin(&env);
-    match stored {
-        Some(ref a) if a == &admin => {
-            admin.require_auth();
-        }
-        _ => panic!("Unauthorized: only circuit breaker admin can configure"),
-    }
-    error_recovery::set_config(
-        &env,
-        error_recovery::CircuitBreakerConfig {
-            failure_threshold,
-            success_threshold,
-            max_error_log,
-        },
-    );
-}
-
-/// Returns the error log (last N failures recorded by the circuit breaker).
-pub fn get_circuit_error_log(env: Env) -> soroban_sdk::Vec<error_recovery::ErrorEntry> {
-    error_recovery::get_error_log(&env)
-}
-
-/// Directly open the circuit (emergency lockout). Admin only.
-pub fn emergency_open_circuit(env: Env, admin: Address) {
-    let stored = error_recovery::get_circuitadmin(&env);
-    match stored {
-        Some(ref a) if a == &admin => {
-            admin.require_auth();
-        }
-        _ => panic!("Unauthorized"),
-    }
-    error_recovery::open_circuit(&env);
-}
-
-// ── Step 3: Wrap batch_payout and single_payout with circuit breaker ────
-//
-// In the existing batch_payout function, add at the very top (after getting
-// program_data but before the auth check):
-//
-//   use crate::error_recovery;
-//   if let Err(_) = error_recovery::check_and_allow(&env) {
-//       panic!("Circuit breaker is open: payout operations are temporarily disabled");
-//   }
-//
-// After a successful transfer loop, add:
-//   error_recovery::record_success(&env);
-//
-// If a transfer panics/fails, the circuit breaker failure should be recorded
-// via record_failure() before re-panicking.
-//
-// For a clean integration, wrap the token transfer call like this:
-//
-//   let transfer_ok = std::panic::catch_unwind(|| {
-//       token_client.transfer(&contract_address, &recipient.clone(), &net_amount);
-//   });
-//   match transfer_ok {
-//       Ok(_) => error_recovery::record_success(&env),
-//       Err(_) => {
-//           error_recovery::record_failure(
-//               &env,
-//               program_id.clone(),
-//               soroban_sdk::symbol_short!("batch_pay"),
-//               error_recovery::ERR_TRANSFER_FAILED,
-//           );
-//           panic!("Token transfer failed");
-//       }
-//   }
-//
-// Note: Soroban's environment panics abort the transaction, so in practice
-// you record the failure and re-panic. The circuit breaker state is committed
-// because Soroban persists storage writes made before the panic in tests
-// (but not in production transactions that abort). For full production
-// integration, use the `try_*` variants of client calls where available.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
@@ -618,6 +491,14 @@ pub enum BatchError {
     InvalidBatchSize = 1,
     ProgramAlreadyExists = 2,
     DuplicateProgramId = 3,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    /// Governance contract version is below the minimum required for admin operations.
+    GovernanceVersionTooLow = 4,
 }
 
 #[contracttype]
@@ -976,7 +857,12 @@ impl ProgramEscrowContract {
     }
 
     /// Update pause flags (admin only)
-    pub fn set_paused(env: Env, lock: Option<bool>, release: Option<bool>, refund: Option<bool>) {
+    pub fn set_paused(
+        env: Env,
+        lock: Option<bool>,
+        release: Option<bool>,
+        refund: Option<bool>,
+    ) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             panic!("Not initialized");
         }
@@ -985,7 +871,7 @@ impl ProgramEscrowContract {
         admin.require_auth();
 
         // Check governance requirements
-        Self::check_governance_requirements(&env);
+        Self::check_governance_requirements(&env)?;
 
         let mut flags = Self::get_pause_flags(&env);
 
@@ -1014,6 +900,7 @@ impl ProgramEscrowContract {
         }
 
         env.storage().instance().set(&DataKey::PauseFlags, &flags);
+        Ok(())
     }
 
     /// Get current pause flags
@@ -1242,19 +1129,65 @@ impl ProgramEscrowContract {
         error_recovery::reset_circuit_breaker(&env, &admin);
     }
 
+    /// Configure circuit breaker thresholds. Admin only.
+    ///
+    /// State machine effects:
+    /// - `failure_threshold` consecutive failures transition `Closed → Open`
+    /// - `success_threshold` consecutive successes in `HalfOpen` transition `HalfOpen → Closed`
+    ///
+    /// # Arguments
+    /// * `failure_threshold` - Consecutive failures needed to open the circuit
+    /// * `success_threshold` - Consecutive successes in HalfOpen to close it
+    /// * `max_error_log`     - Maximum error log entries to retain (oldest trimmed)
     pub fn configure_circuit_breaker(
         env: Env,
         caller: Address,
-        _threshold: u32,
-        _lookback: u32,
-        _cooldown: u32,
+        failure_threshold: u32,
+        success_threshold: u32,
+        max_error_log: u32,
     ) {
         caller.require_auth();
         let admin = error_recovery::get_circuitadmin(&env).expect("Circuit admin not set");
         if caller != admin {
             panic!("Unauthorized: only circuit admin can configure");
         }
-        // Logic to update config in storage would go here
+        error_recovery::set_config(
+            &env,
+            error_recovery::CircuitBreakerConfig {
+                failure_threshold,
+                success_threshold,
+                max_error_log,
+            },
+        );
+    }
+
+    /// Returns the full circuit breaker status snapshot.
+    ///
+    /// # Returns
+    /// `CircuitBreakerStatus` with state, failure/success counts, and timestamps.
+    pub fn get_circuit_status(env: Env) -> error_recovery::CircuitBreakerStatus {
+        error_recovery::get_status(&env)
+    }
+
+    /// Returns the circuit breaker error log (last `max_error_log` entries).
+    pub fn get_circuit_error_log(env: Env) -> Vec<error_recovery::ErrorEntry> {
+        error_recovery::get_error_log(&env)
+    }
+
+    /// Emergency circuit open — immediately blocks all payout and release operations.
+    ///
+    /// Admin only. Use `reset_circuit_breaker` to transition back to `HalfOpen`
+    /// and then `Closed` after the incident is resolved.
+    ///
+    /// # Panics
+    /// * If caller is not the registered circuit breaker admin.
+    pub fn emergency_open_circuit(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin = error_recovery::get_circuitadmin(&env).expect("Circuit admin not set");
+        if caller != admin {
+            panic!("Unauthorized: only circuit admin can open circuit");
+        }
+        error_recovery::open_circuit(&env);
     }
 
     pub fn update_rate_limit_config(
@@ -1262,7 +1195,7 @@ impl ProgramEscrowContract {
         window_size: u64,
         max_operations: u32,
         cooldown_period: u64,
-    ) {
+    ) -> Result<(), Error> {
         // Only admin can update rate limit config
         let admin: Address = env
             .storage()
@@ -1272,7 +1205,7 @@ impl ProgramEscrowContract {
         admin.require_auth();
 
         // Check governance requirements
-        Self::check_governance_requirements(&env);
+        Self::check_governance_requirements(&env)?;
 
         let config = RateLimitConfig {
             window_size,
@@ -1282,6 +1215,7 @@ impl ProgramEscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::RateLimitConfig, &config);
+        Ok(())
     }
 
     pub fn get_rate_limit_config(env: Env) -> RateLimitConfig {
@@ -1342,10 +1276,11 @@ impl ProgramEscrowContract {
     }
 
     /// Check if governance requirements are met before admin operations
-    fn check_governance_requirements(env: &Env) {
+    fn check_governance_requirements(env: &Env) -> Result<(), Error> {
         if !governance_integration::check_governance_version(env) {
-            panic!("Governance version requirement not met");
+            return Err(Error::GovernanceVersionTooLow);
         }
+        Ok(())
     }
     // ========================================================================
     // Payout Functions
@@ -1364,6 +1299,14 @@ impl ProgramEscrowContract {
         // Reentrancy guard: Check and set
         reentrancy_guard::check_not_entered(&env);
         reentrancy_guard::set_entered(&env);
+
+        // Circuit breaker: reject immediately if the circuit is open.
+        // Checked after the reentrancy guard is set so the guard is always
+        // cleared on the early return path.
+        if error_recovery::check_and_allow(&env).is_err() {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Circuit breaker open: batch payout temporarily disabled");
+        }
 
         if Self::check_paused(&env, symbol_short!("release")) {
             reentrancy_guard::clear_entered(&env);
@@ -1415,8 +1358,15 @@ impl ProgramEscrowContract {
             });
         }
 
-        // Validate sufficient balance
+        // Validate sufficient balance — record failure before abort so the
+        // circuit breaker can accumulate this as a known-bad condition.
         if total_payout > program_data.remaining_balance {
+            error_recovery::record_failure(
+                &env,
+                program_data.program_id.clone(),
+                symbol_short!("batch_pay"),
+                error_recovery::ERR_INSUFFICIENT_BALANCE,
+            );
             reentrancy_guard::clear_entered(&env);
             panic!("Insufficient balance");
         }
@@ -1457,6 +1407,9 @@ impl ProgramEscrowContract {
             };
             program_data.payout_history.push_back(payout_record);
         }
+
+        // All transfers succeeded — inform the circuit breaker.
+        error_recovery::record_success(&env);
 
         // Update program data
         program_data.remaining_balance = program_data
@@ -1521,6 +1474,12 @@ impl ProgramEscrowContract {
         reentrancy_guard::check_not_entered(&env);
         reentrancy_guard::set_entered(&env);
 
+        // Circuit breaker: reject immediately if the circuit is open.
+        if error_recovery::check_and_allow(&env).is_err() {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Circuit breaker open: single payout temporarily disabled");
+        }
+
         if Self::check_paused(&env, symbol_short!("release")) {
             reentrancy_guard::clear_entered(&env);
             panic!("Funds Paused");
@@ -1550,8 +1509,14 @@ impl ProgramEscrowContract {
             panic!("Amount must be greater than zero");
         }
 
-        // Validate sufficient balance
+        // Validate sufficient balance — record failure before abort.
         if amount > program_data.remaining_balance {
+            error_recovery::record_failure(
+                &env,
+                program_data.program_id.clone(),
+                symbol_short!("sngl_pay"),
+                error_recovery::ERR_INSUFFICIENT_BALANCE,
+            );
             reentrancy_guard::clear_entered(&env);
             panic!("Insufficient balance");
         }
@@ -1563,6 +1528,9 @@ impl ProgramEscrowContract {
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &program_data.token_address);
         token_client.transfer(&contract_address, &recipient, &amount);
+
+        // Transfer succeeded — inform the circuit breaker.
+        error_recovery::record_success(&env);
 
         // Record payout
         let timestamp = env.ledger().timestamp();
@@ -1695,6 +1663,12 @@ impl ProgramEscrowContract {
         reentrancy_guard::check_not_entered(&env);
         reentrancy_guard::set_entered(&env);
 
+        // Circuit breaker: reject immediately if the circuit is open.
+        if error_recovery::check_and_allow(&env).is_err() {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Circuit breaker open: schedule releases temporarily disabled");
+        }
+
         // Dispute guard: block schedule releases while a dispute is open
         if Self::is_disputed(env.clone()) {
             reentrancy_guard::clear_entered(&env);
@@ -1734,6 +1708,12 @@ impl ProgramEscrowContract {
             }
 
             if schedule.amount > program_data.remaining_balance {
+                error_recovery::record_failure(
+                    &env,
+                    program_data.program_id.clone(),
+                    symbol_short!("trg_rels"),
+                    error_recovery::ERR_INSUFFICIENT_BALANCE,
+                );
                 reentrancy_guard::clear_entered(&env);
                 panic!("Insufficient balance");
             }
@@ -1780,8 +1760,9 @@ impl ProgramEscrowContract {
             .instance()
             .set(&RELEASE_HISTORY, &release_history);
 
-        // Emit aggregate stats if any releases occurred
+        // Inform the circuit breaker of the outcome.
         if released_count > 0 {
+            error_recovery::record_success(&env);
             Self::emit_aggregate_stats(&env, &program_data);
         }
 
@@ -2204,8 +2185,18 @@ impl ProgramEscrowContract {
     }
 
     pub fn release_program_schedule_manual(env: Env, schedule_id: u64) {
+        // Reentrancy guard: prevent re-entrant calls
+        reentrancy_guard::check_not_entered(&env);
+        reentrancy_guard::set_entered(&env);
+
+        // Circuit breaker: reject immediately if the circuit is open.
+        if error_recovery::check_and_allow(&env).is_err() {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Circuit breaker open: manual release temporarily disabled");
+        }
+
         let mut schedules = Self::get_program_release_schedules(env.clone());
-        let program_data = Self::get_program_info(env.clone());
+        let mut program_data = Self::get_program_info(env.clone());
 
         program_data.authorized_payout_key.require_auth();
 
@@ -2218,12 +2209,16 @@ impl ProgramEscrowContract {
             let mut s = schedules.get(i).unwrap();
             if s.schedule_id == schedule_id {
                 if s.released {
+                    reentrancy_guard::clear_entered(&env);
                     panic!("Already released");
                 }
 
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
+
+                // Maintain SAC ≡ remaining_balance invariant.
+                program_data.remaining_balance -= s.amount;
 
                 s.released = true;
                 s.released_at = Some(now);
@@ -2249,10 +2244,16 @@ impl ProgramEscrowContract {
         }
 
         if !found {
+            reentrancy_guard::clear_entered(&env);
             panic!("Schedule not found");
         }
 
         env.storage().instance().set(&SCHEDULES, &schedules);
+        // Persist the updated remaining_balance.
+        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+
+        // Transfer succeeded — inform the circuit breaker.
+        error_recovery::record_success(&env);
 
         // Write to release history
         if let Some(s) = released_schedule {
@@ -2270,11 +2271,24 @@ impl ProgramEscrowContract {
             });
             env.storage().instance().set(&RELEASE_HISTORY, &history);
         }
+
+        // Clear reentrancy guard before returning
+        reentrancy_guard::clear_entered(&env);
     }
 
     pub fn release_prog_schedule_automatic(env: Env, schedule_id: u64) {
+        // Reentrancy guard: prevent re-entrant calls
+        reentrancy_guard::check_not_entered(&env);
+        reentrancy_guard::set_entered(&env);
+
+        // Circuit breaker: reject immediately if the circuit is open.
+        if error_recovery::check_and_allow(&env).is_err() {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Circuit breaker open: automatic release temporarily disabled");
+        }
+
         let mut schedules = Self::get_program_release_schedules(env.clone());
-        let program_data = Self::get_program_info(env.clone());
+        let mut program_data = Self::get_program_info(env.clone());
         let now = env.ledger().timestamp();
         let mut released_schedule: Option<ProgramReleaseSchedule> = None;
 
@@ -2283,15 +2297,20 @@ impl ProgramEscrowContract {
             let mut s = schedules.get(i).unwrap();
             if s.schedule_id == schedule_id {
                 if s.released {
+                    reentrancy_guard::clear_entered(&env);
                     panic!("Already released");
                 }
                 if now < s.release_timestamp {
+                    reentrancy_guard::clear_entered(&env);
                     panic!("Not yet due");
                 }
 
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
+
+                // Maintain SAC ≡ remaining_balance invariant.
+                program_data.remaining_balance -= s.amount;
 
                 s.released = true;
                 s.released_at = Some(now);
@@ -2317,10 +2336,16 @@ impl ProgramEscrowContract {
         }
 
         if !found {
+            reentrancy_guard::clear_entered(&env);
             panic!("Schedule not found");
         }
 
         env.storage().instance().set(&SCHEDULES, &schedules);
+        // Persist the updated remaining_balance.
+        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+
+        // Transfer succeeded — inform the circuit breaker.
+        error_recovery::record_success(&env);
 
         // Write to release history
         if let Some(s) = released_schedule {
@@ -2338,6 +2363,9 @@ impl ProgramEscrowContract {
             });
             env.storage().instance().set(&RELEASE_HISTORY, &history);
         }
+
+        // Clear reentrancy guard before returning
+        reentrancy_guard::clear_entered(&env);
     }
 
     // ========================================================================
@@ -3126,3 +3154,8 @@ mod integration_tests {
 #[cfg(test)]
 mod rbac_tests;
 mod test;
+#[cfg(test)]
+mod test_circuit_breaker_integration;
+
+#[cfg(test)]
+mod test_balance_invariant;
