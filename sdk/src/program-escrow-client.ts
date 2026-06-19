@@ -2,31 +2,51 @@ import { Contract, SorobanRpc, TransactionBuilder, Networks, Account, Keypair, O
 import { NetworkError, ValidationError, parseContractError, ContractError } from './errors';
 
 export interface ProgramEscrowConfig {
+  /** Deployed ProgramEscrow contract address. */
   contractId: string;
+  /** Soroban RPC endpoint used for reads and transaction submission. */
   rpcUrl: string;
+  /** Stellar network passphrase for the target network. */
   networkPassphrase: string;
 }
 
+/** Program escrow state returned by contract read methods. */
 export interface ProgramData {
+  /** Application-level program identifier. */
   program_id: string;
+  /** Total funds deposited into the program escrow. */
   total_funds: bigint;
+  /** Remaining spendable balance in the program escrow. */
   remaining_balance: bigint;
+  /** Stellar account authorized to execute payouts. */
   authorized_payout_key: string;
+  /** Historical payout records for the program. */
   payout_history: PayoutRecord[];
+  /** Token contract address used by the program escrow. */
   token_address: string;
 }
 
+/** Single payout event recorded by the program escrow. */
 export interface PayoutRecord {
+  /** Stellar account that received the payout. */
   recipient: string;
+  /** Payout amount in the contract token's smallest unit. */
   amount: bigint;
+  /** Unix timestamp when the payout was recorded. */
   timestamp: number;
 }
 
+/** Scheduled release entry for program escrow funds. */
 export interface ProgramReleaseSchedule {
+  /** Unique schedule identifier. */
   schedule_id: bigint;
+  /** Stellar account that should receive the scheduled release. */
   recipient: string;
+  /** Scheduled amount in the contract token's smallest unit. */
   amount: bigint;
+  /** Unix timestamp when the release becomes executable. */
   release_timestamp: number;
+  /** Whether the scheduled release has already been executed. */
   released: boolean;
 }
 
@@ -38,6 +58,9 @@ export class ProgramEscrowClient {
   private server: SorobanRpc.Server;
   private config: ProgramEscrowConfig;
 
+  /**
+   * Create a client bound to one ProgramEscrow contract and Soroban RPC endpoint.
+   */
   constructor(config: ProgramEscrowConfig) {
     this.config = config;
     try {

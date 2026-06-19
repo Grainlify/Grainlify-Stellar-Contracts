@@ -61,6 +61,7 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | [Query Documentation](QUERY_DOCUMENTATION.md) | Query function reference and usage |
 | [Query Quick Reference](QUERY_QUICK_REFERENCE.md) | Quick reference for query functions |
 | [SDK README](../sdk/README.md) | TypeScript SDK overview and usage |
+| [SDK API Reference](sdk/api/README.md) | Generated TypeDoc reference for SDK classes, methods, and exported types |
 | [SDK Error Mapping](sdk/ERROR_MAPPING.md) | SDK error types and mapping |
 
 ## Security

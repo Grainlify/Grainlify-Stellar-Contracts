@@ -6,6 +6,7 @@ TypeScript SDK for interacting with Grainlify Soroban smart contracts on the Ste
 
 Detailed documentation for the SDK is available in the [`docs/`](../docs/index.md) directory:
 
+- [Generated API Reference](../docs/sdk/api/README.md)
 - [Error Mapping](../docs/sdk/ERROR_MAPPING.md)
 
 ## Installation
@@ -280,6 +281,12 @@ Build the SDK:
 
 ```bash
 npm run build
+```
+
+Regenerate the SDK API reference:
+
+```bash
+npm run docs
 ```
 
 Watch mode for tests:

@@ -2,101 +2,173 @@ import { Contract, SorobanRpc, Keypair } from '@stellar/stellar-sdk';
 import { NetworkError, ValidationError, parseContractError, ContractError } from './errors';
 
 export interface BountyEscrowConfig {
+  /** Deployed BountyEscrow contract address. */
   contractId: string;
+  /** Soroban RPC endpoint used for reads and transaction submission. */
   rpcUrl: string;
+  /** Stellar network passphrase for the target network. */
   networkPassphrase: string;
 }
 
+/** Input item for batch-locking a bounty escrow. */
 export interface LockFundsItem {
+  /** Application-level bounty identifier. */
   bounty_id: bigint;
+  /** Stellar account that deposits the escrowed funds. */
   depositor: string;
+  /** Amount to lock, expressed in the contract token's smallest unit. */
   amount: bigint;
+  /** Unix timestamp after which the bounty may become refundable. */
   deadline: number;
 }
 
+/** Input item for batch-releasing a bounty escrow. */
 export interface ReleaseFundsItem {
+  /** Application-level bounty identifier. */
   bounty_id: bigint;
+  /** Stellar account that should receive the released bounty funds. */
   contributor: string;
 }
 
+/** On-chain lifecycle states for a bounty escrow. */
 export type EscrowStatus = 'Locked' | 'Released' | 'Refunded' | 'PartiallyRefunded';
+
+/** Supported refund modes for admin-approved refunds. */
 export type RefundMode = 'Full' | 'Partial';
 
+/** Historical refund record attached to an escrow. */
 export interface RefundRecord {
+  /** Refunded amount in the contract token's smallest unit. */
   amount: bigint;
+  /** Stellar account that received the refund. */
   recipient: string;
+  /** Unix timestamp when the refund was executed. */
   timestamp: number;
+  /** Whether the refund closed the escrow or returned a partial amount. */
   mode: RefundMode;
 }
 
+/** Pending claim authorization for a bounty recipient. */
 export interface ClaimRecord {
+  /** Application-level bounty identifier. */
   bounty_id: bigint;
+  /** Stellar account authorized to claim the bounty. */
   recipient: string;
+  /** Claimable amount in the contract token's smallest unit. */
   amount: bigint;
+  /** Unix timestamp when the claim authorization expires. */
   expires_at: number;
+  /** Whether the authorized claim has already been consumed. */
   claimed: boolean;
 }
 
+/** Current state for one bounty escrow. */
 export interface Escrow {
+  /** Stellar account that deposited the escrow funds. */
   depositor: string;
+  /** Original locked amount in the contract token's smallest unit. */
   amount: bigint;
+  /** Remaining escrow balance after releases or partial refunds. */
   remaining_amount: bigint;
+  /** Current on-chain escrow lifecycle state. */
   status: EscrowStatus;
+  /** Unix timestamp used by refund eligibility checks. */
   deadline: number;
+  /** Refund events recorded for this escrow. */
   refund_history: RefundRecord[];
 }
 
+/** Escrow record paired with its bounty identifier. */
 export interface EscrowWithId {
+  /** Application-level bounty identifier. */
   bounty_id: bigint;
+  /** Escrow state for the identifier. */
   escrow: Escrow;
 }
 
+/** Composite filter supported by the bounty escrow query endpoint. */
 export interface EscrowQueryFilter {
+  /** Enables filtering by lifecycle status when true. */
   has_status_filter: boolean;
+  /** Lifecycle status to match when status filtering is enabled. */
   status: EscrowStatus;
+  /** Enables filtering by depositor account when true. */
   has_depositor_filter: boolean;
+  /** Depositor account to match when depositor filtering is enabled. */
   depositor: string;
+  /** Inclusive minimum escrow amount. */
   min_amount: bigint;
+  /** Inclusive maximum escrow amount. */
   max_amount: bigint;
+  /** Inclusive minimum deadline timestamp. */
   min_deadline: number;
+  /** Inclusive maximum deadline timestamp. */
   max_deadline: number;
 }
 
+/** Aggregate totals and counts across indexed bounty escrows. */
 export interface AggregateStats {
+  /** Sum of currently locked funds. */
   total_locked: bigint;
+  /** Sum of released funds. */
   total_released: bigint;
+  /** Sum of refunded funds. */
   total_refunded: bigint;
+  /** Number of locked escrows. */
   count_locked: number;
+  /** Number of released escrows. */
   count_released: number;
+  /** Number of refunded escrows. */
   count_refunded: number;
 }
 
+/** Admin approval record required before a refund can be executed. */
 export interface RefundApproval {
+  /** Application-level bounty identifier. */
   bounty_id: bigint;
+  /** Approved refund amount. */
   amount: bigint;
+  /** Stellar account that may receive the refund. */
   recipient: string;
+  /** Approved refund mode. */
   mode: RefundMode;
+  /** Admin account that approved the refund. */
   approved_by: string;
+  /** Unix timestamp when the approval was recorded. */
   approved_at: number;
 }
 
+/** Refund eligibility result for a bounty escrow. */
 export interface RefundEligibility {
+  /** True when the escrow can be refunded immediately. */
   can_refund: boolean;
+  /** Whether the escrow deadline has elapsed. */
   deadline_passed: boolean;
+  /** Remaining refundable amount. */
   remaining_amount: bigint;
+  /** Optional approval details for admin-approved refunds. */
   approval?: RefundApproval;
 }
 
+/** Fee policy configured on the bounty escrow contract. */
 export interface FeeConfig {
+  /** Fee charged when locking funds, in basis points. */
   lock_fee_rate: bigint;
+  /** Fee charged when releasing funds, in basis points. */
   release_fee_rate: bigint;
+  /** Stellar account that receives fees. */
   fee_recipient: string;
+  /** Whether fee collection is currently enabled. */
   fee_enabled: boolean;
 }
 
+/** Pause switches for bounty escrow operations. */
 export interface PauseFlags {
+  /** Whether lock operations are paused. */
   lock_paused: boolean;
+  /** Whether release operations are paused. */
   release_paused: boolean;
+  /** Whether refund operations are paused. */
   refund_paused: boolean;
 }
 
@@ -108,6 +180,9 @@ export class BountyEscrowClient {
   private server: SorobanRpc.Server;
   private config: BountyEscrowConfig;
 
+  /**
+   * Create a client bound to one BountyEscrow contract and Soroban RPC endpoint.
+   */
   constructor(config: BountyEscrowConfig) {
     this.config = config;
     try {
