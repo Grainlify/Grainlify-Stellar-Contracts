@@ -390,6 +390,37 @@ fn test_sweep_expired_refunds_mixed_active_rejects_atomically() {
 }
 
 #[test]
+fn test_sweep_expired_refunds_rejects_non_adjacent_duplicates() {
+    let setup = TestSetup::new();
+    let now = setup.env.ledger().timestamp();
+    let first_bounty = 27_u64;
+    let second_bounty = 28_u64;
+    let amount = 1_000_i128;
+    let deadline = now + 100;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &first_bounty, &amount, &deadline);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &second_bounty, &amount, &deadline);
+
+    setup.env.ledger().set_timestamp(deadline + 1);
+    let ids = vec![&setup.env, first_bounty, second_bounty, first_bounty];
+    let result = try_sweep_direct(&setup, ids);
+
+    assert_eq!(result, Err(Error::DuplicateBountyId));
+    assert_eq!(
+        setup.escrow.get_escrow_info(&first_bounty).status,
+        EscrowStatus::Locked
+    );
+    assert_eq!(
+        setup.escrow.get_escrow_info(&second_bounty).status,
+        EscrowStatus::Locked
+    );
+}
+
+#[test]
 fn test_sweep_expired_refunds_rejects_over_max_batch_size() {
     let setup = TestSetup::new();
     let mut ids = vec![&setup.env];
