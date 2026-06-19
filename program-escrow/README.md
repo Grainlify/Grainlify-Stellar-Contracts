@@ -92,9 +92,16 @@ Transfer funds to multiple recipients in a single transaction. Requires authoriz
 **Validation:**
 - Only `authorized_payout_key` can call this function
 - Recipients and amounts vectors must have same length
+- `recipients.len()` must be in the range `[1, MAX_BATCH_SIZE]` (currently 100)
 - All amounts must be > 0
 - Total payout must not exceed remaining balance
 - Cannot process empty batch
+
+**Batch size cap (`MAX_BATCH_SIZE = 100`):**
+The cap is enforced before any token transfer. Calls with zero recipients or
+more than 100 recipients panic with a clear message and clear the reentrancy
+guard, so no partial payout or stuck guard can occur. The same constant is
+used by `batch_initialize_programs` for consistency.
 
 #### `get_program_info()`
 
@@ -114,7 +121,10 @@ Create a time-based release that can be executed once the ledger timestamp reach
 
 #### `trigger_program_releases()`
 
-Execute all due release schedules where `ledger_timestamp >= release_timestamp`.
+Execute due release schedules where `ledger_timestamp >= release_timestamp`.
+At most `MAX_BATCH_SIZE` (100) schedules are processed per invocation to bound
+Soroban instruction and memory usage. Remaining due schedules can be processed
+by calling again.
 
 **Edge-case behavior validated in tests:**
 - Exact boundary is accepted: release executes when `now == release_timestamp`
@@ -153,6 +163,19 @@ Emitted when a batch payout is executed.
 Gas proxy fields are lightweight instrumentation for payout profiling. They track
 high-level operation counts without adding per-recipient events, keeping event
 footprint bounded for large batches.
+
+## Batch Size Cap
+
+`MAX_BATCH_SIZE = 100` is enforced in three places:
+
+| Function | Behaviour |
+|---|---|
+| `batch_initialize_programs` | Returns `BatchError::InvalidBatchSize` if `items.len() == 0` or `> 100` |
+| `batch_payout` | Panics `"Batch size exceeds maximum allowed"` before any transfer if `recipients.len() > 100` |
+| `trigger_program_releases` | Processes at most 100 due schedules per call; remaining due schedules are left for the next call |
+
+This keeps instruction count and `payout_history` growth deterministic and bounded.
+The constant is defined once (`pub const MAX_BATCH_SIZE: u32 = 100`) and shared across all three functions.
 
 ## Batch Payout Gas and Footprint Notes
 
