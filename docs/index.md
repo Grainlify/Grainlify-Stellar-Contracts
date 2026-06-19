@@ -1,18 +1,25 @@
 # Grainlify Stellar Contracts - Documentation Index
 
+
 Welcome to the Grainlify Stellar Contracts documentation. This index provides a centralized entry point for all project documentation, organized by topic.
 
+
 ## Architecture and Overview
+
 
 | Document | Description |
 |----------|-------------|
 | [Architecture](ARCHITECTURE.md) | Smart contract architecture for escrow and program escrow contracts |
 | [Versions](VERSIONS.md) | Contract versioning policy and compatibility matrix |
 | [Contributing](CONTRIBUTING.md) | Contribution guidelines and build artifact hygiene |
+| [Storage and TTL Model](STORAGE_AND_TTL.md) | Soroban storage classes, TTL handling, archival risk, and extension guidance |
+
 
 ## Contracts
 
+
 ### Bounty Escrow
+
 
 | Document | Description |
 |----------|-------------|
@@ -26,7 +33,9 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | [Auto Refund Tests](bounty_escrow/contracts/escrow/AUTO_REFUND_TESTS.md) | Auto-refund test documentation |
 | [CI Checks Summary](bounty_escrow/contracts/escrow/CI_CHECKS_SUMMARY.md) | CI pipeline checks overview |
 
+
 ### Program Escrow
+
 
 | Document | Description |
 |----------|-------------|
@@ -35,13 +44,9 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | [Analytics Events](program-escrow/ANALYTICS_EVENTS.md) | Event structures and analytics integration |
 | [Implementation Summary](program-escrow/IMPLEMENTATION_SUMMARY.md) | Query functions implementation summary |
 
+
 ### Core
 
-| Document | Description |
-|----------|-------------|
-| [Governance](grainlify-core/GOVERNANCE.md) | Core governance model and access control |
-
-## Events
 
 | Document | Description |
 |----------|-------------|
