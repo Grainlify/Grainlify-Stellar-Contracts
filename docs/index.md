@@ -90,6 +90,7 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | Document | Description |
 |----------|-------------|
 | [Scripts README](../scripts/README.md) | Build, deployment, and utility scripts |
+| [Deployment Runbook](DEPLOYMENT_RUNBOOK.md) | End-to-end deploy, verify, upgrade, rollback, registry, and mainnet safety procedures |
 
 ---
 
