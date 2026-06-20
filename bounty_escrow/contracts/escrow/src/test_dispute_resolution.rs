@@ -221,3 +221,88 @@ fn test_dispute_status_tracking() {
         "dispute should be cleared after cancellation"
     );
 }
+
+/// Second authorize_claim while first is live must be rejected.
+#[test]
+fn test_authorize_claim_rejects_overwrite_while_live() {
+    let setup = DisputeTestSetup::new();
+    let bounty_id = 200;
+    let amount = 1_000;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 1_000;
+    let claim_window = 600;
+
+    setup.escrow.set_claim_window(&claim_window);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // First authorize_claim succeeds
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    // Second authorize_claim with a different recipient must fail
+    let other = Address::generate(&setup.env);
+    let res = setup.escrow.try_authorize_claim(&bounty_id, &other);
+    assert!(
+        res.is_err(),
+        "second authorize_claim must be rejected while claim is live"
+    );
+}
+
+/// Re-authorization succeeds after the claim expires.
+#[test]
+fn test_authorize_claim_allowed_after_expiry() {
+    let setup = DisputeTestSetup::new();
+    let bounty_id = 201;
+    let amount = 1_000;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 1_000;
+    let claim_window = 10;
+
+    setup.escrow.set_claim_window(&claim_window);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // Authorize first claim
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    // Advance time past claim window
+    setup.env.ledger().set_timestamp(now + claim_window + 1);
+
+    // Re-authorization should succeed after expiry
+    let other = Address::generate(&setup.env);
+    setup.escrow.authorize_claim(&bounty_id, &other);
+
+    let claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(claim.recipient, other);
+}
+
+/// Re-authorization succeeds after the claim is cancelled.
+#[test]
+fn test_authorize_claim_allowed_after_cancel() {
+    let setup = DisputeTestSetup::new();
+    let bounty_id = 202;
+    let amount = 1_000;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 1_000;
+    let claim_window = 600;
+
+    setup.escrow.set_claim_window(&claim_window);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // Authorize first claim
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    // Cancel the claim
+    setup.escrow.cancel_pending_claim(&bounty_id);
+
+    // Re-authorization should succeed after cancel
+    let other = Address::generate(&setup.env);
+    setup.escrow.authorize_claim(&bounty_id, &other);
+
+    let claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(claim.recipient, other);
+}

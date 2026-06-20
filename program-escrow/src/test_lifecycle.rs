@@ -37,7 +37,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, vec, Address, Env, String,
+    token, vec, Address, Env, String, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -783,6 +783,131 @@ fn test_multiple_schedules_same_timestamp_all_released() {
 // ---------------------------------------------------------------------------
 // COMPLETE LIFECYCLE INTEGRATION
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// BATCH SIZE BOUNDARY TESTS (MAX_BATCH_SIZE enforcement)
+// ---------------------------------------------------------------------------
+
+/// A batch with exactly MAX_BATCH_SIZE recipients must be accepted.
+///
+/// Budget reset to unlimited: 100 recipients × token transfer + vector ops
+/// can exceed the default Soroban test simulation ceiling.
+#[test]
+fn test_batch_payout_at_max_size_accepted() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+    let total = (MAX_BATCH_SIZE as i128) * 1_000;
+    let (client, _admin, _cid, token_client) = setup_active_program(&env, total);
+
+    let mut recipients = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    for _ in 0..MAX_BATCH_SIZE {
+        recipients.push_back(Address::generate(&env));
+        amounts.push_back(1_000i128);
+    }
+
+    let data = client.batch_payout(&recipients, &amounts);
+    assert_eq!(data.remaining_balance, 0);
+    // Every recipient received their share
+    for i in 0..MAX_BATCH_SIZE {
+        assert_eq!(token_client.balance(&recipients.get(i).unwrap()), 1_000);
+    }
+}
+
+/// A batch with MAX_BATCH_SIZE + 1 recipients must be rejected before any
+/// transfer and the reentrancy guard must be cleared (no balance change).
+#[test]
+#[should_panic(expected = "Batch size exceeds maximum allowed")]
+fn test_batch_payout_oversized_rejected() {
+    let env = Env::default();
+    let oversized = MAX_BATCH_SIZE + 1;
+    let total = (oversized as i128) * 1_000;
+    let (client, _admin, _cid, _token) = setup_active_program(&env, total);
+
+    let mut recipients = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    for _ in 0..oversized {
+        recipients.push_back(Address::generate(&env));
+        amounts.push_back(1_000i128);
+    }
+
+    client.batch_payout(&recipients, &amounts);
+}
+
+/// After an oversized batch is rejected, the contract balance must be unchanged
+/// and a valid follow-up batch must still succeed (reentrancy guard cleared).
+#[test]
+fn test_batch_payout_oversized_no_balance_change_and_guard_cleared() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+    let oversized = MAX_BATCH_SIZE + 1;
+    let total = (oversized as i128) * 1_000;
+    let (client, _admin, _cid, token_client) = setup_active_program(&env, total);
+
+    let balance_before = client.get_remaining_balance();
+
+    // Build the oversized vectors
+    let mut big_recipients = Vec::new(&env);
+    let mut big_amounts = Vec::new(&env);
+    for _ in 0..oversized {
+        big_recipients.push_back(Address::generate(&env));
+        big_amounts.push_back(1_000i128);
+    }
+
+    // The oversized call must panic — catch it with try_batch_payout
+    let result = client.try_batch_payout(&big_recipients, &big_amounts);
+    assert!(result.is_err(), "oversized batch should fail");
+
+    // Balance must be unchanged — no transfers happened
+    assert_eq!(client.get_remaining_balance(), balance_before);
+
+    // Reentrancy guard is cleared: a valid payout must now succeed
+    let recipient = Address::generate(&env);
+    let data = client.batch_payout(&vec![&env, recipient.clone()], &vec![&env, 1_000i128]);
+    assert_eq!(data.remaining_balance, balance_before - 1_000);
+    assert_eq!(token_client.balance(&recipient), 1_000);
+}
+
+/// trigger_program_releases must not process more than MAX_BATCH_SIZE
+/// schedules in a single call.
+///
+/// Budget is reset to unlimited because processing MAX_BATCH_SIZE + 5 = 105
+/// schedules in a single invocation (each involving a cross-contract token
+/// transfer, vector mutations, and event emission) exceeds the default
+/// per-invocation instruction budget used by Soroban's test harness.
+/// Using `reset_unlimited` is the standard pattern for such stress checks —
+/// see `budget_profiling_tests.rs` for ceiling regression tests.
+#[test]
+fn test_trigger_program_releases_capped_at_max_batch_size() {
+    let env = Env::default();
+    // Lift the test budget so the many contract calls and large-batch trigger
+    // don't hit the simulation ceiling.
+    env.budget().reset_unlimited();
+
+    let schedule_count = MAX_BATCH_SIZE + 5;
+    let amount_each = 100i128;
+    let total = (schedule_count as i128) * amount_each;
+    let (client, _admin, _cid, _token) = setup_active_program(&env, total);
+
+    let now = env.ledger().timestamp();
+    let release_at = now + 10;
+
+    // Create more schedules than MAX_BATCH_SIZE, all due at the same time
+    for _ in 0..schedule_count {
+        let r = Address::generate(&env);
+        client.create_program_release_schedule(&amount_each, &release_at, &r);
+    }
+
+    env.ledger().set_timestamp(release_at);
+    let released = client.trigger_program_releases();
+
+    // Only MAX_BATCH_SIZE schedules may be processed in one invocation
+    assert_eq!(released, MAX_BATCH_SIZE);
+    assert_eq!(
+        client.get_remaining_balance(),
+        total - (MAX_BATCH_SIZE as i128) * amount_each
+    );
+}
 
 /// Full end-to-end: Uninitialized → Initialized → Active → Paused
 ///                  → Active (resumed) → Drained → Active (top-up) → Drained.

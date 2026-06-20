@@ -200,8 +200,6 @@ const PROGRAM_DATA: Symbol = symbol_short!("ProgData");
 const SCHEDULES: Symbol = symbol_short!("Scheds");
 const RELEASE_HISTORY: Symbol = symbol_short!("RelHist");
 const NEXT_SCHEDULE_ID: Symbol = symbol_short!("NxtSched");
-const PROGRAM_INDEX: Symbol = symbol_short!("ProgIdx");
-const AUTH_KEY_INDEX: Symbol = symbol_short!("AuthIdx");
 const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
 const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
 const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
@@ -312,7 +310,6 @@ pub enum DataKey {
     ReleaseSchedule(String, u64),    // program_id, schedule_id -> ProgramReleaseSchedule
     ReleaseHistory(String),          // program_id -> Vec<ProgramReleaseHistory>
     NextScheduleId(String),          // program_id -> next schedule_id
-    MultisigConfig(String),          // program_id -> MultisigConfig
     PayoutApproval(String, Address), // program_id, recipient -> PayoutApproval
     PendingClaim(String, u64),       // (program_id, schedule_id) -> ClaimRecord
     ClaimWindow,                     // u64 seconds (global config)
@@ -376,14 +373,6 @@ pub struct Analytics {
     pub total_payouts: u32,
     pub active_programs: u32,
     pub operation_count: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MultisigConfig {
-    pub threshold_amount: i128,
-    pub signers: Vec<Address>,
-    pub required_signatures: u32,
 }
 
 #[contracttype]
@@ -657,16 +646,6 @@ impl ProgramEscrowContract {
             };
             let program_key = DataKey::Program(program_id.clone());
             env.storage().instance().set(&program_key, &program_data);
-
-            let multisig_config = MultisigConfig {
-                threshold_amount: i128::MAX,
-                signers: vec![&env],
-                required_signatures: 0,
-            };
-            env.storage().persistent().set(
-                &DataKey::MultisigConfig(program_id.clone()),
-                &multisig_config,
-            );
 
             env.events().publish(
                 (symbol_short!("BatchReg"),),
@@ -1380,9 +1359,19 @@ impl ProgramEscrowContract {
 
     /// Execute batch payouts to multiple recipients
     ///
+    /// The batch is bounded by `MAX_BATCH_SIZE` (currently 100). Calls with
+    /// zero recipients or more than `MAX_BATCH_SIZE` recipients are rejected
+    /// before any token transfer occurs, and the reentrancy guard is cleared
+    /// on those early-return paths to avoid a stuck guard.
+    ///
     /// # Arguments
-    /// * `recipients` - Vector of recipient addresses
-    /// * `amounts` - Vector of amounts (must match recipients length)
+    /// * `recipients` - Vector of recipient addresses (1..=MAX_BATCH_SIZE)
+    /// * `amounts` - Vector of amounts (must match recipients length; all > 0)
+    ///
+    /// # Panics
+    /// * `"Batch size exceeds maximum allowed"` — when `recipients.len() > MAX_BATCH_SIZE`
+    /// * `"Cannot process empty batch"` — when `recipients.len() == 0`
+    /// * `"Recipients and amounts vectors must have the same length"` — on length mismatch
     ///
     /// # Returns
     /// Updated ProgramData after payouts
@@ -1435,6 +1424,11 @@ impl ProgramEscrowContract {
         if batch_len == 0 {
             reentrancy_guard::clear_entered(&env);
             panic!("Cannot process empty batch");
+        }
+
+        if recipient_count > MAX_BATCH_SIZE {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Batch size exceeds maximum allowed");
         }
 
         // Calculate total payout amount
@@ -1794,6 +1788,12 @@ impl ProgramEscrowContract {
         let mut released_count: u32 = 0;
 
         for i in 0..schedules.len() {
+            // Bound the number of releases per invocation to prevent unbounded
+            // Soroban instruction/memory usage when many schedules are due.
+            if released_count >= MAX_BATCH_SIZE {
+                break;
+            }
+
             let mut schedule = schedules.get(i).unwrap();
             if schedule.released || now < schedule.release_timestamp {
                 continue;

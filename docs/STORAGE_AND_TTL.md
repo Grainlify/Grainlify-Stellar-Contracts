@@ -44,7 +44,6 @@ Source reviewed: `program-escrow/src/lib.rs`.
 | `SCHEDULES` / `DataKey::ReleaseSchedule(String, u64)` | Instance | Release schedule entries. | No explicit extension observed; schedule lifetime should cover all release deadlines plus dispute/recovery buffer. |
 | `RELEASE_HISTORY` / `DataKey::ReleaseHistory(String)` | Instance | Historical release records. | No explicit extension observed; preserve for auditability. |
 | `NEXT_SCHEDULE_ID` / `DataKey::NextScheduleId(String)` | Instance | Next release schedule id. | No explicit per-key extension; covered by contract instance TTL. |
-| `DataKey::MultisigConfig(String)` | Instance | Program-specific multisig config. | No explicit extension observed. |
 | `DataKey::PayoutApproval(String, Address)` | Instance | Payout approval state. | No explicit extension observed; should remain live through payout execution. |
 | `DataKey::PendingClaim(String, u64)` | Instance | Pending claim by program and schedule id. | No explicit extension observed; align with claim window. |
 | `DataKey::ClaimWindow` | Instance | Claim-window configuration. | No explicit extension observed. |
