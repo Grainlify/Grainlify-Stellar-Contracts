@@ -1706,3 +1706,129 @@ fn test_combined_recipient_and_amount_filter_manual() {
     assert_eq!(large_count, 1);
     assert_eq!(last_amount, 200_000);
 }
+
+// ========================================================================
+// Fund Cap Tests
+// ========================================================================
+
+fn setup_program_with_admin(
+    env: &Env,
+) -> (ProgramEscrowContractClient<'static>, Address, token::StellarAssetClient<'static>, token::Client<'static>) {
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let tokenadmin = Address::generate(env);
+    let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+    let token_client = token::Client::new(env, &token_id);
+    let tokenadmin_client = token::StellarAssetClient::new(env, &token_id);
+
+    let program_id = String::from_str(env, "hack-2026");
+    client.init_program(&program_id, &admin, &token_id);
+    client.initialize_contract(&admin);
+
+    (client, admin, tokenadmin_client, token_client)
+}
+
+#[test]
+fn test_fund_cap_config_default_is_no_cap() {
+    let env = Env::default();
+    let (client, _admin, _ta, _tc) = setup_program_with_admin(&env);
+
+    let config = client.get_fund_cap_config();
+    assert!(config.max_total_funds.is_none());
+    assert!(config.max_single_lock.is_none());
+}
+
+#[test]
+fn test_set_fund_cap_config_admin_only() {
+    let env = Env::default();
+    let (client, _admin, _ta, _tc) = setup_program_with_admin(&env);
+
+    client.set_fund_cap_config(&Some(1_000_000_000_i128), &Some(500_000_000_i128));
+
+    let config = client.get_fund_cap_config();
+    assert_eq!(config.max_total_funds, Some(1_000_000_000));
+    assert_eq!(config.max_single_lock, Some(500_000_000));
+}
+
+#[test]
+#[should_panic(expected = "Amount exceeds per-lock maximum")]
+fn test_lock_program_funds_rejects_over_per_lock_cap() {
+    let env = Env::default();
+    let (client, admin, tokenadmin, _tc) = setup_program_with_admin(&env);
+
+    tokenadmin.mint(&admin, &10_000);
+
+    client.set_fund_cap_config(&None, &Some(1_000_i128));
+
+    client.lock_program_funds(&admin, &2_000);
+}
+
+#[test]
+#[should_panic(expected = "Total funds cap exceeded")]
+fn test_lock_program_funds_rejects_over_total_cap() {
+    let env = Env::default();
+    let (client, admin, tokenadmin, _tc) = setup_program_with_admin(&env);
+
+    tokenadmin.mint(&admin, &10_000);
+
+    client.set_fund_cap_config(&Some(5_000_i128), &None);
+
+    client.lock_program_funds(&admin, &3_000);
+    client.lock_program_funds(&admin, &3_000);
+}
+
+#[test]
+fn test_lock_program_funds_allowed_at_exact_total_cap() {
+    let env = Env::default();
+    let (client, admin, tokenadmin, _tc) = setup_program_with_admin(&env);
+
+    tokenadmin.mint(&admin, &10_000);
+
+    client.set_fund_cap_config(&Some(5_000_i128), &None);
+
+    let result = client.lock_program_funds(&admin, &5_000);
+    assert_eq!(result.total_funds, 5_000);
+}
+
+#[test]
+fn test_lock_program_funds_allowed_at_exact_single_lock_cap() {
+    let env = Env::default();
+    let (client, admin, tokenadmin, _tc) = setup_program_with_admin(&env);
+
+    tokenadmin.mint(&admin, &10_000);
+
+    client.set_fund_cap_config(&None, &Some(1_000_i128));
+
+    let result = client.lock_program_funds(&admin, &1_000);
+    assert_eq!(result.total_funds, 1_000);
+}
+
+#[test]
+fn test_lock_program_funds_no_cap_when_disabled() {
+    let env = Env::default();
+    let (client, admin, tokenadmin, _tc) = setup_program_with_admin(&env);
+
+    tokenadmin.mint(&admin, &999_999_999);
+
+    let result = client.lock_program_funds(&admin, &999_999_999);
+    assert_eq!(result.total_funds, 999_999_999);
+}
+
+#[test]
+fn test_set_fund_cap_config_clear_caps() {
+    let env = Env::default();
+    let (client, _admin, _ta, _tc) = setup_program_with_admin(&env);
+
+    client.set_fund_cap_config(&Some(1_000_i128), &Some(500_i128));
+    let config = client.get_fund_cap_config();
+    assert!(config.max_total_funds.is_some());
+
+    client.set_fund_cap_config(&None, &None);
+    let config = client.get_fund_cap_config();
+    assert!(config.max_total_funds.is_none());
+    assert!(config.max_single_lock.is_none());
+}
