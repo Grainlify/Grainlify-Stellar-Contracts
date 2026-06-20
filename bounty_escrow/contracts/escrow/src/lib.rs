@@ -1510,7 +1510,7 @@ impl BountyEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(bounty_id))
             .unwrap();
-        Self::bump_escrow_ttl(env, bounty_id);
+        Self::bump_escrow_ttl(&env, bounty_id);
 
         if escrow.status != EscrowStatus::Locked && escrow.status != EscrowStatus::PartiallyRefunded
         {
