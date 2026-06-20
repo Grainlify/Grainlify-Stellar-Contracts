@@ -262,6 +262,7 @@ The integration includes comprehensive tests:
    - Admin operations with governance
    - Upgrade scenarios
    - Matching-hash approval, wrong-hash rejection, and missing-governance rejection
+   - Cross-contract `bounty_escrow` + real `grainlify-core` version gates, including below-minimum rejection, at-minimum success, and numeric-encoded version checks
 
 ### Running Tests
 

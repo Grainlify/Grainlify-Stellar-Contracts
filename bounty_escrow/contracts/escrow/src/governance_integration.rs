@@ -14,6 +14,7 @@ const MIN_GOV_VERSION: Symbol = soroban_sdk::symbol_short!("MIN_VER");
 #[allow(dead_code)]
 pub trait GovernanceInterface {
     fn get_ver(env: Env) -> u32;
+    fn get_version_numeric_encoded(env: Env) -> u32;
     fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool;
 }
 
@@ -44,7 +45,12 @@ pub fn check_governance_version(env: &Env) -> bool {
     if let Some(gov_addr) = get_governance_contract(env) {
         let min_version = get_min_governance_version(env);
         if min_version > 0 {
-            let version = GovernanceClient::new(env, &gov_addr).get_ver();
+            let governance = GovernanceClient::new(env, &gov_addr);
+            let version = if min_version >= 10_000 {
+                governance.get_version_numeric_encoded()
+            } else {
+                governance.get_ver()
+            };
             return version >= min_version;
         }
     }
