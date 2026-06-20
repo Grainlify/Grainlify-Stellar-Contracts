@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::{governance_integration, BountyEscrowContract, BountyEscrowContractClient, Error};
+use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
 
 // Mock governance contract for testing
@@ -14,6 +15,10 @@ mod mock_governance {
     impl MockGovernanceContract {
         pub fn get_ver(_env: Env) -> u32 {
             2
+        }
+
+        pub fn get_version_numeric_encoded(_env: Env) -> u32 {
+            20_000
         }
 
         pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
@@ -86,6 +91,77 @@ fn test_governance_version_check_with_mock() {
 
     // Admin operations should work when governance version is met
     let _ = client.set_paused(&Some(true), &None, &None);
+}
+
+#[test]
+fn test_governance_version_gate_with_real_grainlify_core_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, BountyEscrowContract);
+    let escrow = BountyEscrowContractClient::new(&env, &escrow_id);
+
+    let grainlify_id = env.register_contract(None, GrainlifyContract);
+    let grainlify = GrainlifyContractClient::new(&env, &grainlify_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    escrow.init(&admin, &token);
+    grainlify.init_admin(&admin);
+
+    escrow.set_governance_contract(&grainlify_id);
+    escrow.set_min_governance_version(&3);
+
+    // The real grainlify-core contract starts below this required version, so guarded
+    // bounty-escrow admin operations must reject before the version bump.
+    assert_eq!(
+        escrow.try_set_paused(&Some(true), &None, &None),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+    assert_eq!(
+        escrow.try_update_fee_config(&Some(100), &None, &None, &None),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    // After the real governance contract version reaches the minimum, the same
+    // cross-contract gated operations should succeed end-to-end.
+    grainlify.set_version(&3);
+
+    escrow.set_paused(&Some(true), &None, &None);
+    escrow.update_fee_config(&Some(100), &None, &None, &Some(true));
+
+    let fee_config = escrow.get_fee_config();
+    assert_eq!(fee_config.lock_fee_rate, 100);
+    assert!(fee_config.fee_enabled);
+}
+
+#[test]
+fn test_governance_version_gate_uses_real_numeric_encoded_semver() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, BountyEscrowContract);
+    let escrow = BountyEscrowContractClient::new(&env, &escrow_id);
+
+    let grainlify_id = env.register_contract(None, GrainlifyContract);
+    let grainlify = GrainlifyContractClient::new(&env, &grainlify_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    escrow.init(&admin, &token);
+    grainlify.init_admin(&admin);
+    grainlify.set_version(&2);
+
+    assert_eq!(grainlify.get_version_numeric_encoded(), 20_000);
+
+    escrow.set_governance_contract(&grainlify_id);
+    escrow.set_min_governance_version(&20_000);
+
+    // A numeric-encoded v2.0.0 minimum must pass through the same real
+    // cross-contract boundary instead of comparing the simple raw version `2`.
+    escrow.set_paused(&None, &Some(true), &None);
 }
 
 #[test]
