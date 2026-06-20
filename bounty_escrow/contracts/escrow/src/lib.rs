@@ -391,6 +391,8 @@ pub enum Error {
     ClaimExpired = 22,
     /// Returned when the linked governance contract version is below the configured minimum
     GovernanceVersionTooLow = 23,
+    /// Returned when authorize_claim is called while a non-expired pending claim already exists
+    PendingClaimExists = 24,
 }
 
 #[contracttype]
@@ -1279,6 +1281,19 @@ impl BountyEscrowContract {
 
         if escrow.status != EscrowStatus::Locked {
             return Err(Error::FundsNotLocked);
+        }
+
+        // Guard: reject if a non-expired, unclaimed pending claim already exists.
+        // This prevents silently overwriting a live claim to redirect funds.
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<_, ClaimRecord>(&DataKey::PendingClaim(bounty_id))
+        {
+            let now = env.ledger().timestamp();
+            if !existing.claimed && now <= existing.expires_at {
+                return Err(Error::PendingClaimExists);
+            }
         }
 
         let now = env.ledger().timestamp();
