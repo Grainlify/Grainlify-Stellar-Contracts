@@ -200,8 +200,6 @@ const PROGRAM_DATA: Symbol = symbol_short!("ProgData");
 const SCHEDULES: Symbol = symbol_short!("Scheds");
 const RELEASE_HISTORY: Symbol = symbol_short!("RelHist");
 const NEXT_SCHEDULE_ID: Symbol = symbol_short!("NxtSched");
-const PROGRAM_INDEX: Symbol = symbol_short!("ProgIdx");
-const AUTH_KEY_INDEX: Symbol = symbol_short!("AuthIdx");
 const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
 const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
 const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
@@ -311,7 +309,6 @@ pub enum DataKey {
     ReleaseSchedule(String, u64),    // program_id, schedule_id -> ProgramReleaseSchedule
     ReleaseHistory(String),          // program_id -> Vec<ProgramReleaseHistory>
     NextScheduleId(String),          // program_id -> next schedule_id
-    MultisigConfig(String),          // program_id -> MultisigConfig
     PayoutApproval(String, Address), // program_id, recipient -> PayoutApproval
     PendingClaim(String, u64),       // (program_id, schedule_id) -> ClaimRecord
     ClaimWindow,                     // u64 seconds (global config)
@@ -363,14 +360,6 @@ pub struct Analytics {
     pub total_payouts: u32,
     pub active_programs: u32,
     pub operation_count: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MultisigConfig {
-    pub threshold_amount: i128,
-    pub signers: Vec<Address>,
-    pub required_signatures: u32,
 }
 
 #[contracttype]
@@ -644,16 +633,6 @@ impl ProgramEscrowContract {
             };
             let program_key = DataKey::Program(program_id.clone());
             env.storage().instance().set(&program_key, &program_data);
-
-            let multisig_config = MultisigConfig {
-                threshold_amount: i128::MAX,
-                signers: vec![&env],
-                required_signatures: 0,
-            };
-            env.storage().persistent().set(
-                &DataKey::MultisigConfig(program_id.clone()),
-                &multisig_config,
-            );
 
             env.events().publish(
                 (symbol_short!("BatchReg"),),

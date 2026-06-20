@@ -151,6 +151,14 @@ program-escrow/ANALYTICS_EVENTS.md             | 200 new file
 - ✅ Easy to review (well-structured, documented code)
 - ✅ Timeframe: Completed within 96 hours
 
+## Authorization Model
+
+Program escrow payouts are authorized by the configured `authorized_payout_key`.
+The payout paths call `authorized_payout_key.require_auth()` directly for batch
+payouts, single payouts, and release-schedule operations. Program escrow does
+not enforce a multisig threshold for payouts; multisig governance lives in other
+contracts and should not be inferred from program-escrow storage.
+
 ## Notes
 
 The implementation is complete and ready for review. The existing test suite has compilation errors unrelated to this feature, which should be addressed separately. The new analytics events are production-ready and follow best practices for observability and monitoring.
