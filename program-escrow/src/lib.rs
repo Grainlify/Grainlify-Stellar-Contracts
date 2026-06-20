@@ -1267,9 +1267,19 @@ impl ProgramEscrowContract {
 
     /// Execute batch payouts to multiple recipients
     ///
+    /// The batch is bounded by `MAX_BATCH_SIZE` (currently 100). Calls with
+    /// zero recipients or more than `MAX_BATCH_SIZE` recipients are rejected
+    /// before any token transfer occurs, and the reentrancy guard is cleared
+    /// on those early-return paths to avoid a stuck guard.
+    ///
     /// # Arguments
-    /// * `recipients` - Vector of recipient addresses
-    /// * `amounts` - Vector of amounts (must match recipients length)
+    /// * `recipients` - Vector of recipient addresses (1..=MAX_BATCH_SIZE)
+    /// * `amounts` - Vector of amounts (must match recipients length; all > 0)
+    ///
+    /// # Panics
+    /// * `"Batch size exceeds maximum allowed"` — when `recipients.len() > MAX_BATCH_SIZE`
+    /// * `"Cannot process empty batch"` — when `recipients.len() == 0`
+    /// * `"Recipients and amounts vectors must have the same length"` — on length mismatch
     ///
     /// # Returns
     /// Updated ProgramData after payouts
@@ -1322,6 +1332,11 @@ impl ProgramEscrowContract {
         if batch_len == 0 {
             reentrancy_guard::clear_entered(&env);
             panic!("Cannot process empty batch");
+        }
+
+        if recipient_count > MAX_BATCH_SIZE {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Batch size exceeds maximum allowed");
         }
 
         // Calculate total payout amount
@@ -1681,6 +1696,12 @@ impl ProgramEscrowContract {
         let mut released_count: u32 = 0;
 
         for i in 0..schedules.len() {
+            // Bound the number of releases per invocation to prevent unbounded
+            // Soroban instruction/memory usage when many schedules are due.
+            if released_count >= MAX_BATCH_SIZE {
+                break;
+            }
+
             let mut schedule = schedules.get(i).unwrap();
             if schedule.released || now < schedule.release_timestamp {
                 continue;
