@@ -203,6 +203,7 @@ const NEXT_SCHEDULE_ID: Symbol = symbol_short!("NxtSched");
 const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
 const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
 const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
+const FUND_CAP_CONFIG: Symbol = symbol_short!("FnCapCfg");
 const BASIS_POINTS: i128 = 10_000;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -350,6 +351,18 @@ pub struct FeeConfig {
     pub payout_fee_rate: i128,
     pub fee_recipient: Address,
     pub fee_enabled: bool,
+}
+
+/// Admin-configurable caps for fund locking.
+/// When set, `lock_program_funds` rejects amounts that would exceed either cap.
+/// Default: no cap (backward-compatible).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FundCapConfig {
+    /// Maximum total funds allowed across all lock operations (None = no cap).
+    pub max_total_funds: Option<i128>,
+    /// Maximum amount allowed for a single lock operation (None = no cap).
+    pub max_single_lock: Option<i128>,
 }
 
 #[contracttype]
@@ -768,6 +781,37 @@ impl ProgramEscrowContract {
             .instance()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+
+        // Check fund caps if configured
+        let cap_config: FundCapConfig = env
+            .storage()
+            .instance()
+            .get(&FUND_CAP_CONFIG)
+            .unwrap_or(FundCapConfig {
+                max_total_funds: None,
+                max_single_lock: None,
+            });
+
+        // Per-lock cap check
+        if let Some(max_single) = cap_config.max_single_lock {
+            if amount > max_single {
+                monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
+                panic!("Amount exceeds per-lock maximum");
+            }
+        }
+
+        // Total-funds cap check
+        if let Some(max_total) = cap_config.max_total_funds {
+            let new_total = program_data.total_funds.checked_add(amount)
+                .unwrap_or_else(|| {
+                    monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
+                    panic!("Total funds overflow");
+                });
+            if new_total > max_total {
+                monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
+                panic!("Total funds cap exceeded");
+            }
+        }
 
         // Transfer funds
         let token_client = token::Client::new(&env, &program_data.token_address);
@@ -1205,6 +1249,54 @@ impl ProgramEscrowContract {
                 window_size: 3600,
                 max_operations: 10,
                 cooldown_period: 60,
+            })
+    }
+
+    /// Set the fund cap configuration (admin only).
+    /// When enabled, `lock_program_funds` will reject locks that exceed either cap.
+    /// Pass `None` for either field to leave that cap unset.
+    pub fn set_fund_cap_config(
+        env: Env,
+        max_total_funds: Option<i128>,
+        max_single_lock: Option<i128>,
+    ) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Admin not set"));
+        admin.require_auth();
+
+        // Validate: if set, values must be positive
+        if let Some(val) = max_total_funds {
+            if val <= 0 {
+                panic!("max_total_funds must be positive");
+            }
+        }
+        if let Some(val) = max_single_lock {
+            if val <= 0 {
+                panic!("max_single_lock must be positive");
+            }
+        }
+
+        let config = FundCapConfig {
+            max_total_funds,
+            max_single_lock,
+        };
+        env.storage()
+            .instance()
+            .set(&FUND_CAP_CONFIG, &config);
+        Ok(())
+    }
+
+    /// Get the current fund cap configuration.
+    pub fn get_fund_cap_config(env: Env) -> FundCapConfig {
+        env.storage()
+            .instance()
+            .get(&FUND_CAP_CONFIG)
+            .unwrap_or(FundCapConfig {
+                max_total_funds: None,
+                max_single_lock: None,
             })
     }
 
