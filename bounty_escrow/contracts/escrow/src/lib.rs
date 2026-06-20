@@ -355,6 +355,10 @@ mod anti_abuse {
 const BASIS_POINTS: i128 = 10_000;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
 const MAX_BATCH_SIZE: u32 = 20;
+/// Extend escrow persistent entries when the ledger sequence is within roughly one day of expiry.
+const ESCROW_TTL_THRESHOLD: u32 = 17_280;
+/// Keep escrow persistent entries alive for roughly thirty days on five-second ledgers.
+const ESCROW_TTL_EXTEND_TO: u32 = 518_400;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -605,6 +609,29 @@ pub struct BountyEscrowContract;
 
 #[contractimpl]
 impl BountyEscrowContract {
+    /// Bump the TTL for the primary escrow entry after escrow reads and writes.
+    fn bump_escrow_ttl(env: &Env, bounty_id: u64) {
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(bounty_id),
+            ESCROW_TTL_THRESHOLD,
+            ESCROW_TTL_EXTEND_TO,
+        );
+    }
+
+    /// Bump the TTL for escrow indexes that point callers back to a bounty id.
+    fn bump_escrow_index_ttl(env: &Env, depositor: Address) {
+        env.storage().persistent().extend_ttl(
+            &DataKey::EscrowIndex,
+            ESCROW_TTL_THRESHOLD,
+            ESCROW_TTL_EXTEND_TO,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::DepositorIndex(depositor),
+            ESCROW_TTL_THRESHOLD,
+            ESCROW_TTL_EXTEND_TO,
+        );
+    }
+
     /// Initialize the contract with the admin address and the token address (XLM).
     pub fn init(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -1056,6 +1083,7 @@ impl BountyEscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
+        Self::bump_escrow_ttl(&env, bounty_id);
 
         // Update indexes
         let mut index: Vec<u64> = env
@@ -1078,6 +1106,7 @@ impl BountyEscrowContract {
             &DataKey::DepositorIndex(depositor.clone()),
             &depositor_index,
         );
+        Self::bump_escrow_index_ttl(&env, depositor.clone());
 
         // Initialize analytics for this bounty
         let timestamp = env.ledger().timestamp();
@@ -1170,6 +1199,7 @@ impl BountyEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(bounty_id))
             .unwrap();
+        Self::bump_escrow_ttl(&env, bounty_id);
 
         if escrow.status != EscrowStatus::Locked {
             return Err(Error::FundsNotLocked);
@@ -1191,6 +1221,7 @@ impl BountyEscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
+        Self::bump_escrow_ttl(&env, bounty_id);
 
         let timestamp = env.ledger().timestamp();
 
@@ -1362,6 +1393,7 @@ impl BountyEscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
+        Self::bump_escrow_ttl(&env, bounty_id);
 
         claim.claimed = true;
         env.storage()
@@ -1463,6 +1495,7 @@ impl BountyEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(bounty_id))
             .unwrap();
+        Self::bump_escrow_ttl(env, bounty_id);
 
         if escrow.status != EscrowStatus::Locked && escrow.status != EscrowStatus::PartiallyRefunded
         {
@@ -1568,6 +1601,7 @@ impl BountyEscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
+        Self::bump_escrow_ttl(&env, bounty_id);
 
         events::emit_funds_released(
             &env,
@@ -1701,6 +1735,7 @@ impl BountyEscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
+        Self::bump_escrow_ttl(&env, bounty_id);
 
         // Update analytics
         update_analytics_on_refund(&env, bounty_id, refund_amount, now);
@@ -1833,6 +1868,7 @@ impl BountyEscrowContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(bounty_id), &escrow);
+            Self::bump_escrow_ttl(&env, bounty_id);
 
             update_analytics_on_refund(&env, bounty_id, refund_amount, now);
 
@@ -1896,11 +1932,13 @@ impl BountyEscrowContract {
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
         }
-        Ok(env
+        let escrow = env
             .storage()
             .persistent()
             .get(&DataKey::Escrow(bounty_id))
-            .unwrap())
+            .unwrap();
+        Self::bump_escrow_ttl(&env, bounty_id);
+        Ok(escrow)
     }
 
     /// view function to get contract balance of the token
@@ -2566,6 +2604,27 @@ impl BountyEscrowContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(item.bounty_id), &escrow);
+            Self::bump_escrow_ttl(&env, item.bounty_id);
+
+            let mut index: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::EscrowIndex)
+                .unwrap_or(Vec::new(&env));
+            index.push_back(item.bounty_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::EscrowIndex, &index);
+
+            let depositor_key = DataKey::DepositorIndex(item.depositor.clone());
+            let mut depositor_index: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&depositor_key)
+                .unwrap_or(Vec::new(&env));
+            depositor_index.push_back(item.bounty_id);
+            env.storage().persistent().set(&depositor_key, &depositor_index);
+            Self::bump_escrow_index_ttl(&env, item.depositor.clone());
 
             // Emit individual event for each locked bounty
             emit_funds_locked(
@@ -2698,6 +2757,7 @@ impl BountyEscrowContract {
                 .persistent()
                 .get(&DataKey::Escrow(item.bounty_id))
                 .unwrap();
+            Self::bump_escrow_ttl(&env, item.bounty_id);
 
             // Transfer funds to contributor
             client.transfer(&contract_address, &item.contributor, &escrow.amount);
@@ -2708,6 +2768,7 @@ impl BountyEscrowContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(item.bounty_id), &escrow);
+            Self::bump_escrow_ttl(&env, item.bounty_id);
 
             // Emit individual event for each released bounty
             emit_funds_released(
