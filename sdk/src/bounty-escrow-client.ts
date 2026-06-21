@@ -1,5 +1,6 @@
 import { Contract, SorobanRpc, Keypair } from '@stellar/stellar-sdk';
 import { NetworkError, ValidationError, parseContractError, ContractError } from './errors';
+import { invokeContract, InvocationConfig } from './invocation';
 
 export interface BountyEscrowConfig {
   /** Deployed BountyEscrow contract address. */
@@ -179,6 +180,7 @@ export class BountyEscrowClient {
   private contract: Contract;
   private server: SorobanRpc.Server;
   private config: BountyEscrowConfig;
+  private invocationConfig: InvocationConfig;
 
   /**
    * Create a client bound to one BountyEscrow contract and Soroban RPC endpoint.
@@ -195,6 +197,12 @@ export class BountyEscrowClient {
     } catch (error) {
       this.server = null as any;
     }
+    this.invocationConfig = {
+      server: this.server,
+      contract: this.contract,
+      networkPassphrase: config.networkPassphrase,
+      rpcUrl: config.rpcUrl,
+    };
   }
 
   /**
@@ -720,28 +728,15 @@ export class BountyEscrowClient {
     args: any[],
     sourceKeypair?: Keypair
   ): Promise<any> {
-    try {
-      // Mock implementation to mirror ProgramEscrowClient
-      throw new Error('Contract invocation not implemented - this is a mock for testing');
-    } catch (error: any) {
-      if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        throw new NetworkError(
-          `Failed to connect to RPC server: ${this.config.rpcUrl}`,
-          undefined,
-          error
-        );
+    return invokeContract(
+      method,
+      args,
+      this.invocationConfig,
+      {
+        sourceKeypair,
+        readOnly: !sourceKeypair,
       }
-      
-      if (error.response?.status) {
-        throw new NetworkError(
-          `RPC request failed with status ${error.response.status}`,
-          error.response.status,
-          error
-        );
-      }
-      
-      throw error;
-    }
+    );
   }
 
   private handleError(error: any): Error {

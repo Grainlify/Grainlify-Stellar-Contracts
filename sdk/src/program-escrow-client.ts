@@ -1,5 +1,6 @@
-import { Contract, SorobanRpc, TransactionBuilder, Networks, Account, Keypair, Operation } from '@stellar/stellar-sdk';
+import { Contract, SorobanRpc, Keypair } from '@stellar/stellar-sdk';
 import { NetworkError, ValidationError, parseContractError, ContractError } from './errors';
+import { invokeContract, InvocationConfig } from './invocation';
 
 export interface ProgramEscrowConfig {
   /** Deployed ProgramEscrow contract address. */
@@ -57,6 +58,7 @@ export class ProgramEscrowClient {
   private contract: Contract;
   private server: SorobanRpc.Server;
   private config: ProgramEscrowConfig;
+  private invocationConfig: InvocationConfig;
 
   /**
    * Create a client bound to one ProgramEscrow contract and Soroban RPC endpoint.
@@ -75,6 +77,12 @@ export class ProgramEscrowClient {
       // Allow server initialization to fail for testing
       this.server = null as any;
     }
+    this.invocationConfig = {
+      server: this.server,
+      contract: this.contract,
+      networkPassphrase: config.networkPassphrase,
+      rpcUrl: config.rpcUrl,
+    };
   }
 
   /**
@@ -281,36 +289,15 @@ export class ProgramEscrowClient {
     args: any[],
     sourceKeypair?: Keypair
   ): Promise<any> {
-    try {
-      // This is a simplified implementation
-      // In a real implementation, you would:
-      // 1. Build the transaction with proper parameters
-      // 2. Simulate the transaction
-      // 3. Sign and submit if sourceKeypair is provided
-      // 4. Parse and return the result
-      
-      // For now, this throws to simulate contract behavior
-      throw new Error('Contract invocation not implemented - this is a mock for testing');
-    } catch (error: any) {
-      // Check for network errors
-      if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        throw new NetworkError(
-          `Failed to connect to RPC server: ${this.config.rpcUrl}`,
-          undefined,
-          error
-        );
+    return invokeContract(
+      method,
+      args,
+      this.invocationConfig,
+      {
+        sourceKeypair,
+        readOnly: !sourceKeypair,
       }
-      
-      if (error.response?.status) {
-        throw new NetworkError(
-          `RPC request failed with status ${error.response.status}`,
-          error.response.status,
-          error
-        );
-      }
-      
-      throw error;
-    }
+    );
   }
 
   private handleError(error: any): Error {

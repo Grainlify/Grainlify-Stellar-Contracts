@@ -26,6 +26,15 @@ export type {
 } from './bounty-escrow-client';
 
 export { 
+  invokeContract,
+  waitForConfirmation,
+} from './invocation';
+export type {
+  InvocationConfig,
+  InvokeOptions,
+} from './invocation';
+
+export { 
   SDKError,
   ContractError,
   NetworkError,
