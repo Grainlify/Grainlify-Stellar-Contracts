@@ -10,8 +10,10 @@ mod test_rbac;
 use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
     emit_bounty_initialized, emit_funds_locked, emit_funds_refunded, emit_funds_released,
-    BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized, BountyExpired, ClaimCancelled,
-    ClaimCreated, ClaimExecuted, FundsLocked, FundsRefunded, FundsReleased, EVENT_VERSION_V2,
+    emit_claim_created, emit_claim_executed, emit_claim_cancelled,
+    BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized, BountyExpired,
+    ClaimCancelled, ClaimCreated, ClaimExecuted,
+    FundsLocked, FundsRefunded, FundsReleased, EVENT_VERSION_V2,
 };
 use analytics::{
     emit_analytics_snapshot, emit_bounty_activity, emit_bounty_state_transitioned,
@@ -852,6 +854,7 @@ impl BountyEscrowContract {
         events::emit_fee_config_updated(
             &env,
             events::FeeConfigUpdated {
+                version: EVENT_VERSION_V2,
                 lock_fee_rate: fee_config.lock_fee_rate,
                 release_fee_rate: fee_config.release_fee_rate,
                 fee_recipient: fee_config.fee_recipient.clone(),
@@ -1128,6 +1131,7 @@ impl BountyEscrowContract {
         events::emit_approval_added(
             &env,
             events::ApprovalAdded {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 contributor: contributor.clone(),
                 approver,
@@ -1473,9 +1477,10 @@ impl BountyEscrowContract {
             .persistent()
             .set(&DataKey::PendingClaim(bounty_id), &claim);
 
-        env.events().publish(
-            (symbol_short!("claim"), symbol_short!("created")),
+        emit_claim_created(
+            &env,
             ClaimCreated {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient,
                 amount: escrow.amount,
@@ -1548,9 +1553,10 @@ impl BountyEscrowContract {
             .persistent()
             .set(&DataKey::PendingClaim(bounty_id), &claim);
 
-        env.events().publish(
-            (symbol_short!("claim"), symbol_short!("done")),
+        emit_claim_executed(
+            &env,
             ClaimExecuted {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient: claim.recipient.clone(),
                 amount: claim.amount,
@@ -1559,8 +1565,6 @@ impl BountyEscrowContract {
         );
         Ok(())
     }
-
-    /// Admin can cancel an expired or unwanted pending claim, returning escrow to Locked.
     pub fn cancel_pending_claim(env: Env, bounty_id: u64) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
@@ -1596,9 +1600,10 @@ impl BountyEscrowContract {
             .persistent()
             .remove(&DataKey::PendingClaim(bounty_id));
 
-        env.events().publish(
-            (symbol_short!("claim"), symbol_short!("cancel")),
+        emit_claim_cancelled(
+            &env,
             ClaimCancelled {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient: claim.recipient,
                 amount: claim.amount,
@@ -2860,6 +2865,7 @@ impl BountyEscrowContract {
         emit_batch_funds_locked(
             &env,
             BatchFundsLocked {
+                version: EVENT_VERSION_V2,
                 count: locked_count,
                 total_amount: items.iter().map(|i| i.amount).sum(),
                 timestamp,
@@ -3007,6 +3013,7 @@ impl BountyEscrowContract {
         emit_batch_funds_released(
             &env,
             BatchFundsReleased {
+                version: EVENT_VERSION_V2,
                 count: released_count,
                 total_amount,
                 timestamp,
