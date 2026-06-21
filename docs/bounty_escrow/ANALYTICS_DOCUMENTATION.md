@@ -193,6 +193,69 @@ Periodically call:
 
 ## Performance Considerations
 
+### O(1) Incremental Aggregate Counters
+
+**Performance Optimization (Issue #XXX)**
+
+To avoid O(N) full-scan queries as the bounty count grows, the contract maintains **incremental aggregate counters** that are updated on every state transition. This provides constant-time O(1) access to aggregate statistics.
+
+#### Implementation Details
+
+The contract stores a persistent `AggregateStats` struct:
+```rust
+pub struct AggregateStats {
+    pub total_locked: i128,      // Sum of remaining_amount for Locked/PartiallyRefunded
+    pub total_released: i128,     // Sum of amounts for Released bounties
+    pub total_refunded: i128,     // Sum of amounts for Refunded bounties
+    pub count_locked: u32,        // Count of Locked/PartiallyRefunded bounties
+    pub count_released: u32,      // Count of Released bounties
+    pub count_refunded: u32,      // Count of Refunded bounties
+}
+```
+
+#### Counter Update Strategy
+
+Counters are updated atomically on every state transition:
+
+| Transition | Counter Update |
+|------------|---------------|
+| **New Lock** | `increment_locked(amount)` |
+| **Locked → Released** | `transition_locked_to_released(amount)` |
+| **Locked → Refunded** | `transition_locked_to_refunded(amount)` |
+| **Locked → PartiallyRefunded** | `partial_refund_from_locked(refund_amount)` |
+| **PartiallyRefunded → Refunded** | `transition_partially_refunded_to_refunded(amount)` |
+| **Partial Release** | `partial_release_from_locked(amount)` |
+| **Partial Release → Released** | `finalize_partial_release_to_released()` |
+
+#### Consistency Guarantees
+
+1. **Atomicity**: Counter updates are part of the same transaction that updates escrow state
+2. **Verification**: Property tests validate counters match full scan after every operation
+3. **Reconciliation**: `get_aggregate_stats_full_scan()` provides O(N) ground-truth for verification
+
+#### Using the Counters
+
+**For production queries:**
+```rust
+// O(1) - Use incremental counters
+let stats = get_aggregate_stats();
+let active_tvl = stats.total_locked;
+let locked_count = stats.count_locked;
+```
+
+**For verification/reconciliation:**
+```rust
+// O(N) - Full scan for ground truth
+let full_scan = get_aggregate_stats_full_scan();
+assert_eq!(get_aggregate_stats(), full_scan);
+```
+
+#### Status Mapping Note
+
+- `count_locked` includes both `Locked` and `PartiallyRefunded` bounties
+- `total_locked` tracks the sum of `remaining_amount` for active bounties
+- To get exact `PartiallyRefunded` counts, use `count_bounties_by_status_full_scan()`
+
 ### Storage Efficiency
 - Per-bounty analytics stored in compact struct (~88 bytes)
 - Only updated on state transitions

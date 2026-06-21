@@ -19,7 +19,7 @@
 /// * `get_refund_history`    – history vector is populated by approved-refund path
 /// * Monitoring event emission – lock/release/refund each emit ≥ 1 event
 /// * Error flows             – failed attempts do not corrupt metrics
-use crate::{BountyEscrowContract, BountyEscrowContractClient, EscrowStatus, RefundMode};
+use crate::{BountyEscrowContract, BountyEscrowContractClient, EscrowStatus, RefundMode, LockFundsItem, ReleaseFundsItem};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token, Address, Env,
@@ -1147,5 +1147,252 @@ fn test_get_balance_zero_after_all_escrows_settled() {
         escrow.get_balance(),
         0,
         "contract balance must be zero when all escrows are settled"
+    );
+}
+
+// ===========================================================================
+// 16. Counter Reconciliation Tests – Incremental O(1) counters match O(N) full scan
+// ===========================================================================
+
+#[test]
+fn test_counters_match_full_scan_after_single_lock() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &1_000_000);
+
+    let deadline = env.ledger().timestamp() + 1000;
+    escrow.lock_funds(&depositor, &300, &1_000, &deadline);
+
+    let counter_stats = escrow.get_aggregate_stats();
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(
+        counter_stats, full_scan_stats,
+        "O(1) counters must match O(N) full scan after lock"
+    );
+}
+
+#[test]
+fn test_counters_match_full_scan_after_release() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &1_000_000);
+
+    let deadline = env.ledger().timestamp() + 1000;
+    escrow.lock_funds(&depositor, &301, &1_000, &deadline);
+    escrow.release_funds(&301, &contributor);
+
+    let counter_stats = escrow.get_aggregate_stats();
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(
+        counter_stats, full_scan_stats,
+        "O(1) counters must match O(N) full scan after release"
+    );
+}
+
+#[test]
+fn test_counters_match_full_scan_after_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &1_000_000);
+
+    let deadline = env.ledger().timestamp() + 500;
+    escrow.lock_funds(&depositor, &302, &1_000, &deadline);
+    env.ledger().set_timestamp(deadline + 1);
+    escrow.refund(&302);
+
+    let counter_stats = escrow.get_aggregate_stats();
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(
+        counter_stats, full_scan_stats,
+        "O(1) counters must match O(N) full scan after refund"
+    );
+}
+
+#[test]
+fn test_counters_match_full_scan_after_partial_release() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &1_000_000);
+
+    let deadline = env.ledger().timestamp() + 1000;
+    escrow.lock_funds(&depositor, &303, &1_000, &deadline);
+    escrow.partial_release(&303, &contributor, &300);
+
+    let counter_stats = escrow.get_aggregate_stats();
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(
+        counter_stats, full_scan_stats,
+        "O(1) counters must match O(N) full scan after partial release"
+    );
+}
+
+#[test]
+fn test_counters_match_full_scan_after_partial_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &1_000_000);
+
+    let deadline = env.ledger().timestamp() + 1000;
+    escrow.lock_funds(&depositor, &304, &1_000, &deadline);
+    escrow.approve_refund(&304, &300, &depositor, &RefundMode::Partial);
+    escrow.refund(&304);
+
+    let counter_stats = escrow.get_aggregate_stats();
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(
+        counter_stats, full_scan_stats,
+        "O(1) counters must match O(N) full scan after partial refund"
+    );
+}
+
+#[test]
+fn test_counters_match_full_scan_after_complex_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &10_000_000);
+
+    let now = env.ledger().timestamp();
+    
+    // Create multiple bounties with different lifecycles
+    // Bounty 310: Lock → Release
+    escrow.lock_funds(&depositor, &310, &1_000, &(now + 1000));
+    escrow.release_funds(&310, &contributor);
+
+    // Bounty 311: Lock → Partial Release → Partial Release → Full Release
+    escrow.lock_funds(&depositor, &311, &2_000, &(now + 1000));
+    escrow.partial_release(&311, &contributor, &500);
+    escrow.partial_release(&311, &contributor, &700);
+    escrow.partial_release(&311, &contributor, &800); // Should transition to Released
+
+    // Bounty 312: Lock → Refund
+    escrow.lock_funds(&depositor, &312, &1_500, &(now + 500));
+    env.ledger().set_timestamp(now + 501);
+    escrow.refund(&312);
+
+    // Bounty 313: Lock → Partial Refund → Final Refund
+    env.ledger().set_timestamp(now);
+    escrow.lock_funds(&depositor, &313, &3_000, &(now + 2000));
+    escrow.approve_refund(&313, &1_000, &depositor, &RefundMode::Partial);
+    escrow.refund(&313);
+    escrow.approve_refund(&313, &2_000, &depositor, &RefundMode::Full);
+    escrow.refund(&313);
+
+    // Bounty 314: Still locked
+    escrow.lock_funds(&depositor, &314, &5_000, &(now + 5000));
+
+    // Bounty 315: Lock → Partial Release (still locked)
+    escrow.lock_funds(&depositor, &315, &4_000, &(now + 5000));
+    escrow.partial_release(&315, &contributor, &1_500);
+
+    let counter_stats = escrow.get_aggregate_stats();
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(
+        counter_stats, full_scan_stats,
+        "O(1) counters must match O(N) full scan after complex lifecycle"
+    );
+
+    // Additional sanity checks
+    assert_eq!(counter_stats.count_locked, 2, "Should have 2 locked bounties (314, 315)");
+    assert_eq!(counter_stats.count_released, 2, "Should have 2 released bounties (310, 311)");
+    assert_eq!(counter_stats.count_refunded, 2, "Should have 2 refunded bounties (312, 313)");
+}
+
+#[test]
+fn test_counters_match_full_scan_after_batch_operations() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &10_000_000);
+
+    let deadline = env.ledger().timestamp() + 1000;
+    
+    // Batch lock
+    let lock_items = soroban_sdk::vec![
+        &env,
+        LockFundsItem {
+            bounty_id: 320,
+            depositor: depositor.clone(),
+            amount: 1_000,
+            deadline,
+        },
+        LockFundsItem {
+            bounty_id: 321,
+            depositor: depositor.clone(),
+            amount: 2_000,
+            deadline,
+        },
+        LockFundsItem {
+            bounty_id: 322,
+            depositor: depositor.clone(),
+            amount: 3_000,
+            deadline,
+        },
+    ];
+    escrow.batch_lock_funds(&lock_items);
+
+    // Batch release
+    let release_items = soroban_sdk::vec![
+        &env,
+        ReleaseFundsItem {
+            bounty_id: 320,
+            contributor: contributor.clone(),
+        },
+        ReleaseFundsItem {
+            bounty_id: 321,
+            contributor: contributor.clone(),
+        },
+    ];
+    escrow.batch_release_funds(&release_items);
+
+    let counter_stats = escrow.get_aggregate_stats();
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(
+        counter_stats, full_scan_stats,
+        "O(1) counters must match O(N) full scan after batch operations"
     );
 }

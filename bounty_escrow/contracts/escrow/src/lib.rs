@@ -438,6 +438,7 @@ pub enum DataKey {
     ClaimWindow,          // u64 seconds (global config)
     PauseFlags,           // PauseFlags struct
     AmountPolicy, // Option<(i128, i128)> — (min_amount, max_amount) set by set_amount_policy
+    AggregateCounters, // AggregateStats — O(1) incremental counters maintained on state transitions
 }
 
 #[contracttype]
@@ -633,6 +634,127 @@ impl BountyEscrowContract {
             ESCROW_TTL_EXTEND_TO,
         );
     }
+
+    // ==================== INCREMENTAL AGGREGATE COUNTERS ====================
+    
+    /// Get the current aggregate counters, initializing to zero if not present.
+    /// 
+    /// These counters are maintained incrementally on every state transition
+    /// (lock, release, refund, partial_release) to provide O(1) aggregate queries.
+    fn get_counters(env: &Env) -> AggregateStats {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AggregateCounters)
+            .unwrap_or(AggregateStats {
+                total_locked: 0,
+                total_released: 0,
+                total_refunded: 0,
+                count_locked: 0,
+                count_released: 0,
+                count_refunded: 0,
+            })
+    }
+
+    /// Save the aggregate counters back to storage.
+    fn set_counters(env: &Env, stats: &AggregateStats) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::AggregateCounters, stats);
+        env.storage().persistent().extend_ttl(
+            &DataKey::AggregateCounters,
+            ESCROW_TTL_THRESHOLD,
+            ESCROW_TTL_EXTEND_TO,
+        );
+    }
+
+    /// Increment counters when a new bounty is locked.
+    /// 
+    /// This is called from `lock_funds` and `batch_lock_funds`.
+    /// Adds the amount to total_locked and increments count_locked.
+    fn increment_locked(env: &Env, amount: i128) {
+        let mut stats = Self::get_counters(env);
+        stats.total_locked = stats.total_locked.saturating_add(amount);
+        stats.count_locked = stats.count_locked.saturating_add(1);
+        Self::set_counters(env, &stats);
+    }
+
+    /// Transition a bounty from Locked to Released.
+    /// 
+    /// Called from `release_funds`, `batch_release_funds`, and `claim`.
+    /// Decrements locked counters and increments released counters.
+    fn transition_locked_to_released(env: &Env, amount: i128) {
+        let mut stats = Self::get_counters(env);
+        stats.total_locked = stats.total_locked.saturating_sub(amount);
+        stats.count_locked = stats.count_locked.saturating_sub(1);
+        stats.total_released = stats.total_released.saturating_add(amount);
+        stats.count_released = stats.count_released.saturating_add(1);
+        Self::set_counters(env, &stats);
+    }
+
+    /// Transition a bounty from Locked to Refunded.
+    /// 
+    /// Called from `refund` and `sweep_expired_refunds` when the full amount is refunded.
+    /// Decrements locked counters and increments refunded counters.
+    fn transition_locked_to_refunded(env: &Env, amount: i128) {
+        let mut stats = Self::get_counters(env);
+        stats.total_locked = stats.total_locked.saturating_sub(amount);
+        stats.count_locked = stats.count_locked.saturating_sub(1);
+        stats.total_refunded = stats.total_refunded.saturating_add(amount);
+        stats.count_refunded = stats.count_refunded.saturating_add(1);
+        Self::set_counters(env, &stats);
+    }
+
+    /// Transition a bounty from Locked to PartiallyRefunded.
+    /// 
+    /// Called from `refund` when a partial refund is performed.
+    /// The bounty remains in the locked bucket but total_locked is reduced by the refunded amount.
+    /// Total_refunded tracks the cumulative refunded amount.
+    fn partial_refund_from_locked(env: &Env, refund_amount: i128) {
+        let mut stats = Self::get_counters(env);
+        stats.total_locked = stats.total_locked.saturating_sub(refund_amount);
+        stats.total_refunded = stats.total_refunded.saturating_add(refund_amount);
+        // Note: count_locked stays the same as the bounty is still active (PartiallyRefunded)
+        Self::set_counters(env, &stats);
+    }
+
+    /// Transition a bounty from PartiallyRefunded to Refunded.
+    /// 
+    /// Called from `refund` when the final refund completes a partially refunded bounty.
+    /// Decrements locked count and increments refunded count.
+    fn transition_partially_refunded_to_refunded(env: &Env, final_refund_amount: i128) {
+        let mut stats = Self::get_counters(env);
+        stats.total_locked = stats.total_locked.saturating_sub(final_refund_amount);
+        stats.count_locked = stats.count_locked.saturating_sub(1);
+        stats.total_refunded = stats.total_refunded.saturating_add(final_refund_amount);
+        stats.count_refunded = stats.count_refunded.saturating_add(1);
+        Self::set_counters(env, &stats);
+    }
+
+    /// Handle partial release from a Locked bounty.
+    /// 
+    /// Called from `partial_release`. Reduces total_locked by the released amount
+    /// and adds to total_released. If the bounty transitions to Released status
+    /// after this partial release (remaining_amount == 0), the caller must also
+    /// call `finalize_partial_release_to_released`.
+    fn partial_release_from_locked(env: &Env, release_amount: i128) {
+        let mut stats = Self::get_counters(env);
+        stats.total_locked = stats.total_locked.saturating_sub(release_amount);
+        stats.total_released = stats.total_released.saturating_add(release_amount);
+        Self::set_counters(env, &stats);
+    }
+
+    /// Finalize a partial release that transitions the bounty to Released.
+    /// 
+    /// Called from `partial_release` when remaining_amount reaches zero.
+    /// Decrements locked count and increments released count.
+    fn finalize_partial_release_to_released(env: &Env) {
+        let mut stats = Self::get_counters(env);
+        stats.count_locked = stats.count_locked.saturating_sub(1);
+        stats.count_released = stats.count_released.saturating_add(1);
+        Self::set_counters(env, &stats);
+    }
+
+    // ==================== END INCREMENTAL AGGREGATE COUNTERS ====================
 
     /// Initialize the contract with the admin address and the token address (XLM).
     pub fn init(env: Env, admin: Address, token: Address) -> Result<(), Error> {
@@ -1114,6 +1236,9 @@ impl BountyEscrowContract {
         let timestamp = env.ledger().timestamp();
         init_bounty_analytics(&env, bounty_id, amount, timestamp);
 
+        // Update incremental aggregate counters
+        Self::increment_locked(&env, amount);
+
         // Emit state transition event
         emit_bounty_state_transitioned(
             &env,
@@ -1229,6 +1354,9 @@ impl BountyEscrowContract {
 
         // Update analytics
         update_analytics_on_release(&env, bounty_id, escrow.amount, timestamp);
+
+        // Update incremental aggregate counters
+        Self::transition_locked_to_released(&env, escrow.amount);
 
         // Emit state transition event
         emit_bounty_state_transitioned(
@@ -1405,10 +1533,15 @@ impl BountyEscrowContract {
             .get(&DataKey::Escrow(bounty_id))
             .unwrap();
         escrow.status = EscrowStatus::Released;
+        // Zero remaining_amount to maintain invariant
+        escrow.remaining_amount = 0;
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
         Self::bump_escrow_ttl(&env, bounty_id);
+
+        // Update incremental aggregate counters
+        Self::transition_locked_to_released(&env, claim.amount);
 
         claim.claimed = true;
         env.storage()
@@ -1609,7 +1742,8 @@ impl BountyEscrowContract {
         escrow.remaining_amount -= payout_amount;
 
         // Automatically transition to Released once fully paid out
-        if escrow.remaining_amount == 0 {
+        let transitioned_to_released = escrow.remaining_amount == 0;
+        if transitioned_to_released {
             escrow.status = EscrowStatus::Released;
         }
 
@@ -1617,6 +1751,12 @@ impl BountyEscrowContract {
             .persistent()
             .set(&DataKey::Escrow(bounty_id), &escrow);
         Self::bump_escrow_ttl(&env, bounty_id);
+
+        // Update incremental aggregate counters
+        Self::partial_release_from_locked(&env, payout_amount);
+        if transitioned_to_released {
+            Self::finalize_partial_release_to_released(&env);
+        }
 
         events::emit_funds_released(
             &env,
@@ -1726,6 +1866,9 @@ impl BountyEscrowContract {
         // Transfer the calculated refund amount to the designated recipient
         client.transfer(&env.current_contract_address(), &refund_to, &refund_amount);
 
+        // Track original status to determine counter update strategy
+        let original_status = escrow.status.clone();
+
         // Update escrow state: subtract the amount exactly refunded
         escrow.remaining_amount -= refund_amount;
         if is_full || escrow.remaining_amount == 0 {
@@ -1754,6 +1897,29 @@ impl BountyEscrowContract {
 
         // Update analytics
         update_analytics_on_refund(&env, bounty_id, refund_amount, now);
+
+        // Update incremental aggregate counters
+        match (original_status, escrow.status.clone()) {
+            (EscrowStatus::Locked, EscrowStatus::Refunded) => {
+                // Full refund from locked
+                Self::transition_locked_to_refunded(&env, refund_amount);
+            }
+            (EscrowStatus::Locked, EscrowStatus::PartiallyRefunded) => {
+                // Partial refund from locked
+                Self::partial_refund_from_locked(&env, refund_amount);
+            }
+            (EscrowStatus::PartiallyRefunded, EscrowStatus::Refunded) => {
+                // Final refund completing a partially refunded bounty
+                Self::transition_partially_refunded_to_refunded(&env, refund_amount);
+            }
+            (EscrowStatus::PartiallyRefunded, EscrowStatus::PartiallyRefunded) => {
+                // Additional partial refund (still partially refunded)
+                Self::partial_refund_from_locked(&env, refund_amount);
+            }
+            _ => {
+                // Unexpected state transition - should not happen due to validation in load_refundable_escrow
+            }
+        }
 
         // Emit state transition event
         let new_state = if is_full || escrow.remaining_amount == 0 {
@@ -1863,6 +2029,7 @@ impl BountyEscrowContract {
                 .unwrap();
             let refund_amount = escrow.remaining_amount;
             let refund_to = escrow.depositor.clone();
+            let previous_status = escrow.status.clone();
             let previous_state = if escrow.status == EscrowStatus::PartiallyRefunded {
                 symbol_short!("partial_r")
             } else {
@@ -1879,6 +2046,13 @@ impl BountyEscrowContract {
                 timestamp: now,
                 mode: RefundMode::Full,
             });
+
+            // Update incremental aggregate counters
+            if previous_status == EscrowStatus::Locked {
+                Self::transition_locked_to_refunded(&env, refund_amount);
+            } else if previous_status == EscrowStatus::PartiallyRefunded {
+                Self::transition_partially_refunded_to_refunded(&env, refund_amount);
+            }
 
             env.storage()
                 .persistent()
@@ -2229,8 +2403,26 @@ impl BountyEscrowContract {
         results
     }
 
-    /// Get aggregate statistics
+    /// Get aggregate statistics from O(1) incremental counters.
+    /// 
+    /// This function reads maintained counters that are updated on every state transition
+    /// (lock, release, refund, partial_release). Provides constant-time aggregate queries.
+    /// 
+    /// For verification purposes, use `get_aggregate_stats_full_scan` to perform a 
+    /// ground-truth comparison.
     pub fn get_aggregate_stats(env: Env) -> AggregateStats {
+        Self::get_counters(&env)
+    }
+
+    /// Get aggregate statistics via full O(N) scan for reconciliation and testing.
+    /// 
+    /// This function performs a complete scan of all escrows to calculate aggregate
+    /// statistics from scratch. Use this to verify the incremental counters are accurate
+    /// or when counters need to be rebuilt.
+    /// 
+    /// **Performance:** O(N) where N is the number of bounties. Not suitable for 
+    /// production queries at scale.
+    pub fn get_aggregate_stats_full_scan(env: Env) -> AggregateStats {
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2253,15 +2445,17 @@ impl BountyEscrowContract {
                 .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
             {
                 match escrow.status {
-                    EscrowStatus::Locked => {
-                        stats.total_locked += escrow.amount;
+                    EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
+                        stats.total_locked += escrow.remaining_amount;
                         stats.count_locked += 1;
                     }
                     EscrowStatus::Released => {
                         stats.total_released += escrow.amount;
                         stats.count_released += 1;
                     }
-                    EscrowStatus::Refunded | EscrowStatus::PartiallyRefunded => {
+                    EscrowStatus::Refunded => {
+                        // For refunded, we count the original amount in total_refunded
+                        // The actual refund amounts are tracked in refund_history
                         stats.total_refunded += escrow.amount;
                         stats.count_refunded += 1;
                     }
@@ -2641,6 +2835,12 @@ impl BountyEscrowContract {
             env.storage().persistent().set(&depositor_key, &depositor_index);
             Self::bump_escrow_index_ttl(&env, item.depositor.clone());
 
+            // Initialize analytics for this bounty
+            init_bounty_analytics(&env, item.bounty_id, item.amount, timestamp);
+
+            // Update incremental aggregate counters
+            Self::increment_locked(&env, item.amount);
+
             // Emit individual event for each locked bounty
             emit_funds_locked(
                 &env,
@@ -2785,6 +2985,9 @@ impl BountyEscrowContract {
                 .set(&DataKey::Escrow(item.bounty_id), &escrow);
             Self::bump_escrow_ttl(&env, item.bounty_id);
 
+            // Update incremental aggregate counters
+            Self::transition_locked_to_released(&env, escrow.amount);
+
             // Emit individual event for each released bounty
             emit_funds_released(
                 &env,
@@ -2841,63 +3044,30 @@ impl BountyEscrowContract {
     /// - Total released amount
     /// - Total refunded amount
     /// - Average bounty size
+    /// 
+    /// This function uses O(1) incremental counters for efficiency.
     pub fn get_contract_analytics(env: Env) -> ContractAnalytics {
-        let index: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::EscrowIndex)
-            .unwrap_or(Vec::new(&env));
+        let stats = Self::get_counters(&env);
 
-        let mut active_count = 0u32;
-        let mut released_count = 0u32;
-        let mut refunded_count = 0u32;
-        let mut total_locked = 0i128;
-        let mut total_released = 0i128;
-        let mut total_refunded = 0i128;
-
-        for i in 0..index.len() {
-            let bounty_id = index.get(i).unwrap();
-            if let Some(escrow) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
-            {
-                match escrow.status {
-                    EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
-                        active_count += 1;
-                        total_locked = total_locked.saturating_add(escrow.remaining_amount);
-                    }
-                    EscrowStatus::Released => {
-                        released_count += 1;
-                        total_released = total_released.saturating_add(escrow.amount);
-                    }
-                    EscrowStatus::Refunded => {
-                        refunded_count += 1;
-                        total_refunded = total_refunded.saturating_add(escrow.amount);
-                    }
-                }
-            }
-        }
-
-        let total_count = (active_count as i128)
-            .saturating_add(released_count as i128)
-            .saturating_add(refunded_count as i128);
+        let total_count = (stats.count_locked as i128)
+            .saturating_add(stats.count_released as i128)
+            .saturating_add(stats.count_refunded as i128);
         let average_bounty = if total_count > 0 {
-            (total_locked
-                .saturating_add(total_released)
-                .saturating_add(total_refunded))
+            (stats.total_locked
+                .saturating_add(stats.total_released)
+                .saturating_add(stats.total_refunded))
                 / total_count
         } else {
             0
         };
 
         ContractAnalytics {
-            active_bounty_count: active_count,
-            released_bounty_count: released_count,
-            refunded_bounty_count: refunded_count,
-            total_locked,
-            total_released,
-            total_refunded,
+            active_bounty_count: stats.count_locked,
+            released_bounty_count: stats.count_released,
+            refunded_bounty_count: stats.count_refunded,
+            total_locked: stats.total_locked,
+            total_released: stats.total_released,
+            total_refunded: stats.total_refunded,
             average_bounty_amount: average_bounty,
             snapshot_timestamp: env.ledger().timestamp(),
         }
@@ -2907,7 +3077,7 @@ impl BountyEscrowContract {
     ///
     /// This can be called periodically to create snapshots for off-chain analytics and indexing.
     /// The event contains a full `ContractAnalytics` structure that can be ingested by indexing services.
-    pub fn emit_contract_analytics_snapshot(env: Env) {
+    pub fn emit_analytics_snapshot_event(env: Env) {
         let analytics = Self::get_contract_analytics(env.clone());
         emit_analytics_snapshot(
             &env,
@@ -2922,7 +3092,29 @@ impl BountyEscrowContract {
     ///
     /// # Returns
     /// Number of bounties in the specified status
+    /// Count bounties by status using O(1) incremental counters.
+    /// 
+    /// For Locked status, this includes both Locked and PartiallyRefunded bounties.
+    /// For other statuses, only exact matches are counted.
     pub fn count_bounties_by_status(env: Env, status: EscrowStatus) -> u32 {
+        let stats = Self::get_counters(&env);
+        match status {
+            EscrowStatus::Locked => stats.count_locked,
+            EscrowStatus::Released => stats.count_released,
+            EscrowStatus::Refunded => stats.count_refunded,
+            EscrowStatus::PartiallyRefunded => {
+                // PartiallyRefunded is included in count_locked
+                // To get exact PartiallyRefunded count, need full scan
+                Self::count_by_status_full_scan(env, status)
+            }
+        }
+    }
+
+    /// Count bounties by status via full O(N) scan for exact status matching.
+    /// 
+    /// Use this when you need to distinguish between Locked and PartiallyRefunded,
+    /// or for verification purposes.
+    pub fn count_by_status_full_scan(env: Env, status: EscrowStatus) -> u32 {
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2945,10 +3137,27 @@ impl BountyEscrowContract {
         count
     }
 
-    /// Get total volume of funds by status
-    ///
-    /// Returns the sum of all funds in bounties with the specified status
+    /// Get total volume of funds by status using O(1) incremental counters.
+    /// 
+    /// Returns the sum of all funds in bounties with the specified status.
     pub fn get_volume_by_status(env: Env, status: EscrowStatus) -> i128 {
+        let stats = Self::get_counters(&env);
+        match status {
+            EscrowStatus::Locked => stats.total_locked,
+            EscrowStatus::Released => stats.total_released,
+            EscrowStatus::Refunded => stats.total_refunded,
+            EscrowStatus::PartiallyRefunded => {
+                // PartiallyRefunded is included in total_locked
+                // To get exact PartiallyRefunded volume, need full scan
+                Self::volume_by_status_full_scan(env, status)
+            }
+        }
+    }
+
+    /// Get total volume of funds by status via full O(N) scan.
+    /// 
+    /// Use this for exact status matching or verification.
+    pub fn volume_by_status_full_scan(env: Env, status: EscrowStatus) -> i128 {
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -3080,7 +3289,11 @@ impl BountyEscrowContract {
         results
     }
 
-    /// Get high-value bounties (above a threshold) for risk monitoring
+    /// Get high-value bounties (above a threshold) for risk monitoring.
+    ///
+    /// **Note:** This function still performs an O(N) scan as it requires filtering
+    /// by amount, which cannot be efficiently maintained in aggregate counters.
+    /// Consider using pagination and caching for large datasets.
     ///
     /// # Arguments
     /// * `min_amount` - Minimum amount to consider "high-value"
