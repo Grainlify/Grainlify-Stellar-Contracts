@@ -397,12 +397,12 @@ pub struct BountyExpired {
 **Struct:** `FeeCollected`
 **Lifecycle phase:** Any operation that deducts a fee (lock or release)
 
-> **Version note:** `FeeCollected` does **not** carry a `version` field. It is a v1-style
-> payload. Parsers must not require `version` for this event.
+> **Version note:** `FeeCollected` now carries `version: 2` as the first payload field.
 
 ```rust
 #[contracttype]
 pub struct FeeCollected {
+    pub version:        u32,
     pub operation_type: FeeOperationType,  // enum: Lock | Release
     pub amount:         i128,
     pub fee_rate:       i128,
@@ -418,6 +418,7 @@ pub enum FeeOperationType { Lock, Release }
 
 ```json
 {
+  "version":        2,
   "operation_type": "Lock",
   "amount":         10000000,
   "fee_rate":       100,
@@ -428,6 +429,7 @@ pub enum FeeOperationType { Lock, Release }
 
 | Field            | Rust type          | Required | Description |
 |------------------|--------------------|----------|-------------|
+| `version`        | `u32`              | **Yes**  | Always `2` |
 | `operation_type` | `FeeOperationType` | **Yes**  | `Lock` or `Release` — which operation triggered the fee |
 | `amount`         | `i128`             | **Yes**  | Fee amount collected (token stroops) |
 | `fee_rate`       | `i128`             | **Yes**  | Fee rate in basis points at time of collection |
@@ -443,11 +445,12 @@ pub enum FeeOperationType { Lock, Release }
 **Struct:** `BatchFundsLocked`
 **Lifecycle phase:** Batch bounty creation
 
-> **Version note:** No `version` field — v1-style payload.
+> **Version note:** This event now carries `version: 2` as the first payload field.
 
 ```rust
 #[contracttype]
 pub struct BatchFundsLocked {
+    pub version:      u32,
     pub count:        u32,
     pub total_amount: i128,
     pub timestamp:    u64,
@@ -458,6 +461,7 @@ pub struct BatchFundsLocked {
 
 ```json
 {
+  "version":      2,
   "count":        5,
   "total_amount": 5000000000,
   "timestamp":    1740000200
@@ -466,6 +470,7 @@ pub struct BatchFundsLocked {
 
 | Field          | Rust type | Required | Description |
 |----------------|-----------|----------|-------------|
+| `version`      | `u32`     | **Yes**  | Always `2` |
 | `count`        | `u32`     | **Yes**  | Number of bounties locked in the batch |
 | `total_amount` | `i128`    | **Yes**  | Aggregate amount locked across all bounties |
 | `timestamp`    | `u64`     | **Yes**  | Ledger timestamp |
@@ -479,11 +484,12 @@ pub struct BatchFundsLocked {
 **Struct:** `BatchFundsReleased`
 **Lifecycle phase:** Batch bounty payout
 
-> **Version note:** No `version` field — v1-style payload.
+> **Version note:** This event now carries `version: 2` as the first payload field.
 
 ```rust
 #[contracttype]
 pub struct BatchFundsReleased {
+    pub version:      u32,
     pub count:        u32,
     pub total_amount: i128,
     pub timestamp:    u64,
@@ -494,6 +500,7 @@ pub struct BatchFundsReleased {
 
 ```json
 {
+  "version":      2,
   "count":        5,
   "total_amount": 4900000000,
   "timestamp":    1740100200
@@ -502,6 +509,7 @@ pub struct BatchFundsReleased {
 
 | Field          | Rust type | Required | Description |
 |----------------|-----------|----------|-------------|
+| `version`      | `u32`     | **Yes**  | Always `2` |
 | `count`        | `u32`     | **Yes**  | Number of bounties released in the batch |
 | `total_amount` | `i128`    | **Yes**  | Aggregate net amount released |
 | `timestamp`    | `u64`     | **Yes**  | Ledger timestamp |
@@ -515,11 +523,12 @@ pub struct BatchFundsReleased {
 **Struct:** `ApprovalAdded`
 **Lifecycle phase:** Work submission / approval flow
 
-> **Version note:** No `version` field — v1-style payload.
+> **Version note:** This event now carries `version: 2` as the first payload field.
 
 ```rust
 #[contracttype]
 pub struct ApprovalAdded {
+    pub version:     u32,
     pub bounty_id:   u64,
     pub contributor: Address,
     pub approver:    Address,
@@ -531,6 +540,7 @@ pub struct ApprovalAdded {
 
 ```json
 {
+  "version":     2,
   "bounty_id":   42,
   "contributor": "GCON…",
   "approver":    "GAPR…",
@@ -540,6 +550,7 @@ pub struct ApprovalAdded {
 
 | Field         | Rust type | Required | Description |
 |---------------|-----------|----------|-------------|
+| `version`     | `u32`     | **Yes**  | Always `2` |
 | `bounty_id`   | `u64`     | **Yes**  | Bounty identifier; also in topic[1] |
 | `contributor` | `Address` | **Yes**  | Address of the work submitter |
 | `approver`    | `Address` | **Yes**  | Address of the approver |
@@ -554,11 +565,12 @@ pub struct ApprovalAdded {
 **Struct:** `FeeConfigUpdated`
 **Lifecycle phase:** Admin fee configuration change
 
-> **Version note:** No `version` field — v1-style payload.
+> **Version note:** This event now carries `version: 2` as the first payload field.
 
 ```rust
 #[contracttype]
 pub struct FeeConfigUpdated {
+    pub version:          u32,
     pub lock_fee_rate:    i128,
     pub release_fee_rate: i128,
     pub fee_recipient:    Address,
@@ -571,6 +583,7 @@ pub struct FeeConfigUpdated {
 
 ```json
 {
+  "version":          2,
   "lock_fee_rate":    50,
   "release_fee_rate": 100,
   "fee_recipient":    "GFEE…",
@@ -581,6 +594,7 @@ pub struct FeeConfigUpdated {
 
 | Field              | Rust type | Required | Description |
 |--------------------|-----------|----------|-------------|
+| `version`          | `u32`     | **Yes**  | Always `2` |
 | `lock_fee_rate`    | `i128`    | **Yes**  | New lock-operation fee in basis points |
 | `release_fee_rate` | `i128`    | **Yes**  | New release-operation fee in basis points |
 | `fee_recipient`    | `Address` | **Yes**  | Address that will receive fees going forward |
@@ -589,7 +603,133 @@ pub struct FeeConfigUpdated {
 
 ---
 
-### 5.10 `PauseStateChanged` (bounty)
+### 5.10 `ClaimCreated`
+
+**Emitted by:** `authorize_claim()`
+**Topics:** `(symbol_short!("claim"), symbol_short!("created"))`
+**Struct:** `ClaimCreated`
+**Lifecycle phase:** Claim authorization / dispute window opening
+
+```rust
+#[contracttype]
+pub struct ClaimCreated {
+    pub version:    u32,
+    pub bounty_id:  u64,
+    pub recipient:  Address,
+    pub amount:     i128,
+    pub expires_at: u64,
+}
+```
+
+#### Payload Example
+
+```json
+{
+  "version":    2,
+  "bounty_id":  42,
+  "recipient":  "GCON...",
+  "amount":     10000000,
+  "expires_at": 1740050500
+}
+```
+
+| Field        | Rust type | Required | Description |
+|--------------|-----------|----------|-------------|
+| `version`    | `u32`     | **Yes**  | Always `2` |
+| `bounty_id`  | `u64`     | **Yes**  | Bounty identifier |
+| `recipient`  | `Address` | **Yes**  | Address authorized to claim |
+| `amount`     | `i128`    | **Yes**  | Claim amount |
+| `expires_at` | `u64`     | **Yes**  | Claim expiry timestamp |
+
+---
+
+### 5.11 `ClaimExecuted`
+
+**Emitted by:** `claim()`
+**Topics:** `(symbol_short!("claim"), symbol_short!("done"))`
+**Struct:** `ClaimExecuted`
+**Lifecycle phase:** Claim payout
+
+```rust
+#[contracttype]
+pub struct ClaimExecuted {
+    pub version:    u32,
+    pub bounty_id:  u64,
+    pub recipient:  Address,
+    pub amount:     i128,
+    pub claimed_at: u64,
+}
+```
+
+#### Payload Example
+
+```json
+{
+  "version":    2,
+  "bounty_id":  42,
+  "recipient":  "GCON...",
+  "amount":     10000000,
+  "claimed_at": 1740050300
+}
+```
+
+| Field       | Rust type | Required | Description |
+|-------------|-----------|----------|-------------|
+| `version`   | `u32`     | **Yes**  | Always `2` |
+| `bounty_id` | `u64`     | **Yes**  | Bounty identifier |
+| `recipient` | `Address` | **Yes**  | Address that claimed funds |
+| `amount`    | `i128`    | **Yes**  | Claimed amount |
+| `claimed_at`| `u64`     | **Yes**  | Ledger timestamp when claimed |
+
+---
+
+### 5.12 `ClaimCancelled`
+
+**Emitted by:** `cancel_pending_claim()`
+**Topics:** `(symbol_short!("claim"), symbol_short!("cancel"))`
+**Struct:** `ClaimCancelled`
+**Lifecycle phase:** Claim cancellation
+
+```rust
+#[contracttype]
+pub struct ClaimCancelled {
+    pub version:      u32,
+    pub bounty_id:    u64,
+    pub recipient:    Address,
+    pub amount:       i128,
+    pub cancelled_at: u64,
+    pub cancelled_by: Address,
+    pub reason:       Symbol,
+}
+```
+
+#### Payload Example
+
+```json
+{
+  "version":      2,
+  "bounty_id":    42,
+  "recipient":    "GCON...",
+  "amount":       10000000,
+  "cancelled_at": 1740050600,
+  "cancelled_by": "GADM...",
+  "reason":       "manual"
+}
+```
+
+| Field          | Rust type | Required | Description |
+|----------------|-----------|----------|-------------|
+| `version`      | `u32`     | **Yes**  | Always `2` |
+| `bounty_id`    | `u64`     | **Yes**  | Bounty identifier |
+| `recipient`    | `Address` | **Yes**  | Address whose claim was cancelled |
+| `amount`       | `i128`    | **Yes**  | Cancelled claim amount |
+| `cancelled_at` | `u64`     | **Yes**  | Ledger timestamp when cancelled |
+| `cancelled_by` | `Address` | **Yes**  | Admin that cancelled the claim |
+| `reason`       | `Symbol`  | **Yes**  | `manual` or `expired` |
+
+---
+
+### 5.13 `PauseStateChanged` (bounty)
 
 **Emitted by:** `emit_pause_state_changed()` — delegates to `crate::PauseStateChanged`
 **Topics:** `(symbol_short!("pause"), event.operation.clone())`
@@ -981,6 +1121,9 @@ Complete lookup table of every `env.events().publish(topics, …)` call in this 
 | `bounty_escrow`  | `(symbol_short!("b_rel"),)`                             | `"b_rel"`                 | `BatchFundsReleased`      |
 | `bounty_escrow`  | `(symbol_short!("approval"), bounty_id)`                | `"approval"` + u64        | `ApprovalAdded`           |
 | `bounty_escrow`  | `(symbol_short!("fee_cfg"),)`                           | `"fee_cfg"`               | `FeeConfigUpdated`        |
+| `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("created"))`  | `"claim"` + `"created"` | `ClaimCreated`           |
+| `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("done"))`     | `"claim"` + `"done"`    | `ClaimExecuted`          |
+| `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("cancel"))`   | `"claim"` + `"cancel"`  | `ClaimCancelled`         |
 | `bounty_escrow`  | `(symbol_short!("pause"), event.operation.clone())`     | `"pause"` + op symbol     | `PauseStateChanged`       |
 | `program_escrow` | `(PROGRAM_INITIALIZED,)` = `("PrgInit",)`               | `"PrgInit"`               | `ProgramInitializedEvent` |
 | `program_escrow` | `(FUNDS_LOCKED,)` = `("FndsLock",)`                     | `"FndsLock"`              | `FundsLockedEvent`        |
@@ -1019,6 +1162,11 @@ All fields appearing across all three contracts:
 | `total_amount`          | `i128`             | `I128`      | bounty, program |
 | `contributor`           | `Address`          | `Address`   | bounty |
 | `approver`              | `Address`          | `Address`   | bounty |
+| `expires_at`            | `u64`              | `U64`       | bounty |
+| `claimed_at`            | `u64`              | `U64`       | bounty |
+| `cancelled_at`          | `u64`              | `U64`       | bounty |
+| `cancelled_by`          | `Address`          | `Address`   | bounty |
+| `reason`                | `Symbol`           | `Symbol`    | bounty |
 | `operation`             | `Symbol`           | `Symbol`    | bounty, program |
 | `paused`                | `bool`             | `Bool`      | bounty, program |
 | `program_id`            | `String`           | `String`    | program |
@@ -1042,12 +1190,7 @@ All fields appearing across all three contracts:
 
 ## 10. v1 → v2 Migration Guide
 
-Five events in `bounty_escrow` are **permanently v1** (no `version` field was ever added):
-`FeeCollected`, `BatchFundsLocked`, `BatchFundsReleased`, `ApprovalAdded`, `FeeConfigUpdated`.
-Parsers must never require `version` on these events.
-
-For events that do carry `version` (`BountyEscrowInitialized`, `FundsLocked`, `FundsReleased`,
-`FundsRefunded`, `BountyExpired` in bounty_escrow; all events in `program_escrow`):
+All `bounty_escrow` value, batch, fee, approval, claim, and lifecycle events now carry `version: 2` as the first payload field. Legacy on-chain payloads that predate this schema may still omit `version`, so consumers should keep the absent-version fallback for historical data.
 
 1. **Detect version.** Read `version` from payload. If absent → treat as `1`.
 2. **`amount` is always safe.** Both v1 and v2 include `amount` on value-transfer events.

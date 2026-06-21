@@ -89,6 +89,7 @@ pub enum FeeOperationType {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeCollected {
+    pub version: u32,
     pub operation_type: FeeOperationType,
     pub amount: i128,
     pub fee_rate: i128,
@@ -104,6 +105,7 @@ pub fn emit_fee_collected(env: &Env, event: FeeCollected) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchFundsLocked {
+    pub version: u32,
     pub count: u32,
     pub total_amount: i128,
     pub timestamp: u64,
@@ -117,6 +119,7 @@ pub fn emit_batch_funds_locked(env: &Env, event: BatchFundsLocked) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeConfigUpdated {
+    pub version: u32,
     pub lock_fee_rate: i128,
     pub release_fee_rate: i128,
     pub fee_recipient: Address,
@@ -132,6 +135,7 @@ pub fn emit_fee_config_updated(env: &Env, event: FeeConfigUpdated) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchFundsReleased {
+    pub version: u32,
     pub count: u32,
     pub total_amount: i128,
     pub timestamp: u64,
@@ -145,6 +149,7 @@ pub fn emit_batch_funds_released(env: &Env, event: BatchFundsReleased) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ApprovalAdded {
+    pub version: u32,
     pub bounty_id: u64,
     pub contributor: Address,
     pub approver: Address,
@@ -159,6 +164,7 @@ pub fn emit_approval_added(env: &Env, event: ApprovalAdded) {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimCreated {
+    pub version: u32,
     pub bounty_id: u64, // use program_id+schedule_id equivalent in program-escrow
     pub recipient: Address,
     pub amount: i128,
@@ -168,6 +174,7 @@ pub struct ClaimCreated {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimExecuted {
+    pub version: u32,
     pub bounty_id: u64,
     pub recipient: Address,
     pub amount: i128,
@@ -177,6 +184,7 @@ pub struct ClaimExecuted {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimCancelled {
+    pub version: u32,
     pub bounty_id: u64,
     pub recipient: Address,
     pub amount: i128,

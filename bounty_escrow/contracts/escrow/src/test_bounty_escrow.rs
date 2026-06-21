@@ -1,9 +1,15 @@
 #![cfg(test)]
-use crate::{BountyEscrowContract, BountyEscrowContractClient, Error as ContractError};
-use soroban_sdk::testutils::Events;
+use crate::{
+    events::{
+        ApprovalAdded, BatchFundsLocked, BatchFundsReleased, ClaimCancelled, ClaimCreated,
+        ClaimExecuted, FeeCollected, FeeConfigUpdated, FeeOperationType, EVENT_VERSION_V2,
+    },
+    BountyEscrowContract, BountyEscrowContractClient, Error as ContractError, LockFundsItem,
+    ReleaseFundsItem,
+};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, Address, Env, Map, Symbol, TryFromVal, Val,
+    testutils::{Address as _, Events, Ledger},
+    token, vec, Address, Env, Map, Symbol, TryFromVal, Val,
 };
 
 fn create_test_env() -> (Env, BountyEscrowContractClient<'static>, Address) {
@@ -35,20 +41,25 @@ fn assert_event_data_has_v2_tag(env: &Env, data: &Val) {
     assert_eq!(version, 2);
 }
 
-fn assert_current_call_has_versioned_contract_event(env: &Env, contract_id: &Address) {
+fn assert_new_contract_event_has_v2_tag(
+    env: &Env,
+    contract_id: &Address,
+    before_event_count: u32,
+    required_field: &str,
+) {
     let events = env.events().all();
     let mut found = false;
-    for (contract, _topics, data) in events.iter() {
+    for i in before_event_count..events.len() {
+        let (contract, _topics, data) = events.get(i).expect("event should exist");
         if contract != *contract_id {
             continue;
         }
-        // Only require that at least one event for this call carries
-        // the V2 version tag; other event families (e.g. analytics)
-        // may legitimately use different versioning schemes.
         if let Ok(data_map) = Map::<Symbol, Val>::try_from_val(env, &data) {
             if let Some(version_val) = data_map.get(Symbol::new(env, "version")) {
                 if let Ok(version) = u32::try_from_val(env, &version_val) {
-                    if version == 2 {
+                    if version == EVENT_VERSION_V2
+                        && data_map.get(Symbol::new(env, required_field)).is_some()
+                    {
                         found = true;
                         break;
                     }
@@ -57,6 +68,28 @@ fn assert_current_call_has_versioned_contract_event(env: &Env, contract_id: &Add
         }
     }
     assert!(found);
+}
+
+fn assert_unemitted_bounty_event_types_are_v2(env: &Env, address: &Address) {
+    let fee = FeeCollected {
+        version: EVENT_VERSION_V2,
+        operation_type: FeeOperationType::Lock,
+        amount: 1,
+        fee_rate: 10,
+        recipient: address.clone(),
+        timestamp: 1,
+    };
+    let fee_config = FeeConfigUpdated {
+        version: EVENT_VERSION_V2,
+        lock_fee_rate: 10,
+        release_fee_rate: 10,
+        fee_recipient: address.clone(),
+        fee_enabled: true,
+        timestamp: 1,
+    };
+
+    assert_eq!(fee.version, EVENT_VERSION_V2);
+    assert_eq!(fee_config.version, EVENT_VERSION_V2);
 }
 
 #[test]
@@ -89,18 +122,138 @@ fn test_events_emit_v2_version_tags_for_all_bounty_emitters() {
     let admin = Address::generate(&env);
     let depositor = Address::generate(&env);
     let contributor = Address::generate(&env);
+    let second_contributor = Address::generate(&env);
+    let signer = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    let now = env.ledger().timestamp();
 
+    assert_unemitted_bounty_event_types_are_v2(&env, &admin);
+
+    let before = env.events().all().len();
     client.init(&admin, &token);
-    assert_current_call_has_versioned_contract_event(&env, &contract_id);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "admin");
 
-    token_admin_client.mint(&depositor, &10_000);
-    client.lock_funds(&depositor, &1, &10_000, &(env.ledger().timestamp() + 10));
-    assert_current_call_has_versioned_contract_event(&env, &contract_id);
+    let before = env.events().all().len();
+    client.update_fee_config(&Some(0), &Some(0), &Some(admin.clone()), &Some(false));
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "lock_fee_rate");
 
+    token_admin_client.mint(&depositor, &100_000);
+    let before = env.events().all().len();
+    client.lock_funds(&depositor, &1, &10_000, &(now + 10));
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "depositor");
+
+    let before = env.events().all().len();
     client.release_funds(&1, &contributor);
-    assert_current_call_has_versioned_contract_event(&env, &contract_id);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "recipient");
+
+    let batch_items = vec![
+        &env,
+        LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 20_000,
+            deadline: now + 20,
+        },
+        LockFundsItem {
+            bounty_id: 3,
+            depositor: depositor.clone(),
+            amount: 30_000,
+            deadline: now + 20,
+        },
+    ];
+    let before = env.events().all().len();
+    client.batch_lock_funds(&batch_items);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "count");
+
+    let release_items = vec![
+        &env,
+        ReleaseFundsItem {
+            bounty_id: 2,
+            contributor: contributor.clone(),
+        },
+        ReleaseFundsItem {
+            bounty_id: 3,
+            contributor: second_contributor,
+        },
+    ];
+    let before = env.events().all().len();
+    client.batch_release_funds(&release_items);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "total_amount");
+
+    client.update_multisig_config(&1_000, &vec![&env, signer.clone()], &1);
+    let before = env.events().all().len();
+    client.approve_large_release(&4, &contributor, &signer);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "approver");
+
+    token_admin_client.mint(&depositor, &40_000);
+    client.lock_funds(&depositor, &5, &40_000, &(now + 30));
+    client.set_claim_window(&10);
+
+    let before = env.events().all().len();
+    client.authorize_claim(&5, &contributor);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "expires_at");
+
+    let before = env.events().all().len();
+    client.claim(&5);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "claimed_at");
+
+    token_admin_client.mint(&depositor, &50_000);
+    client.lock_funds(&depositor, &6, &50_000, &(now + 40));
+    client.authorize_claim(&6, &contributor);
+
+    let before = env.events().all().len();
+    client.cancel_pending_claim(&6);
+    assert_new_contract_event_has_v2_tag(&env, &contract_id, before, "cancelled_at");
+
+    let batch_locked = BatchFundsLocked {
+        version: EVENT_VERSION_V2,
+        count: 1,
+        total_amount: 1,
+        timestamp: now,
+    };
+    let batch_released = BatchFundsReleased {
+        version: EVENT_VERSION_V2,
+        count: 1,
+        total_amount: 1,
+        timestamp: now,
+    };
+    let approval = ApprovalAdded {
+        version: EVENT_VERSION_V2,
+        bounty_id: 1,
+        contributor: contributor.clone(),
+        approver: signer,
+        timestamp: now,
+    };
+    let claim_created = ClaimCreated {
+        version: EVENT_VERSION_V2,
+        bounty_id: 1,
+        recipient: contributor.clone(),
+        amount: 1,
+        expires_at: now,
+    };
+    let claim_executed = ClaimExecuted {
+        version: EVENT_VERSION_V2,
+        bounty_id: 1,
+        recipient: contributor.clone(),
+        amount: 1,
+        claimed_at: now,
+    };
+    let claim_cancelled = ClaimCancelled {
+        version: EVENT_VERSION_V2,
+        bounty_id: 1,
+        recipient: contributor,
+        amount: 1,
+        cancelled_at: now,
+        cancelled_by: admin,
+        reason: Symbol::new(&env, "manual"),
+    };
+    assert_eq!(batch_locked.version, EVENT_VERSION_V2);
+    assert_eq!(batch_released.version, EVENT_VERSION_V2);
+    assert_eq!(approval.version, EVENT_VERSION_V2);
+    assert_eq!(claim_created.version, EVENT_VERSION_V2);
+    assert_eq!(claim_executed.version, EVENT_VERSION_V2);
+    assert_eq!(claim_cancelled.version, EVENT_VERSION_V2);
 }
 
 #[test]
