@@ -454,6 +454,8 @@ pub struct PauseFlags {
     pub lock_paused: bool,
     pub release_paused: bool,
     pub refund_paused: bool,
+    /// Emergency kill switch — when true, ALL state-changing entrypoints are blocked.
+    pub global_paused: bool,
 }
 
 #[contracttype]
@@ -922,6 +924,35 @@ impl BountyEscrowContract {
         Ok(())
     }
 
+    /// Emergency kill switch — atomically pause or unpause ALL state-changing entrypoints.
+    /// Admin only. Emits an event for off-chain monitoring.
+    pub fn set_emergency_pause(env: Env, paused: bool) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        Self::check_governance_requirements(&env)?;
+
+        let mut flags = Self::get_pause_flags(&env);
+        flags.global_paused = paused;
+
+        env.storage().instance().set(&DataKey::PauseFlags, &flags);
+
+        events::emit_pause_state_changed(
+            &env,
+            PauseStateChanged {
+                operation: symbol_short!("global"),
+                paused,
+                admin,
+            },
+        );
+
+        Ok(())
+    }
+
     /// Get current pause flags
     pub fn get_pause_flags(env: &Env) -> PauseFlags {
         env.storage()
@@ -931,12 +962,18 @@ impl BountyEscrowContract {
                 lock_paused: false,
                 release_paused: false,
                 refund_paused: false,
+                global_paused: false,
             })
     }
 
-    /// Check if an operation is paused
+    /// Check if an operation is paused.
+    /// The global emergency pause takes precedence over granular flags.
     fn check_paused(env: &Env, operation: Symbol) -> bool {
         let flags = Self::get_pause_flags(env);
+        // Emergency kill switch blocks everything
+        if flags.global_paused {
+            return true;
+        }
         if operation == symbol_short!("lock") {
             return flags.lock_paused;
         } else if operation == symbol_short!("release") {
@@ -1018,6 +1055,7 @@ impl BountyEscrowContract {
                 lock_paused: false,
                 release_paused: false,
                 refund_paused: false,
+                global_paused: false,
             };
 
             return AdminConfigSnapshot {
@@ -1650,6 +1688,10 @@ impl BountyEscrowContract {
             return Err(Error::FundsNotLocked);
         }
 
+        if Self::check_paused(&env, symbol_short!("refund")) {
+            return Err(Error::FundsPaused);
+        }
+
         if amount <= 0 || amount > escrow.remaining_amount {
             return Err(Error::InvalidAmount);
         }
@@ -1685,6 +1727,11 @@ impl BountyEscrowContract {
     ) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
+        }
+
+        // Emergency + granular pause check (was missing before this change)
+        if Self::check_paused(&env, symbol_short!("release")) {
+            return Err(Error::FundsPaused);
         }
 
         // Check circuit breaker before proceeding
@@ -3425,6 +3472,8 @@ mod test_dispute_resolution;
 mod test_expiration_and_dispute;
 #[cfg(test)]
 mod test_granular_pause;
+#[cfg(test)]
+mod test_emergency_pause;
 #[cfg(test)]
 mod test_lifecycle;
 #[cfg(test)]
