@@ -159,6 +159,60 @@ payouts, single payouts, and release-schedule operations. Program escrow does
 not enforce a multisig threshold for payouts; multisig governance lives in other
 contracts and should not be inferred from program-escrow storage.
 
+## Scoped Dispute Resolution
+
+Program escrow now supports three dispute scopes:
+
+1. `Global` - preserves the previous `DataKey::Dispute` behavior and blocks all
+   payout and release paths until the dispute is resolved or cancelled.
+2. `Recipient(Address)` - stores a recipient-scoped `DisputeRecord` and blocks
+   direct payouts plus release schedules for that recipient only.
+3. `Schedule(u64)` - stores a schedule-scoped `DisputeRecord` and blocks only
+   the selected release schedule.
+
+### Storage Keys
+
+- `DataKey::Dispute` - global program halt, matching the historical
+  single-dispute semantics.
+- `DataKey::RecipientDispute(Address)` - one active/historical dispute record
+  per recipient.
+- `DataKey::ScheduleDispute(u64)` - one active/historical dispute record per
+  release schedule id.
+
+### Payout And Release Rules
+
+- `single_payout` rejects when a global dispute is open or when the recipient is
+  individually disputed.
+- `batch_payout` rejects the whole batch if any recipient in that batch is
+  disputed; unrelated batches remain payable.
+- `trigger_program_releases` still rejects all releases for a global dispute,
+  but skips only recipient- or schedule-scoped disputed targets and releases
+  other due schedules.
+- `release_program_schedule_manual` and `release_prog_schedule_automatic`
+  reject only when the target schedule is globally halted, schedule-disputed, or
+  belongs to a disputed recipient.
+
+### Events And Security Notes
+
+`DisputeOpenedEvent`, `DisputeResolvedEvent`, and `DisputeCancelledEvent` now
+include a `scope` field so indexers and auditors can distinguish global,
+recipient, and schedule dispute actions. Scoped disputes never bypass a global
+halt: every payout and release path checks `DataKey::Dispute` before evaluating
+more granular scopes.
+
+### Test Coverage
+
+`program-escrow/src/test_dispute_resolution.rs` includes coverage for:
+
+- recipient A disputed while recipient B single payout succeeds;
+- batch payout rejecting batches containing a disputed recipient while allowing
+  unrelated batches;
+- due release schedules skipping only the disputed recipient target;
+- schedule-scoped disputes skipping only the selected schedule even when another
+  schedule pays the same recipient;
+- historical global dispute behavior continuing to block all payouts and
+  releases.
+
 ## Two-Step Admin Handover
 
 ### Overview
