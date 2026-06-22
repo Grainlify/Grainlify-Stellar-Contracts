@@ -71,17 +71,24 @@ Current: 1.0.0 (numeric 10000)
 
 ## Global Migration Process
 
-1. Upgrade contract WASM using upgrade(new_wasm_hash)
-2. If migration is required, call migrate(target_numeric_version, migration_hash)
-3. Verify with get_version(), get_migration_state()
-4. Update clients to enforce minimal compatible version
+1. Upload the new WASM and record `new_wasm_hash`.
+2. For grainlify-core single-admin upgrades, call `schedule_upgrade(new_wasm_hash)` and wait until the returned `executable_at` timestamp. The default delay is 86,400 seconds; admins may configure a delay no lower than 300 seconds with `set_upgrade_delay(delay_seconds)`.
+3. Execute `upgrade(new_wasm_hash)` only after the timelock is ready. The scheduled hash must match the execution hash.
+4. If migration is required, call migrate(target_numeric_version, migration_hash)
+5. Verify with get_version(), get_migration_state()
+6. Update clients to enforce minimal compatible version
 
 ### Example (grainlify-core)
 
 ```rust
-// Upgrade + migrate
+// Schedule upgrade, execute after the timelock, then migrate
 auth_admin.require_auth();
+let scheduled = contract.schedule_upgrade(&env, &new_wasm_hash);
+assert!(scheduled.executable_at >= scheduled.scheduled_at);
+
+// Wait until ledger timestamp >= scheduled.executable_at.
 contract.upgrade(&env, &new_wasm_hash);
+
 let hash = BytesN::from_array(&env, &[0u8;32]);
 contract.migrate(&env, &20000, &hash);
 assert_eq!(contract.get_version(&env), 20000);
@@ -89,6 +96,8 @@ assert_eq!(contract.get_version(&env), 20000);
 
 ### Events and Tracking
 
+- upgrade scheduled event: (wasm_hash, scheduled_at, executable_at, delay_seconds)
+- upgrade executed event: (wasm_hash, executed_at, previous_version)
 - migration event: (from_version, to_version, timestamp, migration_hash, success)
 - monitoring metrics emitted for upgrade/migrate
 

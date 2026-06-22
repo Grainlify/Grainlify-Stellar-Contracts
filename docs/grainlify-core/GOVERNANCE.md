@@ -91,6 +91,18 @@ The multisig upgrade path is intentionally payload-bound:
 
 This removes the previous decoupling between approval and effect. A proposal can no longer be marked executed without the approved action being run, and callers cannot execute a different WASM hash than the one signers approved.
 
+## Single-Admin Upgrade Timelock
+
+The direct single-admin `upgrade(wasm_hash)` path is a two-step schedule/execute flow. This keeps the emergency admin route available while adding a mandatory observation window before contract code can change.
+
+1. The admin may call `set_upgrade_delay(delay_seconds)` to configure the delay. The contract rejects values below the documented minimum of 300 seconds. If no value is set, the default delay is 86,400 seconds.
+2. The admin calls `schedule_upgrade(wasm_hash)`. The contract stores one active scheduled hash with `scheduled_at` and `executable_at = scheduled_at + delay_seconds`.
+3. `upgrade(wasm_hash)` can execute only when the active schedule exists, the supplied hash exactly matches the scheduled hash, and the current ledger timestamp is at or after `executable_at`.
+4. Early execution is rejected with `Upgrade timelock not elapsed`; hash mismatch is rejected with `Scheduled upgrade hash mismatch`.
+5. A later `schedule_upgrade` call replaces the active schedule, so operators can cancel a pending upgrade by scheduling the intended replacement hash and waiting for its delay.
+
+The contract emits `upg_sch` when an upgrade is scheduled and `upg_exec` when the scheduled upgrade executes. Indexers should track these events together with the existing monitoring metrics to audit single-admin upgrade intent and execution.
+
 ## TODO / Future Enhancements
 
 - [ ] Integrate with a native Soroban token for precise `TokenWeighted` voting power.

@@ -69,12 +69,13 @@
 //! 2. **Authorization Check**: Every upgrade requires admin signature
 //! 3. **Version Tracking**: Auditable upgrade history
 //! 4. **State Preservation**: Instance storage persists across upgrades
-//! 5. **Immutable After Init**: Admin cannot be changed after initialization
+//! 5. **Single-Admin Timelock**: Direct admin upgrades must be scheduled before execution
+//! 6. **Immutable After Init**: Admin cannot be changed after initialization
 //!
 //! ### Security Considerations
 //! - Admin key should be secured with hardware wallet or multi-sig
 //! - New WASM should be audited before upgrade
-//! - Consider implementing timelock for high-value contracts
+//! - Use `schedule_upgrade` and wait for the configured timelock before calling `upgrade`
 //! - Version updates should follow semantic versioning
 //! - Test upgrades on testnet before mainnet deployment
 //!
@@ -95,14 +96,18 @@
 //! // $ stellar contract install --wasm target/wasm32-unknown-unknown/release/contract.wasm
 //! // Returns: hash (e.g., "abc123...")
 //!
-//! // 5. Perform upgrade
+//! // 5. Schedule upgrade and wait for the timelock
 //! let wasm_hash = BytesN::from_array(&env, &[0xab, 0xcd, ...]);
+//! let scheduled = contract.schedule_upgrade(&wasm_hash);
+//! // Wait until ledger timestamp >= scheduled.executable_at
+//!
+//! // 6. Perform upgrade
 //! contract.upgrade(&wasm_hash);
 //!
-//! // 6. (Optional) Update version number
+//! // 7. (Optional) Update version number
 //! contract.set_version(&2);
 //!
-//! // 7. Verify upgrade
+//! // 8. Verify upgrade
 //! let version = contract.get_version();
 //! assert_eq!(version, 2);
 //! ```
@@ -388,6 +393,12 @@ enum DataKey {
 
     /// Previous version before migration (for rollback support)
     PreviousVersion,
+
+    /// Configured single-admin upgrade delay in seconds
+    UpgradeDelay,
+
+    /// Pending single-admin upgrade schedule
+    ScheduledUpgrade,
 }
 
 // ============================================================================
@@ -408,6 +419,12 @@ enum DataKey {
 /// # Usage
 /// Set during initialization and can be updated via `set_version()`.
 const VERSION: u32 = 2;
+
+/// Minimum single-admin upgrade delay: 5 minutes.
+const MIN_UPGRADE_DELAY_SECONDS: u64 = 5 * 60;
+
+/// Default single-admin upgrade delay: 24 hours.
+const DEFAULT_UPGRADE_DELAY_SECONDS: u64 = 24 * 60 * 60;
 
 // ============================================================================
 // Migration System
@@ -437,6 +454,34 @@ pub struct MigrationEvent {
     pub migration_hash: BytesN<32>,
     pub success: bool,
     pub error_message: Option<String>,
+}
+
+/// Pending single-admin upgrade data.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduledUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub scheduled_at: u64,
+    pub executable_at: u64,
+}
+
+/// Event emitted when a single-admin upgrade is scheduled.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeScheduledEvent {
+    pub wasm_hash: BytesN<32>,
+    pub scheduled_at: u64,
+    pub executable_at: u64,
+    pub delay_seconds: u64,
+}
+
+/// Event emitted when a scheduled single-admin upgrade is executed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecutedEvent {
+    pub wasm_hash: BytesN<32>,
+    pub executed_at: u64,
+    pub previous_version: u32,
 }
 
 // ============================================================================
@@ -613,6 +658,86 @@ impl GrainlifyContract {
         MultiSig::approve(&env, proposal_id, signer);
     }
 
+    /// Returns the configured single-admin upgrade delay in seconds.
+    pub fn get_upgrade_delay(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::UpgradeDelay)
+            .unwrap_or(DEFAULT_UPGRADE_DELAY_SECONDS)
+    }
+
+    /// Updates the single-admin upgrade delay.
+    ///
+    /// The delay must be at least `MIN_UPGRADE_DELAY_SECONDS` to preserve a
+    /// review window between scheduling and execution.
+    pub fn set_upgrade_delay(env: Env, delay_seconds: u64) {
+        let start = env.ledger().timestamp();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        if delay_seconds < MIN_UPGRADE_DELAY_SECONDS {
+            panic!("Upgrade delay below minimum");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeDelay, &delay_seconds);
+
+        monitoring::track_operation(&env, symbol_short!("set_delay"), admin, true);
+        let duration = env.ledger().timestamp().saturating_sub(start);
+        monitoring::emit_performance(&env, symbol_short!("set_delay"), duration);
+    }
+
+    /// Schedules a single-admin upgrade for execution after the configured delay.
+    pub fn schedule_upgrade(env: Env, wasm_hash: BytesN<32>) -> ScheduledUpgrade {
+        let start = env.ledger().timestamp();
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let delay_seconds = Self::get_upgrade_delay(env.clone());
+        let scheduled_at = env.ledger().timestamp();
+        let executable_at = scheduled_at.saturating_add(delay_seconds);
+        let scheduled = ScheduledUpgrade {
+            wasm_hash: wasm_hash.clone(),
+            scheduled_at,
+            executable_at,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ScheduledUpgrade, &scheduled);
+
+        env.events().publish(
+            (symbol_short!("upg_sch"),),
+            UpgradeScheduledEvent {
+                wasm_hash,
+                scheduled_at,
+                executable_at,
+                delay_seconds,
+            },
+        );
+
+        monitoring::track_operation(&env, symbol_short!("sched_upg"), admin, true);
+        let duration = env.ledger().timestamp().saturating_sub(start);
+        monitoring::emit_performance(&env, symbol_short!("sched_upg"), duration);
+
+        scheduled
+    }
+
+    /// Returns the active scheduled single-admin upgrade, if one exists.
+    pub fn get_scheduled_upgrade(env: Env) -> Option<ScheduledUpgrade> {
+        env.storage().instance().get(&DataKey::ScheduledUpgrade)
+    }
+
+    /// Returns whether `wasm_hash` matches the active schedule and is executable now.
+    pub fn is_upgrade_ready(env: Env, wasm_hash: BytesN<32>) -> bool {
+        let Some(scheduled) = Self::get_scheduled_upgrade(env.clone()) else {
+            return false;
+        };
+
+        scheduled.wasm_hash == wasm_hash && env.ledger().timestamp() >= scheduled.executable_at
+    }
+
     /// Upgrades the contract to new WASM code.
     ///
     /// # Arguments
@@ -640,8 +765,10 @@ impl GrainlifyContract {
     /// 2. Build WASM: `cargo build --release --target wasm32-unknown-unknown`
     /// 3. Upload WASM to Stellar network
     /// 4. Get WASM hash from upload response
-    /// 5. Call this function with the hash
-    /// 6. (Optional) Call `set_version` to update version number
+    /// 5. Call `schedule_upgrade` with the hash
+    /// 6. Wait until the scheduled `executable_at` timestamp
+    /// 7. Call this function with the same hash
+    /// 8. (Optional) Call `set_version` to update version number
     ///
     /// # Example
     /// ```rust
@@ -655,7 +782,9 @@ impl GrainlifyContract {
     ///     &[0xab, 0xcd, 0xef, ...] // 32 bytes
     /// );
     ///
-    /// // Perform upgrade (requires admin authorization)
+    /// // Schedule upgrade, wait for executable_at, then perform upgrade
+    /// let scheduled = contract.schedule_upgrade(&env, &wasm_hash);
+    /// // Wait until ledger timestamp >= scheduled.executable_at
     /// contract.upgrade(&env, &wasm_hash);
     ///
     /// // Update version number
@@ -673,14 +802,23 @@ impl GrainlifyContract {
     ///   --source ADMIN_SECRET_KEY
     /// # Output: WASM_HASH (e.g., abc123...)
     ///
-    /// # 3. Upgrade contract
+    /// # 3. Schedule upgrade
+    /// stellar contract invoke \
+    ///   --id CONTRACT_ID \
+    ///   --source ADMIN_SECRET_KEY \
+    ///   -- schedule_upgrade \
+    ///   --wasm_hash WASM_HASH
+    ///
+    /// # 4. Wait until the returned executable_at timestamp
+    ///
+    /// # 5. Upgrade contract
     /// stellar contract invoke \
     ///   --id CONTRACT_ID \
     ///   --source ADMIN_SECRET_KEY \
     ///   -- upgrade \
     ///   --new_wasm_hash WASM_HASH
     ///
-    /// # 4. Update version (optional)
+    /// # 6. Update version (optional)
     /// stellar contract invoke \
     ///   --id CONTRACT_ID \
     ///   --source ADMIN_SECRET_KEY \
@@ -692,8 +830,15 @@ impl GrainlifyContract {
     /// High - WASM code replacement is expensive
     ///
     /// # Emergency Rollback
-    /// If new version has issues, rollback to previous WASM:
+    /// If new version has issues, schedule the previous WASM hash and execute it
+    /// after the configured timelock:
     /// ```bash
+    /// stellar contract invoke \
+    ///   --id CONTRACT_ID \
+    ///   --source ADMIN_SECRET_KEY \
+    ///   -- schedule_upgrade \
+    ///   --wasm_hash PREVIOUS_WASM_HASH
+    ///
     /// stellar contract invoke \
     ///   --id CONTRACT_ID \
     ///   --source ADMIN_SECRET_KEY \
@@ -736,6 +881,8 @@ impl GrainlifyContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        let scheduled = require_scheduled_upgrade(&env, &new_wasm_hash);
+
         // Store previous version for potential rollback
         let current_version = env.storage().instance().get(&DataKey::Version).unwrap_or(1);
         env.storage()
@@ -743,7 +890,19 @@ impl GrainlifyContract {
             .set(&DataKey::PreviousVersion, &current_version);
 
         // Perform WASM upgrade
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        env.storage().instance().remove(&DataKey::ScheduledUpgrade);
+
+        env.events().publish(
+            (symbol_short!("upg_exec"),),
+            UpgradeExecutedEvent {
+                wasm_hash: scheduled.wasm_hash,
+                executed_at: env.ledger().timestamp(),
+                previous_version: current_version,
+            },
+        );
 
         // Track successful operation
         monitoring::track_operation(&env, symbol_short!("upgrade"), admin, true);
@@ -1150,6 +1309,24 @@ fn emit_migration_event(env: &Env, event: MigrationEvent) {
     env.events().publish((symbol_short!("migration"),), event);
 }
 
+fn require_scheduled_upgrade(env: &Env, wasm_hash: &BytesN<32>) -> ScheduledUpgrade {
+    let scheduled: ScheduledUpgrade = env
+        .storage()
+        .instance()
+        .get(&DataKey::ScheduledUpgrade)
+        .unwrap_or_else(|| panic!("No scheduled upgrade"));
+
+    if scheduled.wasm_hash != wasm_hash.clone() {
+        panic!("Scheduled upgrade hash mismatch");
+    }
+
+    if env.ledger().timestamp() < scheduled.executable_at {
+        panic!("Upgrade timelock not elapsed");
+    }
+
+    scheduled
+}
+
 /// Migration from version 1 to version 2
 /// This is a placeholder migration - add actual data transformation logic here
 fn migrate_v1_to_v2(_env: &Env) {
@@ -1177,7 +1354,7 @@ fn migrate_v2_to_v3(_env: &Env) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::Events;
+    use soroban_sdk::testutils::{Events, Ledger};
     use soroban_sdk::{testutils::Address as _, Env};
 
     #[test]
@@ -1207,6 +1384,134 @@ mod test {
 
         client.set_version(&2);
         assert_eq!(client.get_version(), 2);
+    }
+
+    #[test]
+    fn test_schedule_upgrade_records_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = BytesN::from_array(&env, &[9u8; 32]);
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&wasm_hash);
+
+        assert_eq!(scheduled.wasm_hash, wasm_hash);
+        assert_eq!(scheduled.scheduled_at, 1_000);
+        assert_eq!(scheduled.executable_at, 1_600);
+        assert_eq!(client.get_scheduled_upgrade().unwrap(), scheduled);
+    }
+
+    #[test]
+    #[should_panic(expected = "No scheduled upgrade")]
+    fn test_upgrade_requires_prior_schedule() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = BytesN::from_array(&env, &[8u8; 32]);
+        client.upgrade(&wasm_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade timelock not elapsed")]
+    fn test_upgrade_rejects_early_execution() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 2_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&wasm_hash);
+
+        env.ledger().with_mut(|li| li.timestamp = 2_599);
+        client.upgrade(&wasm_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "Scheduled upgrade hash mismatch")]
+    fn test_upgrade_rejects_hash_mismatch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let scheduled_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let other_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&scheduled_hash);
+
+        env.ledger().with_mut(|li| li.timestamp = 3_600);
+        client.upgrade(&other_hash);
+    }
+
+    #[test]
+    fn test_upgrade_ready_at_exact_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 4_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = BytesN::from_array(&env, &[3u8; 32]);
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&wasm_hash);
+
+        env.ledger().with_mut(|li| li.timestamp = 4_599);
+        assert!(!client.is_upgrade_ready(&wasm_hash));
+
+        env.ledger().with_mut(|li| li.timestamp = 4_600);
+        assert!(client.is_upgrade_ready(&wasm_hash));
+    }
+
+    #[test]
+    fn test_upgrade_executes_after_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 5_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&wasm_hash);
+
+        let events_before_upgrade = env.events().all().len();
+        env.ledger().with_mut(|li| li.timestamp = 5_600);
+
+        client.upgrade(&wasm_hash);
+
+        assert!(env.events().all().len() > events_before_upgrade);
     }
 
     #[test]
