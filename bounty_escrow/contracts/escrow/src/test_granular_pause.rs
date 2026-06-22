@@ -97,9 +97,149 @@ fn test_default_all_flags_false() {
     let (client, _, _, _) = setup(&env, 0);
 
     let flags = client.get_pause_flags();
+    assert!(!flags.global_paused);
     assert!(!flags.lock_paused);
     assert!(!flags.release_paused);
     assert!(!flags.refund_paused);
+}
+
+// ---------------------------------------------------------------------------
+// § 1b  Emergency global pause — every value-moving entrypoint blocked
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_emergency_pause_blocks_lock_and_batch_lock() {
+    let env = Env::default();
+    let (client, _, depositor, _) = setup(&env, 1_000);
+
+    client.set_emergency_pause(&true);
+
+    let deadline = env.ledger().timestamp() + 1_000;
+    assert_eq!(
+        client.try_lock_funds(&depositor, &1, &100, &deadline),
+        Err(Ok(Error::FundsPaused))
+    );
+
+    let items = soroban_sdk::vec![
+        &env,
+        LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 100,
+            deadline,
+        }
+    ];
+    assert_eq!(
+        client.try_batch_lock_funds(&items),
+        Err(Ok(Error::FundsPaused))
+    );
+}
+
+#[test]
+fn test_emergency_pause_blocks_release_claim_partial_and_batch_release() {
+    let env = Env::default();
+    let (client, _, depositor, _) = setup(&env, 2_000);
+    let contributor = Address::generate(&env);
+
+    lock_bounty(&client, &env, &depositor, 1, 200);
+    lock_bounty(&client, &env, &depositor, 2, 300);
+    lock_bounty(&client, &env, &depositor, 3, 400);
+    client.set_claim_window(&500);
+    client.authorize_claim(&3, &contributor);
+
+    client.set_emergency_pause(&true);
+
+    assert_eq!(
+        client.try_release_funds(&1, &contributor),
+        Err(Ok(Error::FundsPaused))
+    );
+    assert_eq!(
+        client.try_partial_release(&1, &contributor, &50),
+        Err(Ok(Error::FundsPaused))
+    );
+
+    let batch = soroban_sdk::vec![
+        &env,
+        ReleaseFundsItem {
+            bounty_id: 2,
+            contributor: contributor.clone(),
+        }
+    ];
+    assert_eq!(
+        client.try_batch_release_funds(&batch),
+        Err(Ok(Error::FundsPaused))
+    );
+    assert_eq!(client.try_claim(&3), Err(Ok(Error::FundsPaused)));
+}
+
+#[test]
+fn test_emergency_pause_blocks_refund_and_sweep_but_keeps_queries_live() {
+    let env = Env::default();
+    let (client, _, depositor, _) = setup(&env, 2_000);
+
+    let deadline_1 = lock_bounty(&client, &env, &depositor, 1, 250);
+    let deadline_2 = lock_bounty(&client, &env, &depositor, 2, 300);
+    env.ledger().set_timestamp(deadline_1.max(deadline_2) + 1);
+
+    client.set_emergency_pause(&true);
+
+    assert_eq!(client.try_refund(&1), Err(Ok(Error::FundsPaused)));
+
+    let ids = soroban_sdk::vec![&env, 1u64, 2u64];
+    assert_eq!(
+        client.try_sweep_expired_refunds(&ids),
+        Err(Ok(Error::FundsPaused))
+    );
+
+    let flags = client.get_pause_flags();
+    assert!(flags.global_paused);
+    assert_eq!(client.get_escrow_info(&1).amount, 250);
+    assert_eq!(client.get_balance(), 550);
+}
+
+#[test]
+fn test_emergency_pause_can_be_cleared_by_admin() {
+    let env = Env::default();
+    let (client, _, depositor, _) = setup(&env, 1_000);
+
+    client.set_emergency_pause(&true);
+    client.set_emergency_pause(&false);
+
+    let flags = client.get_pause_flags();
+    assert!(!flags.global_paused);
+
+    let deadline = env.ledger().timestamp() + 1_000;
+    client.lock_funds(&depositor, &1, &100, &deadline);
+    assert_eq!(client.get_escrow_info(&1).amount, 100);
+}
+
+#[test]
+fn test_emergency_pause_requires_admin_auth() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_client, _) = create_token(&env, &token_admin);
+    let (client, _) = create_escrow(&env);
+
+    client.init(&admin, &token_client.address);
+
+    assert!(client.try_set_emergency_pause(&true).is_err());
+    assert!(!client.get_pause_flags().global_paused);
+}
+
+#[test]
+fn test_partial_release_honors_release_pause() {
+    let env = Env::default();
+    let (client, _, depositor, _) = setup(&env, 1_000);
+    let contributor = Address::generate(&env);
+
+    lock_bounty(&client, &env, &depositor, 1, 500);
+    client.set_paused(&None, &Some(true), &None);
+
+    assert_eq!(
+        client.try_partial_release(&1, &contributor, &100),
+        Err(Ok(Error::FundsPaused))
+    );
 }
 
 // ---------------------------------------------------------------------------

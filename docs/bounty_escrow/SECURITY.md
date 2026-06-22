@@ -32,6 +32,14 @@ This document outlines the security measures implemented in the Bounty Escrow co
 - **Bounty Escrow**:
   - Admin-only release and approval flows, depositor-guarded locking, and permissionless-but-safe refunds.
 
+### 5. Emergency Global Pause
+- **Mechanism**: `PauseFlags.global_paused` is an admin-gated kill switch controlled by `set_emergency_pause(bool)`.
+- **Authorization**: Only the current bounty escrow admin can set or clear the switch, and the call follows the same governance-version checks as granular pause updates.
+- **Coverage**: When enabled, the contract returns `Error::FundsPaused` before value-moving escrow operations proceed, including `lock_funds`, `release_funds`, `authorize_claim`, `claim`, `partial_release`, `refund`, `sweep_expired_refunds`, `batch_lock_funds`, and `batch_release_funds`.
+- **Granular pause interaction**: `global_paused` takes precedence over the existing `lock_paused`, `release_paused`, and `refund_paused` flags. Clearing the global switch does not clear granular flags; admins must explicitly clear any operation-specific pause that should be resumed.
+- **Read availability**: Query functions such as `get_pause_flags`, `get_escrow_info`, and `get_balance` remain callable during emergency pause so operators and dashboards can inspect incident state.
+- **Eventing**: Each emergency set/clear publishes the existing pause-state event with operation `global`, the new pause value, and the authenticated admin.
+
 ## Known Risks and Limitations
 
 ### Permissionless Refund (Bounty Escrow)
@@ -79,6 +87,9 @@ This document outlines the security measures implemented in the Bounty Escrow co
 ## Audit Checklist (Bounty Escrow)
 
 - [ ] Verify Reentrancy Guards on all state-modifying paths (`lock_funds`, `release_funds`, `refund`, `batch_lock_funds`, `batch_release_funds`).
+- [ ] Verify `set_emergency_pause` is admin-gated, emits a pause event, and can both enable and clear the global pause.
+- [ ] Confirm `global_paused` blocks every value-moving path while query functions remain callable.
+- [ ] Confirm `partial_release`, claim flows, and batch variants honor the relevant granular pause flag in addition to the global pause.
 - [ ] Confirm Checks-Effects-Interactions pattern is strictly followed (state update before token transfers).
 - [ ] Review Access Control logic for `release_funds` and `approve_refund` (admin only).
 - [ ] Review Access Control logic for `lock_funds` and batch locking (depositor signatures and auth aggregation).
