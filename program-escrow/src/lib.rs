@@ -317,7 +317,9 @@ pub enum DataKey {
     RateLimitConfig,                 // RateLimitConfig struct
     FeeConfig,                       // FeeConfig struct
     ProgramRegistry,                 // Vec<String> of program IDs
-    Dispute,                         // DisputeRecord (program-level dispute)
+    Dispute,                         // DisputeRecord (global program-level dispute)
+    RecipientDispute(Address),       // recipient -> DisputeRecord
+    ScheduleDispute(u64),            // schedule_id -> DisputeRecord
 }
 
 #[contracttype]
@@ -443,6 +445,19 @@ pub enum DisputeStatus {
     Cancelled,
 }
 
+/// Scope for a dispute halt.
+///
+/// `Global` preserves the original program-wide dispute behavior. `Recipient`
+/// blocks direct payouts and releases for one recipient, while `Schedule`
+/// blocks only one release schedule.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisputeScope {
+    Global,
+    Recipient(Address),
+    Schedule(u64),
+}
+
 /// Record stored on-chain for an active or historical dispute.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -462,6 +477,7 @@ pub struct DisputeRecord {
 pub struct DisputeOpenedEvent {
     pub version: u32,
     pub program_id: String,
+    pub scope: DisputeScope,
     pub opened_by: Address,
     pub reason: String,
     pub timestamp: u64,
@@ -472,6 +488,7 @@ pub struct DisputeOpenedEvent {
 pub struct DisputeResolvedEvent {
     pub version: u32,
     pub program_id: String,
+    pub scope: DisputeScope,
     pub resolved_by: Address,
     pub timestamp: u64,
 }
@@ -481,6 +498,7 @@ pub struct DisputeResolvedEvent {
 pub struct DisputeCancelledEvent {
     pub version: u32,
     pub program_id: String,
+    pub scope: DisputeScope,
     pub cancelled_by: Address,
     pub timestamp: u64,
 }
@@ -963,17 +981,136 @@ impl ProgramEscrowContract {
             .unwrap_or_else(|| panic!("Admin not set"))
     }
 
-    /// Internal guard — panics if a dispute is currently open.
-    fn check_not_disputed(env: &Env) {
-        if let Some(record) = env
+    /// Returns true when the given dispute key currently stores an open dispute.
+    fn is_dispute_open_for_key(env: &Env, key: &DataKey) -> bool {
+        if let Some(record) = env.storage().instance().get::<DataKey, DisputeRecord>(key) {
+            record.status == DisputeStatus::Open
+        } else {
+            false
+        }
+    }
+
+    /// Returns true when a due schedule should be skipped by scoped dispute handling.
+    fn is_schedule_scope_disputed(env: &Env, schedule_id: u64, recipient: &Address) -> bool {
+        Self::is_dispute_open_for_key(env, &DataKey::ScheduleDispute(schedule_id))
+            || Self::is_dispute_open_for_key(env, &DataKey::RecipientDispute(recipient.clone()))
+    }
+
+    fn program_id_for_event(env: &Env) -> String {
+        let program_data: ProgramData = env
             .storage()
             .instance()
-            .get::<DataKey, DisputeRecord>(&DataKey::Dispute)
-        {
-            if record.status == DisputeStatus::Open {
-                panic!("Dispute in progress");
-            }
+            .get(&PROGRAM_DATA)
+            .unwrap_or_else(|| panic!("Program not initialized"));
+        program_data.program_id
+    }
+
+    fn open_dispute_at(
+        env: &Env,
+        key: DataKey,
+        scope: DisputeScope,
+        reason: String,
+        duplicate_message: &str,
+    ) {
+        let admin = Self::requireadmin(env);
+        admin.require_auth();
+
+        if Self::is_dispute_open_for_key(env, &key) {
+            panic!("{}", duplicate_message);
         }
+
+        let program_id = Self::program_id_for_event(env);
+        let now = env.ledger().timestamp();
+        let record = DisputeRecord {
+            opened_by: admin.clone(),
+            opened_at: now,
+            reason: reason.clone(),
+            status: DisputeStatus::Open,
+            resolved_by: None,
+            resolved_at: None,
+        };
+
+        env.storage().instance().set(&key, &record);
+
+        env.events().publish(
+            (DISPUTE_OPENED,),
+            DisputeOpenedEvent {
+                version: EVENT_VERSION_V2,
+                program_id,
+                scope,
+                opened_by: admin,
+                reason,
+                timestamp: now,
+            },
+        );
+    }
+
+    fn resolve_dispute_at(env: &Env, key: DataKey, scope: DisputeScope, missing_message: &str) {
+        let admin = Self::requireadmin(env);
+        admin.require_auth();
+
+        let mut record: DisputeRecord = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{}", missing_message));
+
+        if record.status != DisputeStatus::Open {
+            panic!("No open dispute to resolve");
+        }
+
+        let program_id = Self::program_id_for_event(env);
+        let now = env.ledger().timestamp();
+        record.status = DisputeStatus::Resolved;
+        record.resolved_by = Some(admin.clone());
+        record.resolved_at = Some(now);
+
+        env.storage().instance().set(&key, &record);
+
+        env.events().publish(
+            (DISPUTE_RESOLVED,),
+            DisputeResolvedEvent {
+                version: EVENT_VERSION_V2,
+                program_id,
+                scope,
+                resolved_by: admin,
+                timestamp: now,
+            },
+        );
+    }
+
+    fn cancel_dispute_at(env: &Env, key: DataKey, scope: DisputeScope, missing_message: &str) {
+        let admin = Self::requireadmin(env);
+        admin.require_auth();
+
+        let mut record: DisputeRecord = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{}", missing_message));
+
+        if record.status != DisputeStatus::Open {
+            panic!("No open dispute to cancel");
+        }
+
+        let program_id = Self::program_id_for_event(env);
+        let now = env.ledger().timestamp();
+        record.status = DisputeStatus::Cancelled;
+        record.resolved_by = Some(admin.clone());
+        record.resolved_at = Some(now);
+
+        env.storage().instance().set(&key, &record);
+
+        env.events().publish(
+            (DISPUTE_CANCELLED,),
+            DisputeCancelledEvent {
+                version: EVENT_VERSION_V2,
+                program_id,
+                scope,
+                cancelled_by: admin,
+                timestamp: now,
+            },
+        );
     }
 
     /// Open a dispute on this program, blocking further payouts until resolved or cancelled.
@@ -985,47 +1122,40 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If a dispute is already open
     pub fn open_dispute(env: Env, reason: String) {
-        let admin = Self::requireadmin(&env);
-        admin.require_auth();
+        Self::open_dispute_at(
+            &env,
+            DataKey::Dispute,
+            DisputeScope::Global,
+            reason,
+            "Dispute already open",
+        );
+    }
 
-        // Reject if a dispute is already open
-        if let Some(existing) = env
-            .storage()
-            .instance()
-            .get::<DataKey, DisputeRecord>(&DataKey::Dispute)
-        {
-            if existing.status == DisputeStatus::Open {
-                panic!("Dispute already open");
-            }
-        }
+    /// Open a recipient-scoped dispute.
+    ///
+    /// Direct payouts and release schedules for this recipient are blocked,
+    /// while unrelated recipients remain payable unless a global dispute is open.
+    pub fn open_recipient_dispute(env: Env, recipient: Address, reason: String) {
+        Self::open_dispute_at(
+            &env,
+            DataKey::RecipientDispute(recipient.clone()),
+            DisputeScope::Recipient(recipient),
+            reason,
+            "Recipient dispute already open",
+        );
+    }
 
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-
-        let now = env.ledger().timestamp();
-        let record = DisputeRecord {
-            opened_by: admin.clone(),
-            opened_at: now,
-            reason: reason.clone(),
-            status: DisputeStatus::Open,
-            resolved_by: None,
-            resolved_at: None,
-        };
-
-        env.storage().instance().set(&DataKey::Dispute, &record);
-
-        env.events().publish(
-            (DISPUTE_OPENED,),
-            DisputeOpenedEvent {
-                version: EVENT_VERSION_V2,
-                program_id: program_data.program_id.clone(),
-                opened_by: admin,
-                reason,
-                timestamp: now,
-            },
+    /// Open a schedule-scoped dispute.
+    ///
+    /// Only the selected release schedule is blocked unless a global or
+    /// recipient-scoped dispute also applies.
+    pub fn open_schedule_dispute(env: Env, schedule_id: u64, reason: String) {
+        Self::open_dispute_at(
+            &env,
+            DataKey::ScheduleDispute(schedule_id),
+            DisputeScope::Schedule(schedule_id),
+            reason,
+            "Schedule dispute already open",
         );
     }
 
@@ -1035,40 +1165,31 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If no dispute is currently open
     pub fn resolve_dispute(env: Env) {
-        let admin = Self::requireadmin(&env);
-        admin.require_auth();
+        Self::resolve_dispute_at(
+            &env,
+            DataKey::Dispute,
+            DisputeScope::Global,
+            "No dispute to resolve",
+        );
+    }
 
-        let mut record: DisputeRecord = env
-            .storage()
-            .instance()
-            .get(&DataKey::Dispute)
-            .unwrap_or_else(|| panic!("No dispute to resolve"));
+    /// Resolve an open recipient-scoped dispute.
+    pub fn resolve_recipient_dispute(env: Env, recipient: Address) {
+        Self::resolve_dispute_at(
+            &env,
+            DataKey::RecipientDispute(recipient.clone()),
+            DisputeScope::Recipient(recipient),
+            "No recipient dispute to resolve",
+        );
+    }
 
-        if record.status != DisputeStatus::Open {
-            panic!("No open dispute to resolve");
-        }
-
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-
-        let now = env.ledger().timestamp();
-        record.status = DisputeStatus::Resolved;
-        record.resolved_by = Some(admin.clone());
-        record.resolved_at = Some(now);
-
-        env.storage().instance().set(&DataKey::Dispute, &record);
-
-        env.events().publish(
-            (DISPUTE_RESOLVED,),
-            DisputeResolvedEvent {
-                version: EVENT_VERSION_V2,
-                program_id: program_data.program_id.clone(),
-                resolved_by: admin,
-                timestamp: now,
-            },
+    /// Resolve an open schedule-scoped dispute.
+    pub fn resolve_schedule_dispute(env: Env, schedule_id: u64) {
+        Self::resolve_dispute_at(
+            &env,
+            DataKey::ScheduleDispute(schedule_id),
+            DisputeScope::Schedule(schedule_id),
+            "No schedule dispute to resolve",
         );
     }
 
@@ -1078,40 +1199,31 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If no dispute is currently open
     pub fn cancel_dispute(env: Env) {
-        let admin = Self::requireadmin(&env);
-        admin.require_auth();
+        Self::cancel_dispute_at(
+            &env,
+            DataKey::Dispute,
+            DisputeScope::Global,
+            "No dispute to cancel",
+        );
+    }
 
-        let mut record: DisputeRecord = env
-            .storage()
-            .instance()
-            .get(&DataKey::Dispute)
-            .unwrap_or_else(|| panic!("No dispute to cancel"));
+    /// Cancel an open recipient-scoped dispute.
+    pub fn cancel_recipient_dispute(env: Env, recipient: Address) {
+        Self::cancel_dispute_at(
+            &env,
+            DataKey::RecipientDispute(recipient.clone()),
+            DisputeScope::Recipient(recipient),
+            "No recipient dispute to cancel",
+        );
+    }
 
-        if record.status != DisputeStatus::Open {
-            panic!("No open dispute to cancel");
-        }
-
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-
-        let now = env.ledger().timestamp();
-        record.status = DisputeStatus::Cancelled;
-        record.resolved_by = Some(admin.clone());
-        record.resolved_at = Some(now);
-
-        env.storage().instance().set(&DataKey::Dispute, &record);
-
-        env.events().publish(
-            (DISPUTE_CANCELLED,),
-            DisputeCancelledEvent {
-                version: EVENT_VERSION_V2,
-                program_id: program_data.program_id.clone(),
-                cancelled_by: admin,
-                timestamp: now,
-            },
+    /// Cancel an open schedule-scoped dispute.
+    pub fn cancel_schedule_dispute(env: Env, schedule_id: u64) {
+        Self::cancel_dispute_at(
+            &env,
+            DataKey::ScheduleDispute(schedule_id),
+            DisputeScope::Schedule(schedule_id),
+            "No schedule dispute to cancel",
         );
     }
 
@@ -1120,17 +1232,33 @@ impl ProgramEscrowContract {
         env.storage().instance().get(&DataKey::Dispute)
     }
 
+    /// Returns the current recipient-scoped dispute record, if any.
+    pub fn get_recipient_dispute(env: Env, recipient: Address) -> Option<DisputeRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RecipientDispute(recipient))
+    }
+
+    /// Returns the current schedule-scoped dispute record, if any.
+    pub fn get_schedule_dispute(env: Env, schedule_id: u64) -> Option<DisputeRecord> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ScheduleDispute(schedule_id))
+    }
+
     /// Returns true if a dispute is currently open.
     pub fn is_disputed(env: Env) -> bool {
-        if let Some(record) = env
-            .storage()
-            .instance()
-            .get::<DataKey, DisputeRecord>(&DataKey::Dispute)
-        {
-            record.status == DisputeStatus::Open
-        } else {
-            false
-        }
+        Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+    }
+
+    /// Returns true if a recipient-scoped dispute is currently open.
+    pub fn is_recipient_disputed(env: Env, recipient: Address) -> bool {
+        Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient))
+    }
+
+    /// Returns true if a schedule-scoped dispute is currently open.
+    pub fn is_schedule_disputed(env: Env, schedule_id: u64) -> bool {
+        Self::is_dispute_open_for_key(&env, &DataKey::ScheduleDispute(schedule_id))
     }
 
     // --- Circuit Breaker & Rate Limit ---
@@ -1394,8 +1522,8 @@ impl ProgramEscrowContract {
             panic!("Funds Paused");
         }
 
-        // Dispute guard: block payouts while a dispute is open
-        if Self::is_disputed(env.clone()) {
+        // Global dispute guard: block all payouts while a global dispute is open.
+        if Self::is_dispute_open_for_key(&env, &DataKey::Dispute) {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
@@ -1429,6 +1557,13 @@ impl ProgramEscrowContract {
         if recipient_count > MAX_BATCH_SIZE {
             reentrancy_guard::clear_entered(&env);
             panic!("Batch size exceeds maximum allowed");
+        }
+
+        for recipient in recipients.iter() {
+            if Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient)) {
+                reentrancy_guard::clear_entered(&env);
+                panic!("Dispute in progress");
+            }
         }
 
         // Calculate total payout amount
@@ -1571,8 +1706,11 @@ impl ProgramEscrowContract {
             panic!("Funds Paused");
         }
 
-        // Dispute guard: block payouts while a dispute is open
-        if Self::is_disputed(env.clone()) {
+        // Dispute guard: global disputes block all payouts; recipient disputes
+        // block only this payout target.
+        if Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+            || Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient.clone()))
+        {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
@@ -1755,8 +1893,8 @@ impl ProgramEscrowContract {
             panic!("Circuit breaker open: schedule releases temporarily disabled");
         }
 
-        // Dispute guard: block schedule releases while a dispute is open
-        if Self::is_disputed(env.clone()) {
+        // Global dispute guard: block all schedule releases while a global dispute is open.
+        if Self::is_dispute_open_for_key(&env, &DataKey::Dispute) {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
@@ -1796,6 +1934,10 @@ impl ProgramEscrowContract {
 
             let mut schedule = schedules.get(i).unwrap();
             if schedule.released || now < schedule.release_timestamp {
+                continue;
+            }
+
+            if Self::is_schedule_scope_disputed(&env, schedule.schedule_id, &schedule.recipient) {
                 continue;
             }
 
@@ -2304,6 +2446,12 @@ impl ProgramEscrowContract {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Already released");
                 }
+                if Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+                    || Self::is_schedule_scope_disputed(&env, s.schedule_id, &s.recipient)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Dispute in progress");
+                }
 
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
@@ -2395,6 +2543,12 @@ impl ProgramEscrowContract {
                 if now < s.release_timestamp {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Not yet due");
+                }
+                if Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+                    || Self::is_schedule_scope_disputed(&env, s.schedule_id, &s.recipient)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Dispute in progress");
                 }
 
                 // Transfer funds

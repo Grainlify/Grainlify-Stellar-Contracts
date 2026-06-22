@@ -387,3 +387,133 @@ fn test_dispute_reason_stored_correctly() {
     assert_eq!(record.reason, expected_reason);
     assert_eq!(record.status, DisputeStatus::Open);
 }
+
+// ─── Scoped disputes: recipient-specific payout guards ──────────────────────
+
+/// A recipient-scoped dispute must block only that recipient's single payout.
+#[test]
+fn test_recipient_dispute_blocks_only_target_single_payout() {
+    let env = Env::default();
+    let (client, _admin, _cid) = setup(&env, 100_000);
+
+    let disputed = Address::generate(&env);
+    let unrelated = Address::generate(&env);
+    let reason = String::from_str(&env, "Recipient KYC evidence mismatch");
+
+    client.open_recipient_dispute(&disputed, &reason);
+
+    assert!(client.is_recipient_disputed(&disputed));
+    assert!(!client.is_recipient_disputed(&unrelated));
+    assert!(!client.is_disputed());
+
+    let blocked = client.try_single_payout(&disputed, &10_000);
+    assert!(blocked.is_err());
+
+    let data = client.single_payout(&unrelated, &25_000);
+    assert_eq!(data.remaining_balance, 75_000);
+    assert_eq!(data.payout_history.len(), 1);
+    assert_eq!(data.payout_history.get(0).unwrap().recipient, unrelated);
+}
+
+/// Batch payouts reject batches containing a disputed recipient, but unrelated
+/// batches remain payable.
+#[test]
+fn test_recipient_dispute_blocks_only_target_batch_payout() {
+    let env = Env::default();
+    let (client, _admin, _cid) = setup(&env, 200_000);
+
+    let disputed = Address::generate(&env);
+    let allowed_a = Address::generate(&env);
+    let allowed_b = Address::generate(&env);
+    let reason = String::from_str(&env, "Recipient payout challenged");
+
+    client.open_recipient_dispute(&disputed, &reason);
+
+    let blocked_recipients = soroban_sdk::vec![&env, allowed_a.clone(), disputed.clone()];
+    let blocked_amounts = soroban_sdk::vec![&env, 10_000i128, 10_000i128];
+    let blocked = client.try_batch_payout(&blocked_recipients, &blocked_amounts);
+    assert!(blocked.is_err());
+
+    let allowed_recipients = soroban_sdk::vec![&env, allowed_a, allowed_b];
+    let allowed_amounts = soroban_sdk::vec![&env, 30_000i128, 40_000i128];
+    let data = client.batch_payout(&allowed_recipients, &allowed_amounts);
+
+    assert_eq!(data.remaining_balance, 130_000);
+    assert_eq!(data.payout_history.len(), 2);
+}
+
+/// Triggering due schedules should skip only schedules for a disputed recipient
+/// and release unrelated due schedules.
+#[test]
+fn test_recipient_dispute_skips_only_target_schedule_release() {
+    let env = Env::default();
+    env.ledger().set_timestamp(0);
+    let (client, _admin, _cid) = setup(&env, 150_000);
+
+    let disputed = Address::generate(&env);
+    let unrelated = Address::generate(&env);
+    let disputed_schedule = client.create_program_release_schedule(&50_000, &100, &disputed);
+    let unrelated_schedule = client.create_program_release_schedule(&60_000, &100, &unrelated);
+
+    let reason = String::from_str(&env, "Release evidence challenged");
+    client.open_recipient_dispute(&disputed, &reason);
+
+    env.ledger().set_timestamp(150);
+    let released_count = client.trigger_program_releases();
+    assert_eq!(released_count, 1);
+
+    let schedules = client.get_program_release_schedules();
+    let first = schedules.get(0).unwrap();
+    let second = schedules.get(1).unwrap();
+
+    assert_eq!(first.schedule_id, disputed_schedule.schedule_id);
+    assert!(!first.released);
+    assert_eq!(second.schedule_id, unrelated_schedule.schedule_id);
+    assert!(second.released);
+
+    let blocked = client.try_release_prog_schedule_automatic(&disputed_schedule.schedule_id);
+    assert!(blocked.is_err());
+
+    let data = client.get_program_info();
+    assert_eq!(data.remaining_balance, 90_000);
+    assert_eq!(data.payout_history.len(), 1);
+}
+
+/// A schedule-scoped dispute must block only the selected schedule, while other
+/// due schedules for the same recipient can still release.
+#[test]
+fn test_schedule_dispute_skips_only_target_schedule_release() {
+    let env = Env::default();
+    env.ledger().set_timestamp(0);
+    let (client, _admin, _cid) = setup(&env, 150_000);
+
+    let recipient = Address::generate(&env);
+    let disputed_schedule = client.create_program_release_schedule(&50_000, &100, &recipient);
+    let allowed_schedule = client.create_program_release_schedule(&60_000, &100, &recipient);
+
+    let reason = String::from_str(&env, "Schedule milestone challenged");
+    client.open_schedule_dispute(&disputed_schedule.schedule_id, &reason);
+
+    assert!(client.is_schedule_disputed(&disputed_schedule.schedule_id));
+    assert!(!client.is_schedule_disputed(&allowed_schedule.schedule_id));
+
+    env.ledger().set_timestamp(150);
+    let released_count = client.trigger_program_releases();
+    assert_eq!(released_count, 1);
+
+    let schedules = client.get_program_release_schedules();
+    let first = schedules.get(0).unwrap();
+    let second = schedules.get(1).unwrap();
+
+    assert_eq!(first.schedule_id, disputed_schedule.schedule_id);
+    assert!(!first.released);
+    assert_eq!(second.schedule_id, allowed_schedule.schedule_id);
+    assert!(second.released);
+
+    let blocked = client.try_release_prog_schedule_automatic(&disputed_schedule.schedule_id);
+    assert!(blocked.is_err());
+
+    let data = client.get_program_info();
+    assert_eq!(data.remaining_balance, 90_000);
+    assert_eq!(data.payout_history.len(), 1);
+}
