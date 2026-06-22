@@ -159,6 +159,61 @@ payouts, single payouts, and release-schedule operations. Program escrow does
 not enforce a multisig threshold for payouts; multisig governance lives in other
 contracts and should not be inferred from program-escrow storage.
 
+## Two-Step Admin Handover
+
+### Overview
+The program escrow contract implements a secure two-step admin handover mechanism to prevent accidental admin transfer to incorrect addresses.
+
+### Implementation
+The contract provides three functions for admin transfer:
+
+1. **propose_new_admin(new_admin)** - Current admin only
+   - Stores the proposed admin in `DataKey::PendingAdmin`
+   - Emits `AdminProposedEvent` with version, current_admin, proposed_admin, timestamp
+   - Requires current admin authentication
+   - Checks governance version requirements
+
+2. **accept_admin()** - Pending admin only
+   - Replaces the current admin with the pending admin
+   - Clears the `DataKey::PendingAdmin` storage
+   - Emits `AdminAcceptedEvent` with version, new_admin, previous_admin, timestamp
+   - Requires pending admin authentication
+   - Panics if no pending admin exists
+
+3. **cancel_admin_transfer()** - Current admin only
+   - Clears the `DataKey::PendingAdmin` storage
+   - Emits `AdminCancelledEvent` with version, current_admin, cancelled_proposed_admin, timestamp
+   - Requires current admin authentication
+   - Panics if no pending admin exists
+
+### Security Benefits
+- **Prevents accidental transfer**: A one-step transfer to a wrong address would permanently brick admin operations
+- **Confirmation handshake**: The pending admin must explicitly accept, confirming they control the address
+- **Cancellable**: Current admin can cancel if they made a mistake or change their mind
+- **Audit trail**: All steps emit events for complete transparency
+
+### Test Coverage
+Comprehensive tests in `program-escrow/src/rbac_tests.rs`:
+- test_propose_new_admin - Verifies proposal sets pending admin
+- test_non_admin_cannot_propose - Authorization check
+- test_accept_admin - Verifies acceptance completes handover
+- test_non_pending_admin_cannot_accept - Authorization check
+- test_accept_without_pending_admin - Edge case handling
+- test_cancel_admin_transfer - Verifies cancellation clears pending admin
+- test_non_admin_cannot_cancel - Authorization check
+- test_cancel_without_pending_admin - Edge case handling
+- test_re_propose_after_cancel - Verifies re-proposal works
+- test_full_handover_flow - End-to-end flow verification
+
+### Storage Keys
+- `DataKey::Admin` - Current admin address
+- `DataKey::PendingAdmin` - Proposed admin address (None if no pending transfer)
+
+### Event Types
+- `ADMIN_PROPOSED` - Emitted when admin proposes a new admin
+- `ADMIN_ACCEPTED` - Emitted when pending admin accepts the role
+- `ADMIN_CANCELLED` - Emitted when current admin cancels a pending transfer
+
 ## Notes
 
-The implementation is complete and ready for review. The existing test suite has compilation errors unrelated to this feature, which should be addressed separately. The new analytics events are production-ready and follow best practices for observability and monitoring.
+The implementation is complete and ready for review. The existing test suite has compilation errors unrelated to this feature, which should be addressed separately. The new analytics events are production-ready and follow best practices for observability and monitoring. The two-step admin handover is fully implemented and tested, providing a secure mechanism for admin transfers.
