@@ -2,7 +2,10 @@
 
 use crate::{governance_integration, BountyEscrowContract, BountyEscrowContractClient, Error};
 use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token, vec, Address, BytesN, Env,
+};
 
 // Mock governance contract for testing
 mod mock_governance {
@@ -25,6 +28,32 @@ mod mock_governance {
             wasm_hash == BytesN::from_array(&env, &[7u8; 32])
         }
     }
+}
+
+fn setup_low_version_governed_escrow(
+) -> (Env, BountyEscrowContractClient<'static>, Address, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_id.address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+
+    client.init(&admin, &token_addr);
+    token_admin_client.mint(&depositor, &100_000);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&3);
+
+    (env, client, depositor, contributor)
 }
 
 #[test]
@@ -208,6 +237,53 @@ fn test_governance_version_too_low_blocks_fee_config_with_typed_error() {
 
     let result = client.try_update_fee_config(&Some(100), &None, &None, &None);
     assert_eq!(result, Err(Ok(Error::GovernanceVersionTooLow)));
+}
+
+#[test]
+fn test_governance_version_too_low_blocks_value_transfer_operations() {
+    let (env, client, depositor, contributor) = setup_low_version_governed_escrow();
+    env.ledger().set_timestamp(1_000);
+
+    let active_deadline = 10_000;
+    for bounty_id in 1..=5 {
+        client.lock_funds(&depositor, &bounty_id, &1_000, &active_deadline);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp().saturating_add(61));
+    }
+
+    assert_eq!(
+        client.try_release_funds(&1, &contributor),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+    assert_eq!(
+        client.try_partial_release(&2, &contributor, &500),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    env.ledger().set_timestamp(active_deadline + 1);
+
+    assert_eq!(
+        client.try_refund(&3),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    let sweep_ids = vec![&env, 4_u64];
+    assert_eq!(
+        client.try_sweep_expired_refunds(&sweep_ids),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    let release_items = vec![
+        &env,
+        crate::ReleaseFundsItem {
+            bounty_id: 5,
+            contributor,
+        },
+    ];
+    assert_eq!(
+        client.try_batch_release_funds(&release_items),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
 }
 
 #[test]

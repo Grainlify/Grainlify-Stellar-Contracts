@@ -1303,19 +1303,14 @@ impl BountyEscrowContract {
         }
         let _start = env.ledger().timestamp();
 
-        // Ensure contract is initialized
-        if env.storage().instance().has(&DataKey::ReentrancyGuard) {
-            panic!("Reentrancy detected");
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::ReentrancyGuard, &true);
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        Self::check_governance_requirements(&env)?;
 
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
@@ -1331,6 +1326,13 @@ impl BountyEscrowContract {
         if escrow.status != EscrowStatus::Locked {
             return Err(Error::FundsNotLocked);
         }
+
+        if env.storage().instance().has(&DataKey::ReentrancyGuard) {
+            panic!("Reentrancy detected");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ReentrancyGuard, &true);
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
@@ -1695,6 +1697,8 @@ impl BountyEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        Self::check_governance_requirements(&env)?;
+
         // Dispute protection: block partial releases while a dispute (pending claim) is open.
         if env
             .storage()
@@ -1827,6 +1831,8 @@ impl BountyEscrowContract {
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
         }
+
+        Self::check_governance_requirements(&env)?;
 
         let mut escrow = Self::load_refundable_escrow(&env, bounty_id)?;
 
@@ -1991,6 +1997,8 @@ impl BountyEscrowContract {
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
         }
+
+        Self::check_governance_requirements(&env)?;
 
         let batch_size = bounty_ids.len() as u32;
         if batch_size == 0 || batch_size > MAX_BATCH_SIZE {
@@ -2444,19 +2452,36 @@ impl BountyEscrowContract {
                 .persistent()
                 .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
             {
+                let mut refunded_total = 0_i128;
+                for j in 0..escrow.refund_history.len() {
+                    let refund = escrow.refund_history.get(j).unwrap();
+                    refunded_total = refunded_total.saturating_add(refund.amount);
+                }
+                if escrow.status == EscrowStatus::Refunded
+                    && refunded_total == 0
+                    && escrow.remaining_amount == 0
+                {
+                    refunded_total = escrow.amount;
+                }
+                let released_total = escrow
+                    .amount
+                    .saturating_sub(escrow.remaining_amount)
+                    .saturating_sub(refunded_total);
+
                 match escrow.status {
                     EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
                         stats.total_locked += escrow.remaining_amount;
+                        stats.total_released += released_total;
+                        stats.total_refunded += refunded_total;
                         stats.count_locked += 1;
                     }
                     EscrowStatus::Released => {
-                        stats.total_released += escrow.amount;
+                        stats.total_released += released_total;
                         stats.count_released += 1;
                     }
                     EscrowStatus::Refunded => {
-                        // For refunded, we count the original amount in total_refunded
-                        // The actual refund amounts are tracked in refund_history
-                        stats.total_refunded += escrow.amount;
+                        stats.total_released += released_total;
+                        stats.total_refunded += refunded_total;
                         stats.count_refunded += 1;
                     }
                 }
@@ -2910,6 +2935,8 @@ impl BountyEscrowContract {
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        Self::check_governance_requirements(&env)?;
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);

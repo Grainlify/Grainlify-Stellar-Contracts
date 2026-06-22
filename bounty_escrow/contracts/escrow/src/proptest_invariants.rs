@@ -160,9 +160,6 @@ fn assert_invariants(
     let mut count_locked = 0_u32;
     let mut count_released = 0_u32;
     let mut count_refunded = 0_u32;
-    let mut stats_locked = 0_i128;
-    let mut stats_released = 0_i128;
-    let mut stats_refunded = 0_i128;
 
     for expected in model {
         let escrow = setup.escrow.get_escrow_info(&expected.id);
@@ -173,23 +170,15 @@ fn assert_invariants(
         prop_assert_eq!(actual_status, expected_status(expected.status));
 
         match escrow.status {
-            EscrowStatus::Locked => {
+            EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
                 count_locked += 1;
-                stats_locked += escrow.amount;
                 active_contract_balance += escrow.remaining_amount;
             }
             EscrowStatus::Released => {
                 count_released += 1;
-                stats_released += escrow.amount;
             }
             EscrowStatus::Refunded => {
                 count_refunded += 1;
-                stats_refunded += escrow.amount;
-            }
-            EscrowStatus::PartiallyRefunded => {
-                count_refunded += 1;
-                stats_refunded += escrow.amount;
-                active_contract_balance += escrow.remaining_amount;
             }
         }
     }
@@ -198,9 +187,9 @@ fn assert_invariants(
     prop_assert_eq!(aggregate.count_locked, count_locked);
     prop_assert_eq!(aggregate.count_released, count_released);
     prop_assert_eq!(aggregate.count_refunded, count_refunded);
-    prop_assert_eq!(aggregate.total_locked, stats_locked);
-    prop_assert_eq!(aggregate.total_released, stats_released);
-    prop_assert_eq!(aggregate.total_refunded, stats_refunded);
+    prop_assert_eq!(aggregate.total_locked, active_contract_balance);
+    prop_assert_eq!(aggregate.total_released, totals.released);
+    prop_assert_eq!(aggregate.total_refunded, totals.refunded);
 
     let contract_balance = setup.escrow.get_balance();
     prop_assert_eq!(contract_balance, active_contract_balance);

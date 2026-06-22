@@ -100,6 +100,11 @@ The following admin operations now check governance requirements:
 - `set_paused()` - Pause/unpause operations
 - `update_fee_config()` - Fee configuration
 - `update_multisig_config()` - Multisig configuration
+- `release_funds()` - Direct admin-authorized value transfer to a contributor
+- `partial_release()` - Partial admin-authorized value transfer to a contributor
+- `refund()` - Refund transfer path
+- `sweep_expired_refunds()` - Batch expired-refund transfer path
+- `batch_release_funds()` - Batch admin-authorized value transfer to contributors
 
 ### Governance Check Flow
 
