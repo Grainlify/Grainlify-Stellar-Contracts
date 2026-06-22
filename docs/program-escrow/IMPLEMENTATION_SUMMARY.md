@@ -162,3 +162,39 @@ contracts and should not be inferred from program-escrow storage.
 ## Notes
 
 The implementation is complete and ready for review. The existing test suite has compilation errors unrelated to this feature, which should be addressed separately. The new analytics events are production-ready and follow best practices for observability and monitoring.
+
+## Recipient Whitelist Enforcement
+
+Program escrow now includes a real recipient whitelist instead of a no-op
+`set_whitelist` entrypoint.
+
+### Storage And Defaults
+
+- `DataKey::Whitelist(Address)` stores whether a recipient is allowed.
+- `DataKey::WhitelistEnforcementEnabled` stores the global enforcement flag.
+- Enforcement defaults to `false` for backwards compatibility, so existing
+  payout integrations keep working until an admin explicitly enables it.
+
+### Admin Entrypoints
+
+- `set_whitelist(address, whitelisted)` requires the configured contract admin
+  and adds or removes a recipient from whitelist storage.
+- `is_whitelisted(address)` returns the persisted whitelist state.
+- `set_whitelist_enforcement(enabled)` requires the configured contract admin
+  and toggles recipient enforcement.
+- `is_whitelist_enforcement_enabled()` returns the enforcement flag.
+
+### Payout Enforcement
+
+When enforcement is enabled, both `single_payout` and `batch_payout` reject any
+recipient that is not whitelisted before token transfer. Rejections clear the
+reentrancy guard before aborting.
+
+### Event Schema
+
+Whitelist changes emit `WListChg` with:
+
+- `version`
+- `address`
+- `whitelisted`
+- `admin`

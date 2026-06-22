@@ -285,6 +285,80 @@ fn test_active_batch_payout_allowed() {
     assert_eq!(token_client.balance(&r2), 20_000);
 }
 
+#[test]
+fn test_whitelist_set_unset_persists_state() {
+    let env = Env::default();
+    let (client, admin, _cid, _token_client) = setup_active_program(&env, 100_000);
+    client.initialize_contract(&admin);
+    let recipient = Address::generate(&env);
+
+    assert!(!client.is_whitelisted(&recipient));
+
+    client.set_whitelist(&recipient, &true);
+    assert!(client.is_whitelisted(&recipient));
+
+    client.set_whitelist(&recipient, &false);
+    assert!(!client.is_whitelisted(&recipient));
+}
+
+#[test]
+fn test_whitelist_enforcement_defaults_off_for_backward_compatibility() {
+    let env = Env::default();
+    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let recipient = Address::generate(&env);
+
+    assert!(!client.is_whitelist_enforcement_enabled());
+
+    let data = client.single_payout(&recipient, &10_000);
+    assert_eq!(data.remaining_balance, 90_000);
+    assert_eq!(token_client.balance(&recipient), 10_000);
+}
+
+#[test]
+#[should_panic(expected = "Recipient not whitelisted")]
+fn test_single_payout_rejects_unlisted_recipient_when_whitelist_enforced() {
+    let env = Env::default();
+    let (client, admin, _cid, _token_client) = setup_active_program(&env, 100_000);
+    client.initialize_contract(&admin);
+    client.set_whitelist_enforcement(&true);
+    let recipient = Address::generate(&env);
+
+    client.single_payout(&recipient, &10_000);
+}
+
+#[test]
+fn test_whitelisted_recipient_can_receive_single_payout_when_enforced() {
+    let env = Env::default();
+    let (client, admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    client.initialize_contract(&admin);
+    let recipient = Address::generate(&env);
+
+    client.set_whitelist_enforcement(&true);
+    client.set_whitelist(&recipient, &true);
+
+    let data = client.single_payout(&recipient, &10_000);
+    assert_eq!(data.remaining_balance, 90_000);
+    assert_eq!(token_client.balance(&recipient), 10_000);
+}
+
+#[test]
+#[should_panic(expected = "Recipient not whitelisted")]
+fn test_batch_payout_rejects_any_unlisted_recipient_when_whitelist_enforced() {
+    let env = Env::default();
+    let (client, admin, _cid, _token_client) = setup_active_program(&env, 100_000);
+    client.initialize_contract(&admin);
+    let allowed = Address::generate(&env);
+    let blocked = Address::generate(&env);
+
+    client.set_whitelist_enforcement(&true);
+    client.set_whitelist(&allowed, &true);
+
+    client.batch_payout(
+        &vec![&env, allowed, blocked],
+        &vec![&env, 10_000i128, 10_000i128],
+    );
+}
+
 /// Multiple lock calls accumulate funds (top-up stays in Active state).
 #[test]
 fn test_active_top_up_lock_increases_balance() {

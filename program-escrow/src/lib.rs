@@ -194,6 +194,7 @@ const PAUSE_STATE_CHANGED: Symbol = symbol_short!("PauseSt");
 const AGGREGATE_STATS: Symbol = symbol_short!("AggStats");
 const LARGE_PAYOUT: Symbol = symbol_short!("LrgPay");
 const SCHEDULE_TRIGGERED: Symbol = symbol_short!("SchedTrg");
+const WHITELIST_CHANGED: Symbol = symbol_short!("WListChg");
 
 // Storage keys
 const PROGRAM_DATA: Symbol = symbol_short!("ProgData");
@@ -292,6 +293,15 @@ pub struct ScheduleTriggeredEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhitelistChangedEvent {
+    pub version: u32,
+    pub address: Address,
+    pub whitelisted: bool,
+    pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProgramData {
     pub program_id: String,
     pub total_funds: i128,
@@ -318,6 +328,8 @@ pub enum DataKey {
     FeeConfig,                       // FeeConfig struct
     ProgramRegistry,                 // Vec<String> of program IDs
     Dispute,                         // DisputeRecord (program-level dispute)
+    Whitelist(Address),              // recipient address -> bool
+    WhitelistEnforcementEnabled,     // bool, default false
 }
 
 #[contracttype]
@@ -709,6 +721,25 @@ impl ProgramEscrowContract {
                 scheduled_count,
             },
         );
+    }
+
+    fn is_whitelisted_internal(env: &Env, address: &Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Whitelist(address.clone()))
+            .unwrap_or(false)
+    }
+
+    fn whitelist_enforcement_enabled(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforcementEnabled)
+            .unwrap_or(false)
+    }
+
+    fn recipient_allowed_by_whitelist(env: &Env, recipient: &Address) -> bool {
+        !Self::whitelist_enforcement_enabled(env)
+            || Self::is_whitelisted_internal(env, recipient)
     }
 
     /// Check if payout is large and emit event if threshold exceeded
@@ -1300,14 +1331,58 @@ impl ProgramEscrowContract {
             })
     }
 
-    pub fn set_whitelist(env: Env, _address: Address, _whitelisted: bool) {
-        // Only admin can set whitelist
+    /// Add or remove a recipient from the payout whitelist.
+    ///
+    /// Only the contract admin can mutate whitelist state. Enforcement remains
+    /// disabled until `set_whitelist_enforcement(true)` is called.
+    pub fn set_whitelist(env: Env, address: Address, whitelisted: bool) {
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("Not initialized"));
         admin.require_auth();
+        let key = DataKey::Whitelist(address.clone());
+        if whitelisted {
+            env.storage().instance().set(&key, &true);
+        } else {
+            env.storage().instance().remove(&key);
+        }
+        env.events().publish(
+            (WHITELIST_CHANGED,),
+            WhitelistChangedEvent {
+                version: EVENT_VERSION_V2,
+                address,
+                whitelisted,
+                admin,
+            },
+        );
+    }
+
+    /// Return whether `address` is currently present in the recipient whitelist.
+    pub fn is_whitelisted(env: Env, address: Address) -> bool {
+        Self::is_whitelisted_internal(&env, &address)
+    }
+
+    /// Enable or disable recipient whitelist enforcement for payouts.
+    ///
+    /// The default is disabled for backwards compatibility with existing
+    /// deployments and payout integrations.
+    pub fn set_whitelist_enforcement(env: Env, enabled: bool) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::WhitelistEnforcementEnabled, &enabled);
+    }
+
+    /// Return whether recipient whitelist enforcement is currently enabled.
+    pub fn is_whitelist_enforcement_enabled(env: Env) -> bool {
+        Self::whitelist_enforcement_enabled(&env)
     }
 
     // ========================================================================
@@ -1446,6 +1521,13 @@ impl ProgramEscrowContract {
 
         // Validate sufficient balance — record failure before abort so the
         // circuit breaker can accumulate this as a known-bad condition.
+        for recipient in recipients.iter() {
+            if !Self::recipient_allowed_by_whitelist(&env, &recipient) {
+                reentrancy_guard::clear_entered(&env);
+                panic!("Recipient not whitelisted");
+            }
+        }
+
         if total_payout > program_data.remaining_balance {
             error_recovery::record_failure(
                 &env,
@@ -1588,6 +1670,11 @@ impl ProgramEscrowContract {
                 });
 
         program_data.authorized_payout_key.require_auth();
+
+        if !Self::recipient_allowed_by_whitelist(&env, &recipient) {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Recipient not whitelisted");
+        }
 
         // Validate amount
         if amount <= 0 {
