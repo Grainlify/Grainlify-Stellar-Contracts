@@ -1319,6 +1319,8 @@ impl BountyEscrowContract {
 
     /// Release funds to the contributor.
     /// Only the admin (backend) can authorize this.
+    /// If governance is configured, the linked governance version must meet
+    /// the configured minimum before this value transfer can proceed.
     pub fn release_funds(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
@@ -1328,6 +1330,8 @@ impl BountyEscrowContract {
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
         }
+
+        Self::check_governance_requirements(&env)?;
 
         // Dispute protection: if a pending claim exists for this bounty,
         // the dispute must be resolved (claim or cancel) before any direct release.
@@ -1714,6 +1718,8 @@ impl BountyEscrowContract {
     /// - `remaining_amount` is decremented by `payout_amount` after each call.
     /// - When `remaining_amount` reaches 0 the escrow status is set to Released.
     /// - The bounty stays Locked while any funds remain unreleased.
+    /// - If governance is configured, its version must satisfy the configured
+    ///   minimum before any partial payout is transferred.
     pub fn partial_release(
         env: Env,
         bounty_id: u64,
@@ -1732,6 +1738,8 @@ impl BountyEscrowContract {
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
         }
+
+        Self::check_governance_requirements(&env)?;
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -1859,6 +1867,8 @@ impl BountyEscrowContract {
 
     /// Refund funds to the original depositor if the deadline has passed.
     /// Refunds the full remaining_amount (accounts for any prior partial releases).
+    /// If governance is configured, the linked governance version must meet
+    /// the configured minimum before funds can be refunded.
     pub fn refund(env: Env, bounty_id: u64) -> Result<(), Error> {
         if Self::check_paused(&env, symbol_short!("refund")) {
             return Err(Error::FundsPaused);
@@ -1868,6 +1878,8 @@ impl BountyEscrowContract {
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
         }
+
+        Self::check_governance_requirements(&env)?;
 
         let mut escrow = Self::load_refundable_escrow(&env, bounty_id)?;
 
@@ -2024,6 +2036,8 @@ impl BountyEscrowContract {
     /// every bounty must exist, have no pending claim, be locked or partially
     /// refunded, and have `deadline <= now`. The batch is validated before any
     /// transfer, so one invalid entry rejects the whole sweep.
+    /// If governance is configured, the linked governance version must meet
+    /// the configured minimum before any expired bounty is swept.
     pub fn sweep_expired_refunds(env: Env, bounty_ids: Vec<u64>) -> Result<u32, Error> {
         if Self::check_paused(&env, symbol_short!("refund")) {
             return Err(Error::FundsPaused);
@@ -2032,6 +2046,8 @@ impl BountyEscrowContract {
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
         }
+
+        Self::check_governance_requirements(&env)?;
 
         let batch_size = bounty_ids.len() as u32;
         if batch_size == 0 || batch_size > MAX_BATCH_SIZE {
@@ -2927,6 +2943,8 @@ impl BountyEscrowContract {
     ///
     /// # Note
     /// This operation is atomic - if any item fails, the entire transaction reverts.
+    /// If governance is configured, the linked governance version must meet
+    /// the configured minimum before any item is released.
     pub fn batch_release_funds(env: Env, items: Vec<ReleaseFundsItem>) -> Result<u32, Error> {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
@@ -2936,6 +2954,9 @@ impl BountyEscrowContract {
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
         }
+
+        Self::check_governance_requirements(&env)?;
+
         // Validate batch size
         let batch_size = items.len() as u32;
         if batch_size == 0 {
