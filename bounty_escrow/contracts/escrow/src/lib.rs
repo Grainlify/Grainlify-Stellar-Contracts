@@ -2463,13 +2463,12 @@ impl BountyEscrowContract {
                         stats.count_released += 1;
                     }
                     EscrowStatus::Refunded => {
-                        let final_refunded_amount = if refunded_amount > 0 {
-                            refunded_amount
+                        if refunded_amount > 0 {
+                            stats.total_released += released_amount;
+                            stats.total_refunded += refunded_amount;
                         } else {
-                            escrow.amount.saturating_sub(released_amount)
-                        };
-                        stats.total_released += escrow.amount.saturating_sub(final_refunded_amount);
-                        stats.total_refunded += final_refunded_amount;
+                            stats.total_refunded += settled_amount;
+                        }
                         stats.count_refunded += 1;
                     }
                 }

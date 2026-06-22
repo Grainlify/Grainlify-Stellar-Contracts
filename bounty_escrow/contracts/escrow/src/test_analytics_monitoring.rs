@@ -19,10 +19,13 @@
 /// * `get_refund_history`    – history vector is populated by approved-refund path
 /// * Monitoring event emission – lock/release/refund each emit ≥ 1 event
 /// * Error flows             – failed attempts do not corrupt metrics
-use crate::{BountyEscrowContract, BountyEscrowContractClient, EscrowStatus, RefundMode, LockFundsItem, ReleaseFundsItem};
+use crate::{
+    BountyEscrowContract, BountyEscrowContractClient, DataKey, Escrow, EscrowStatus,
+    LockFundsItem, RefundMode, ReleaseFundsItem,
+};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    token, Address, Env,
+    token, vec, Address, Env,
 };
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1278,42 @@ fn test_counters_match_full_scan_after_partial_refund() {
         counter_stats, full_scan_stats,
         "O(1) counters must match O(N) full scan after partial refund"
     );
+}
+
+#[test]
+fn test_full_scan_legacy_refund_without_history_counts_as_refunded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &1_000_000);
+
+    let deadline = env.ledger().timestamp() + 500;
+    escrow.lock_funds(&depositor, &305, &1_000, &deadline);
+
+    env.as_contract(&escrow.address, || {
+        env.storage().persistent().set(
+            &DataKey::Escrow(305),
+            &Escrow {
+                depositor,
+                amount: 1_000,
+                remaining_amount: 0,
+                status: EscrowStatus::Refunded,
+                deadline,
+                refund_history: vec![&env],
+            },
+        );
+    });
+
+    let full_scan_stats = escrow.get_aggregate_stats_full_scan();
+
+    assert_eq!(full_scan_stats.total_locked, 0);
+    assert_eq!(full_scan_stats.total_released, 0);
+    assert_eq!(full_scan_stats.total_refunded, 1_000);
+    assert_eq!(full_scan_stats.count_refunded, 1);
 }
 
 #[test]
