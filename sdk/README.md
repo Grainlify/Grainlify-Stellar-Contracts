@@ -8,6 +8,7 @@ Detailed documentation for the SDK is available in the [`docs/`](../docs/index.m
 
 - [Generated API Reference](../docs/sdk/api/README.md)
 - [Error Mapping](../docs/sdk/ERROR_MAPPING.md)
+- [Event Decoding](../docs/sdk/EVENT_DECODING.md)
 
 ## Installation
 
@@ -21,6 +22,7 @@ npm install @grainlify/contracts-sdk
 - Comprehensive error handling with typed errors
 - Network error detection and reporting
 - Input validation
+- Typed Soroban event decoding for bounty escrow and program escrow monitoring
 - Support for ProgramEscrow and BountyEscrow lifecycle, claim, refund, batch, and query functions
 
 ## Usage
@@ -70,6 +72,30 @@ await client.claim(claim.bounty_id, recipientKeypair);
 
 await client.approveRefund(2n, 5000000n, 'GDEPOSITOR...', 'Partial', sourceKeypair);
 const eligibility = await client.getRefundEligibility(2n);
+```
+
+### Event Decoding
+
+Use `decodeSorobanEvent` or `decodeSorobanEvents` to turn raw Soroban event
+responses into typed discriminated unions for dashboards and indexers.
+
+```typescript
+import { decodeSorobanEvent } from '@grainlify/contracts-sdk';
+
+const decoded = decodeSorobanEvent({
+  topics: ['Payout'],
+  value: {
+    version: 2,
+    program_id: 'program-1',
+    recipient: 'GRECIPIENT...',
+    amount: 1000000n,
+    remaining_balance: 9000000n,
+  },
+});
+
+if (decoded.kind === 'program.payout') {
+  console.log(decoded.programId, decoded.amount);
+}
 ```
 
 ### Program Escrow

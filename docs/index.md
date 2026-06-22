@@ -68,6 +68,7 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | [SDK README](../sdk/README.md) | TypeScript SDK overview and usage |
 | [SDK API Reference](sdk/api/README.md) | Generated TypeDoc reference for SDK classes, methods, and exported types |
 | [SDK Error Mapping](sdk/ERROR_MAPPING.md) | SDK error types and mapping |
+| [SDK Event Decoding](sdk/EVENT_DECODING.md) | Typed event decoder reference for bounty and program escrow indexers |
 
 ## Security
 

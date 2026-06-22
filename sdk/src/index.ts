@@ -40,3 +40,33 @@ export {
   GOVERNANCE_ERROR_MAP,
   CIRCUIT_BREAKER_ERROR_MAP,
 } from './errors';
+
+export {
+  decodeSorobanEvent,
+  decodeSorobanEvents,
+} from './events';
+export type {
+  RawSorobanEvent,
+  DecodedSorobanEvent,
+  DecodedContractEvent,
+  UnknownSorobanEvent,
+  UnknownVersionSorobanEvent,
+  MalformedSorobanEvent,
+  BountyFundsLockedEvent,
+  BountyFundsReleasedEvent,
+  BountyFundsRefundedEvent,
+  BountyExpiredEvent,
+  BountyInitializedEvent,
+  BountyClaimCreatedEvent,
+  BountyStateTransitionedEvent,
+  BountyActivityEvent,
+  BountyAnalyticsSnapshotEvent,
+  ProgramInitializedEvent,
+  ProgramFundsLockedEvent,
+  ProgramPayoutEvent,
+  ProgramBatchPayoutEvent,
+  ProgramScheduleTriggeredEvent,
+  ProgramDisputeOpenedEvent,
+  ProgramAggregateStatsEvent,
+  ProgramLargePayoutEvent,
+} from './events';
