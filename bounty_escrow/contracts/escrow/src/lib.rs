@@ -2444,9 +2444,18 @@ impl BountyEscrowContract {
                 .persistent()
                 .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
             {
+                let mut refunded_amount = 0_i128;
+                for refund in escrow.refund_history.iter() {
+                    refunded_amount = refunded_amount.saturating_add(refund.amount);
+                }
+                let settled_amount = escrow.amount.saturating_sub(escrow.remaining_amount);
+                let released_amount = settled_amount.saturating_sub(refunded_amount);
+
                 match escrow.status {
                     EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
                         stats.total_locked += escrow.remaining_amount;
+                        stats.total_released += released_amount;
+                        stats.total_refunded += refunded_amount;
                         stats.count_locked += 1;
                     }
                     EscrowStatus::Released => {
@@ -2454,9 +2463,13 @@ impl BountyEscrowContract {
                         stats.count_released += 1;
                     }
                     EscrowStatus::Refunded => {
-                        // For refunded, we count the original amount in total_refunded
-                        // The actual refund amounts are tracked in refund_history
-                        stats.total_refunded += escrow.amount;
+                        let final_refunded_amount = if refunded_amount > 0 {
+                            refunded_amount
+                        } else {
+                            escrow.amount.saturating_sub(released_amount)
+                        };
+                        stats.total_released += escrow.amount.saturating_sub(final_refunded_amount);
+                        stats.total_refunded += final_refunded_amount;
                         stats.count_refunded += 1;
                     }
                 }
