@@ -176,6 +176,16 @@ mod monitoring {
     const USER_COUNT: &str = "usr_count";
     const ERROR_COUNT: &str = "err_count";
 
+    // Governance / upgrade metric counter keys.
+    //
+    // These persistent counters track security-critical governance and upgrade
+    // activity so operators can observe how many proposals, votes, upgrades, and
+    // migrations the contract has processed over its lifetime.
+    const PROPOSALS_CREATED: &str = "gov_prop";
+    const VOTES_CAST: &str = "gov_vote";
+    const UPGRADES_EXECUTED: &str = "gov_upg";
+    const MIGRATIONS_RUN: &str = "gov_migr";
+
     // Event: Operation metric
     #[contracttype]
     #[derive(Clone, Debug)]
@@ -184,6 +194,19 @@ mod monitoring {
         pub caller: Address,
         pub timestamp: u64,
         pub success: bool,
+    }
+
+    // Event: Governance metric
+    //
+    // Emitted whenever a governance/upgrade counter is incremented. Mirrors the
+    // escrow contracts' metric event pattern so indexers can consume a single,
+    // consistent metric stream across contracts.
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct GovernanceMetric {
+        pub metric: Symbol,
+        pub total: u64,
+        pub timestamp: u64,
     }
 
     // Event: Performance metric
@@ -213,6 +236,11 @@ mod monitoring {
         pub unique_users: u64,
         pub error_count: u64,
         pub error_rate: u32,
+        // Real governance / upgrade activity counters.
+        pub proposals_created: u64,
+        pub votes_cast: u64,
+        pub upgrades_executed: u64,
+        pub migrations_run: u64,
     }
 
     // Data: State snapshot
@@ -223,6 +251,11 @@ mod monitoring {
         pub total_operations: u64,
         pub total_users: u64,
         pub total_errors: u64,
+        // Real governance / upgrade activity counters.
+        pub proposals_created: u64,
+        pub votes_cast: u64,
+        pub upgrades_executed: u64,
+        pub migrations_run: u64,
     }
 
     // Data: Performance stats
@@ -257,6 +290,80 @@ mod monitoring {
                 success,
             },
         );
+    }
+
+    /// Increments the persistent counter stored under `key` and returns the new total.
+    ///
+    /// The counter is saturating, so it can never wrap or panic. Counters written
+    /// here are observational only: no governance or upgrade entrypoint ever reads
+    /// them to gate authorization or alter control flow.
+    fn increment_counter(env: &Env, key: &str) -> u64 {
+        let storage_key = Symbol::new(env, key);
+        let current: u64 = env.storage().persistent().get(&storage_key).unwrap_or(0);
+        let updated = current.saturating_add(1);
+        env.storage().persistent().set(&storage_key, &updated);
+        updated
+    }
+
+    /// Reads the persistent counter stored under `key`, defaulting to `0`.
+    ///
+    /// This is a pure read used by the analytics/state-snapshot views. It never
+    /// mutates storage or influences contract control flow.
+    fn read_counter(env: &Env, key: &str) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(env, key))
+            .unwrap_or(0)
+    }
+
+    /// Emits a governance metric event mirroring the escrow contracts' pattern.
+    fn emit_governance_metric(env: &Env, metric: Symbol, total: u64) {
+        env.events().publish(
+            (symbol_short!("metric"), symbol_short!("gov")),
+            GovernanceMetric {
+                metric,
+                total,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Records that a governance proposal was created and returns the running total.
+    ///
+    /// Call after the proposal has been persisted successfully so the counter only
+    /// reflects real proposals. Purely observational; never affects auth.
+    pub fn track_proposal_created(env: &Env) -> u64 {
+        let total = increment_counter(env, PROPOSALS_CREATED);
+        emit_governance_metric(env, symbol_short!("proposal"), total);
+        total
+    }
+
+    /// Records that a governance vote was cast and returns the running total.
+    ///
+    /// Call after a vote has been persisted successfully. Purely observational.
+    pub fn track_vote_cast(env: &Env) -> u64 {
+        let total = increment_counter(env, VOTES_CAST);
+        emit_governance_metric(env, symbol_short!("vote"), total);
+        total
+    }
+
+    /// Records that a contract upgrade was executed and returns the running total.
+    ///
+    /// Call after the WASM update has been applied. Purely observational.
+    pub fn track_upgrade_executed(env: &Env) -> u64 {
+        let total = increment_counter(env, UPGRADES_EXECUTED);
+        emit_governance_metric(env, symbol_short!("upgrade"), total);
+        total
+    }
+
+    /// Records that a state migration ran and returns the running total.
+    ///
+    /// Call once a migration has completed so idempotent re-invocations that exit
+    /// early are not double-counted. Purely observational.
+    pub fn track_migration_run(env: &Env) -> u64 {
+        let total = increment_counter(env, MIGRATIONS_RUN);
+        emit_governance_metric(env, symbol_short!("migrate"), total);
+        total
     }
 
     // Track performance
@@ -316,6 +423,10 @@ mod monitoring {
             unique_users: users,
             error_count: errors,
             error_rate,
+            proposals_created: read_counter(env, PROPOSALS_CREATED),
+            votes_cast: read_counter(env, VOTES_CAST),
+            upgrades_executed: read_counter(env, UPGRADES_EXECUTED),
+            migrations_run: read_counter(env, MIGRATIONS_RUN),
         }
     }
 
@@ -330,6 +441,10 @@ mod monitoring {
             total_operations: env.storage().persistent().get(&op_key).unwrap_or(0),
             total_users: env.storage().persistent().get(&usr_key).unwrap_or(0),
             total_errors: env.storage().persistent().get(&err_key).unwrap_or(0),
+            proposals_created: read_counter(env, PROPOSALS_CREATED),
+            votes_cast: read_counter(env, VOTES_CAST),
+            upgrades_executed: read_counter(env, UPGRADES_EXECUTED),
+            migrations_run: read_counter(env, MIGRATIONS_RUN),
         }
     }
 
@@ -570,23 +685,41 @@ impl GrainlifyContract {
     }
 
     /// Create a governance proposal for a candidate upgrade WASM hash.
+    ///
+    /// On success the persistent `proposals_created` metric counter is incremented
+    /// and a governance metric event is emitted. Counter tracking happens only
+    /// after the governance module has accepted the proposal, so failed calls are
+    /// never counted and the counter can never gate proposal creation.
     pub fn create_proposal(
         env: Env,
         proposer: Address,
         new_wasm_hash: BytesN<32>,
         description: Symbol,
     ) -> Result<u32, governance::Error> {
-        governance::GovernanceContract::create_proposal(env, proposer, new_wasm_hash, description)
+        let proposal_id = governance::GovernanceContract::create_proposal(
+            env.clone(),
+            proposer,
+            new_wasm_hash,
+            description,
+        )?;
+        monitoring::track_proposal_created(&env);
+        Ok(proposal_id)
     }
 
     /// Cast a governance vote for a proposal.
+    ///
+    /// On success the persistent `votes_cast` metric counter is incremented and a
+    /// governance metric event is emitted. Counter tracking happens only after the
+    /// vote has been persisted, so rejected votes are never counted.
     pub fn cast_vote(
         env: Env,
         voter: Address,
         proposal_id: u32,
         vote_type: governance::VoteType,
     ) -> Result<(), governance::Error> {
-        governance::GovernanceContract::cast_vote(env, voter, proposal_id, vote_type)
+        governance::GovernanceContract::cast_vote(env.clone(), voter, proposal_id, vote_type)?;
+        monitoring::track_vote_cast(&env);
+        Ok(())
     }
 
     /// Finalize voting and move the proposal to Approved or Rejected.
@@ -867,6 +1000,9 @@ impl GrainlifyContract {
                 .deployer()
                 .update_current_contract_wasm(wasm_hash);
         });
+
+        // Observational metric only: recorded after the upgrade has been applied.
+        monitoring::track_upgrade_executed(&env);
     }
 
     /// Upgrades the contract to new WASM code (single admin version).
@@ -906,6 +1042,9 @@ impl GrainlifyContract {
 
         // Track successful operation
         monitoring::track_operation(&env, symbol_short!("upgrade"), admin, true);
+
+        // Record the upgrade in the persistent governance/upgrade metric counter.
+        monitoring::track_upgrade_executed(&env);
 
         // Track performance
         let duration = env.ledger().timestamp().saturating_sub(start);
@@ -1259,6 +1398,11 @@ impl GrainlifyContract {
 
         // Track successful operation
         monitoring::track_operation(&env, symbol_short!("migrate"), admin, true);
+
+        // Record the migration in the persistent governance/upgrade metric counter.
+        // Idempotent re-invocations return early above, so this counts each
+        // applied migration exactly once.
+        monitoring::track_migration_run(&env);
 
         // Track performance
         let duration = env.ledger().timestamp().saturating_sub(start);
@@ -1914,5 +2058,201 @@ mod test {
         let state = client.get_migration_state().unwrap();
         assert_eq!(state.from_version, v_before);
         assert_eq!(state.to_version, 3);
+    }
+
+    // ========================================================================
+    // Monitoring Counter Tests (Issue #101)
+    //
+    // These tests assert that the persistent governance/upgrade counters
+    // increment exactly once per real operation, are surfaced through
+    // get_analytics/get_state_snapshot, and emit a metric event. They also
+    // confirm the counters are observational only and never gate control flow.
+    // ========================================================================
+
+    fn one_person_governance_config(env: &Env) -> GovernanceConfig {
+        GovernanceConfig {
+            voting_period: 100,
+            execution_delay: 0,
+            quorum_percentage: 1000,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::OnePersonOneVote,
+            governance_token: Address::generate(env),
+            one_person_total_voters: 10,
+            token_total_voting_power: 100,
+            snapshot_ledger: None,
+        }
+    }
+
+    #[test]
+    fn test_counters_start_at_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        client.init_admin(&Address::generate(&env));
+
+        let analytics = client.get_analytics();
+        assert_eq!(analytics.proposals_created, 0);
+        assert_eq!(analytics.votes_cast, 0);
+        assert_eq!(analytics.upgrades_executed, 0);
+        assert_eq!(analytics.migrations_run, 0);
+    }
+
+    #[test]
+    fn test_create_proposal_increments_counter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+        assert_eq!(client.get_analytics().proposals_created, 1);
+
+        client.create_proposal(&proposer, &hash, &symbol_short!("p2"));
+        let analytics = client.get_analytics();
+        assert_eq!(analytics.proposals_created, 2);
+        // Unrelated counters are untouched.
+        assert_eq!(analytics.votes_cast, 0);
+        assert_eq!(client.get_state_snapshot().proposals_created, 2);
+    }
+
+    #[test]
+    fn test_create_proposal_emits_metric_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let before = env.events().all().len();
+        let hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+
+        // The governance module does not emit events itself, so the new event
+        // is the monitoring metric event.
+        assert!(env.events().all().len() > before);
+    }
+
+    #[test]
+    fn test_cast_vote_increments_counter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[3u8; 32]);
+        let proposal_id = client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+
+        client.cast_vote(&proposer, &proposal_id, &VoteType::For);
+        client.cast_vote(&voter, &proposal_id, &VoteType::Against);
+
+        let analytics = client.get_analytics();
+        assert_eq!(analytics.votes_cast, 2);
+        assert_eq!(analytics.proposals_created, 1);
+        assert_eq!(client.get_state_snapshot().votes_cast, 2);
+    }
+
+    #[test]
+    fn test_failed_vote_does_not_increment_counter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[4u8; 32]);
+        let proposal_id = client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+
+        client.cast_vote(&proposer, &proposal_id, &VoteType::For);
+        // Double voting is rejected by governance; the counter must not move.
+        let result = client.try_cast_vote(&proposer, &proposal_id, &VoteType::For);
+        assert!(result.is_err());
+
+        assert_eq!(client.get_analytics().votes_cast, 1);
+    }
+
+    #[test]
+    fn test_migration_increments_counter_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let hash = BytesN::from_array(&env, &[5u8; 32]);
+        client.migrate(&3, &hash);
+        assert_eq!(client.get_analytics().migrations_run, 1);
+
+        // Idempotent re-invocation must not double-count the migration.
+        client.migrate(&3, &hash);
+        assert_eq!(client.get_analytics().migrations_run, 1);
+        assert_eq!(client.get_state_snapshot().migrations_run, 1);
+    }
+
+    #[test]
+    fn test_upgrade_counter_increments_and_persists() {
+        // The single-admin/multisig upgrade paths replace the contract WASM, so
+        // the helper is exercised directly inside the contract context here. This
+        // verifies the counter is incremented, read back from persistent storage
+        // (so it survives an upgrade), and surfaced through both views.
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(monitoring::get_analytics(&env).upgrades_executed, 0);
+
+            assert_eq!(monitoring::track_upgrade_executed(&env), 1);
+            assert_eq!(monitoring::track_upgrade_executed(&env), 2);
+
+            assert_eq!(monitoring::get_analytics(&env).upgrades_executed, 2);
+            assert_eq!(monitoring::get_state_snapshot(&env).upgrades_executed, 2);
+        });
+    }
+
+    #[test]
+    fn test_counters_are_independent() {
+        // Exercising one counter must never perturb the others.
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        env.as_contract(&contract_id, || {
+            monitoring::track_proposal_created(&env);
+            monitoring::track_vote_cast(&env);
+            monitoring::track_vote_cast(&env);
+            monitoring::track_upgrade_executed(&env);
+            monitoring::track_migration_run(&env);
+
+            let analytics = monitoring::get_analytics(&env);
+            assert_eq!(analytics.proposals_created, 1);
+            assert_eq!(analytics.votes_cast, 2);
+            assert_eq!(analytics.upgrades_executed, 1);
+            assert_eq!(analytics.migrations_run, 1);
+        });
     }
 }
