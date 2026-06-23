@@ -1,8 +1,14 @@
 #![cfg(test)]
 
-use crate::{governance_integration, BountyEscrowContract, BountyEscrowContractClient, Error};
+use crate::{
+    governance_integration, BountyEscrowContract, BountyEscrowContractClient, Error, EscrowStatus,
+    ReleaseFundsItem,
+};
 use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token, vec, Address, BytesN, Env,
+};
 
 // Mock governance contract for testing
 mod mock_governance {
@@ -25,6 +31,185 @@ mod mock_governance {
             wasm_hash == BytesN::from_array(&env, &[7u8; 32])
         }
     }
+}
+
+fn create_token_contract<'a>(
+    env: &Env,
+    admin: &Address,
+) -> (token::Client<'a>, token::StellarAssetClient<'a>) {
+    let contract_address = env.register_stellar_asset_contract(admin.clone());
+    (
+        token::Client::new(env, &contract_address),
+        token::StellarAssetClient::new(env, &contract_address),
+    )
+}
+
+struct ValueTransferSetup<'a> {
+    env: Env,
+    depositor: Address,
+    contributor: Address,
+    escrow: BountyEscrowContractClient<'a>,
+}
+
+impl<'a> ValueTransferSetup<'a> {
+    fn new() -> Self {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let depositor = Address::generate(&env);
+        let contributor = Address::generate(&env);
+        let (_token, token_admin) = create_token_contract(&env, &admin);
+
+        let contract_id = env.register_contract(None, BountyEscrowContract);
+        let escrow = BountyEscrowContractClient::new(&env, &contract_id);
+        escrow.init(&admin, &_token.address);
+        token_admin.mint(&depositor, &1_000_000);
+
+        Self {
+            env,
+            depositor,
+            contributor,
+            escrow,
+        }
+    }
+
+    fn configure_mock_governance(&self, min_version: u32) {
+        let gov_contract_id = self
+            .env
+            .register_contract(None, mock_governance::MockGovernanceContract);
+        self.escrow.set_governance_contract(&gov_contract_id);
+        self.escrow.set_min_governance_version(&min_version);
+    }
+
+    fn lock_bounty(&self, bounty_id: u64, amount: i128, deadline: u64) {
+        self.escrow
+            .lock_funds(&self.depositor, &bounty_id, &amount, &deadline);
+    }
+}
+
+#[test]
+fn test_governance_version_too_low_blocks_value_transfers() {
+    let setup = ValueTransferSetup::new();
+    setup.configure_mock_governance(3);
+
+    let now = setup.env.ledger().timestamp();
+    let active_deadline = now + 100;
+    let expired_deadline = now + 10;
+
+    setup.lock_bounty(1, 100, active_deadline);
+    setup.lock_bounty(2, 100, active_deadline);
+    setup.lock_bounty(3, 100, expired_deadline);
+    setup.lock_bounty(4, 100, expired_deadline);
+    setup.lock_bounty(5, 100, active_deadline);
+    setup.lock_bounty(6, 100, active_deadline);
+
+    assert_eq!(
+        setup.escrow.try_release_funds(&1, &setup.contributor),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+    assert_eq!(
+        setup
+            .escrow
+            .try_partial_release(&2, &setup.contributor, &25),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    setup.env.ledger().set_timestamp(expired_deadline + 1);
+    assert_eq!(
+        setup.escrow.try_refund(&3),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    let expired_ids = vec![&setup.env, 4_u64];
+    assert_eq!(
+        setup.escrow.try_sweep_expired_refunds(&expired_ids),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    let release_items = vec![
+        &setup.env,
+        ReleaseFundsItem {
+            bounty_id: 5,
+            contributor: setup.contributor.clone(),
+        },
+        ReleaseFundsItem {
+            bounty_id: 6,
+            contributor: setup.contributor.clone(),
+        },
+    ];
+    assert_eq!(
+        setup.escrow.try_batch_release_funds(&release_items),
+        Err(Ok(Error::GovernanceVersionTooLow))
+    );
+
+    for bounty_id in 1_u64..=6 {
+        let escrow = setup.escrow.get_escrow_info(&bounty_id);
+        assert_eq!(escrow.status, EscrowStatus::Locked);
+        assert_eq!(escrow.remaining_amount, 100);
+    }
+}
+
+#[test]
+fn test_governance_version_met_allows_value_transfers() {
+    let setup = ValueTransferSetup::new();
+    setup.configure_mock_governance(2);
+
+    let now = setup.env.ledger().timestamp();
+    let active_deadline = now + 100;
+    let expired_deadline = now + 10;
+
+    setup.lock_bounty(11, 100, active_deadline);
+    setup.lock_bounty(12, 100, active_deadline);
+    setup.lock_bounty(13, 100, expired_deadline);
+    setup.lock_bounty(14, 100, expired_deadline);
+    setup.lock_bounty(15, 100, active_deadline);
+    setup.lock_bounty(16, 100, active_deadline);
+
+    setup.escrow.release_funds(&11, &setup.contributor);
+    setup.escrow.partial_release(&12, &setup.contributor, &25);
+
+    setup.env.ledger().set_timestamp(expired_deadline + 1);
+    setup.escrow.refund(&13);
+    let expired_ids = vec![&setup.env, 14_u64];
+    assert_eq!(setup.escrow.sweep_expired_refunds(&expired_ids), 1);
+
+    let release_items = vec![
+        &setup.env,
+        ReleaseFundsItem {
+            bounty_id: 15,
+            contributor: setup.contributor.clone(),
+        },
+        ReleaseFundsItem {
+            bounty_id: 16,
+            contributor: setup.contributor.clone(),
+        },
+    ];
+    assert_eq!(setup.escrow.batch_release_funds(&release_items), 2);
+
+    assert_eq!(
+        setup.escrow.get_escrow_info(&11).status,
+        EscrowStatus::Released
+    );
+    let partial = setup.escrow.get_escrow_info(&12);
+    assert_eq!(partial.status, EscrowStatus::Locked);
+    assert_eq!(partial.remaining_amount, 75);
+    assert_eq!(
+        setup.escrow.get_escrow_info(&13).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(
+        setup.escrow.get_escrow_info(&14).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(
+        setup.escrow.get_escrow_info(&15).status,
+        EscrowStatus::Released
+    );
+    assert_eq!(
+        setup.escrow.get_escrow_info(&16).status,
+        EscrowStatus::Released
+    );
 }
 
 #[test]

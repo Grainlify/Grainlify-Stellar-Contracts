@@ -100,6 +100,11 @@ The following admin operations now check governance requirements:
 - `set_paused()` - Pause/unpause operations
 - `update_fee_config()` - Fee configuration
 - `update_multisig_config()` - Multisig configuration
+- `release_funds()` - Admin-authorized full value transfer to a contributor
+- `partial_release()` - Admin-authorized partial value transfer to a contributor
+- `batch_release_funds()` - Batch admin-authorized contributor payouts
+- `refund()` - Post-deadline or approved refund transfer
+- `sweep_expired_refunds()` - Batch post-deadline refund sweep
 
 ### Governance Check Flow
 
@@ -263,6 +268,7 @@ The integration includes comprehensive tests:
    - Upgrade scenarios
    - Matching-hash approval, wrong-hash rejection, and missing-governance rejection
    - Cross-contract `bounty_escrow` + real `grainlify-core` version gates, including below-minimum rejection, at-minimum success, and numeric-encoded version checks
+   - Value-transfer gates for release, partial release, refund, expired-refund sweep, and batch release paths
 
 ### Running Tests
 

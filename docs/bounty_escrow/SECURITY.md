@@ -9,11 +9,13 @@ This document outlines the security measures implemented in the Bounty Escrow co
 - **Mechanism**: A boolean flag `ReentrancyGuard` is stored in the contract instance storage.
 - **Acquisition Timing**: To prevent the contract from being bricked, the guard is acquired *after* non-mutating validation checks (e.g., existence and status checks). This ensures that early `Err` returns (which commit state in Soroban) do not leak the guard into storage.
 - **Coverage (Bounty Escrow)**: All mutating entry points are protected, including `release_funds`, `partial_release`, `claim`, and `batch_release_funds`.
+- **Claim/partial-release transfer mitigation**: `claim` and `partial_release` acquire the same guard immediately before the external token transfer and clear it after the state/event updates complete. This blocks nested claim or release attempts during a hostile token callback.
+- **Hostile-token coverage**: `bounty_escrow/contracts/escrow/src/test_reentrancy.rs` includes a test-only SEP-41-compatible hostile token that attempts to re-enter both `claim()` and `partial_release()` from inside `transfer`. The tests assert that the attack is attempted, the nested call is blocked, and only one escrow-to-recipient transfer is executed.
 - **Coverage (Program Escrow)**: Core state-modifying functions (`lock_program_funds`, `batch_payout`, `single_payout`) are reviewed for reentrancy risks and follow checks-effects-interactions with no internal callbacks.
 - **Behavior**: If reentrancy is detected, the contract panics, reverting the transaction.
 
 ### 2. Checks-Effects-Interactions Pattern
-- **Bounty Escrow**: State updates (e.g., setting status to `Released`, `Refunded`, or `PartiallyRefunded`) are performed *before* any external token transfers in both single and batch flows.
+- **Bounty Escrow**: Value-moving paths are reviewed for external token calls. Where a path performs an external token transfer before final state/event persistence, it holds `ReentrancyGuard` across the transfer so a callback cannot consume the same escrow or claim twice. Paths that can update state before transfer should continue to prefer checks-effects-interactions when it does not break existing transaction semantics.
 - **Program Escrow**: State updates to `ProgramData` (balances and payout history) are performed before token transfers; batch flows are atomic within a single transaction.
 - **Goal**: Prevent reentrancy attacks where an external call calls back into the contract before the state is updated.
 
@@ -86,11 +88,11 @@ This document outlines the security measures implemented in the Bounty Escrow co
 
 ## Audit Checklist (Bounty Escrow)
 
-- [ ] Verify Reentrancy Guards on all state-modifying paths (`lock_funds`, `release_funds`, `refund`, `batch_lock_funds`, `batch_release_funds`).
+- [ ] Verify Reentrancy Guards on all value-moving external-transfer paths (`release_funds`, `claim`, `partial_release`, `refund`, `batch_release_funds`).
 - [ ] Verify `set_emergency_pause` is admin-gated, emits a pause event, and can both enable and clear the global pause.
 - [ ] Confirm `global_paused` blocks every value-moving path while query functions remain callable.
 - [ ] Confirm `partial_release`, claim flows, and batch variants honor the relevant granular pause flag in addition to the global pause.
-- [ ] Confirm Checks-Effects-Interactions pattern is strictly followed (state update before token transfers).
+- [ ] Confirm each external token-transfer path either follows checks-effects-interactions or holds `ReentrancyGuard` across the transfer.
 - [ ] Review Access Control logic for `release_funds` and `approve_refund` (admin only).
 - [ ] Review Access Control logic for `lock_funds` and batch locking (depositor signatures and auth aggregation).
 - [ ] Verify Arithmetic safety (overflow/underflow protection via Rust/Soroban defaults and bounds checks on remaining amounts).
@@ -99,7 +101,7 @@ This document outlines the security measures implemented in the Bounty Escrow co
    - Past deadline
    - Double release
    - Double/over-refund
-   - Reentrancy attempts across single and batch flows
+   - Reentrancy attempts across single, claim, partial release, and batch flows
 
 ## Audit Checklist (Program Escrow)
 
