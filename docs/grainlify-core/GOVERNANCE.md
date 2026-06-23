@@ -103,6 +103,61 @@ The direct single-admin `upgrade(wasm_hash)` path is a two-step schedule/execute
 
 The contract emits `upg_sch` when an upgrade is scheduled and `upg_exec` when the scheduled upgrade executes. Indexers should track these events together with the existing monitoring metrics to audit single-admin upgrade intent and execution.
 
+## Monitoring & Observability
+
+`grainlify-core` is the most security-critical contract in the system because it
+controls upgrades and governance. To give operators first-class observability,
+the contract maintains persistent metric counters for the key governance and
+upgrade operations, mirroring the metric pattern used by the escrow contracts.
+
+### Tracked Counters
+
+| Counter | Storage key | Incremented by |
+| --- | --- | --- |
+| `proposals_created` | `gov_prop` | `create_proposal` (on success) |
+| `votes_cast` | `gov_vote` | `cast_vote` (on success) |
+| `upgrades_executed` | `gov_upg` | `upgrade` and `execute_upgrade` (after the WASM update) |
+| `migrations_run` | `gov_migr` | `migrate` (once per applied migration) |
+
+All counters use **persistent** storage, so they survive contract WASM upgrades
+and accumulate over the full lifetime of the contract. Increments are saturating
+and can never wrap or panic.
+
+### Reading Counters
+
+The counters are surfaced through the existing monitoring views:
+
+- `get_analytics()` returns the operation/error metrics plus the four governance
+  counters (`proposals_created`, `votes_cast`, `upgrades_executed`,
+  `migrations_run`).
+- `get_state_snapshot()` returns the same four counters alongside the contract
+  state totals, timestamped at the current ledger.
+
+### Metric Events
+
+Every counter increment emits a `GovernanceMetric` event under the topic
+`("metric", "gov")` containing:
+
+- `metric` — a short symbol identifying the operation (`proposal`, `vote`,
+  `upgrade`, `migrate`).
+- `total` — the new running total for that counter.
+- `timestamp` — the ledger timestamp of the increment.
+
+Indexers can consume this single, consistent metric stream to chart governance
+activity without scanning full transaction history.
+
+### Security Properties
+
+- **Observational only.** Counters are written after an operation has already
+  succeeded and are never read to gate authorization or alter control flow. A
+  proposal, vote, upgrade, or migration cannot be blocked, allowed, or changed by
+  any counter value.
+- **Accurate on success only.** `create_proposal` and `cast_vote` increment their
+  counters only after the governance module accepts the operation, so rejected
+  calls (for example, double votes) are not counted.
+- **Single-count migrations.** Idempotent `migrate` re-invocations return before
+  the counter is touched, so each applied migration is counted exactly once.
+
 ## TODO / Future Enhancements
 
 - [ ] Integrate with a native Soroban token for precise `TokenWeighted` voting power.
