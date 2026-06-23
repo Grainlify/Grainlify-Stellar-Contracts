@@ -196,11 +196,9 @@ fn test_lock_funds_zero_amount_edge_case() {
     client.init(&admin, &token);
     token_admin_client.mint(&depositor, &1_000);
 
-    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
-
-    let escrow = client.get_escrow_info(&bounty_id);
-    assert_eq!(escrow.amount, 0);
-    assert_eq!(escrow.status, crate::EscrowStatus::Locked);
+    // Issue #40: zero amount is now rejected with InvalidAmount
+    let result = client.try_lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    assert_eq!(result, Err(Ok(crate::Error::InvalidAmount)));
 }
 
 #[test]

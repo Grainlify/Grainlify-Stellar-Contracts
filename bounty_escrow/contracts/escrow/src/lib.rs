@@ -7,6 +7,9 @@ mod error_recovery;
 #[cfg(test)]
 mod test_rbac;
 
+#[cfg(test)]
+mod test_deadline_amount_validation;
+
 use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
     emit_bounty_initialized, emit_funds_locked, emit_funds_refunded, emit_funds_released,
@@ -438,6 +441,7 @@ pub enum DataKey {
     ClaimWindow,          // u64 seconds (global config)
     PauseFlags,           // PauseFlags struct
     AmountPolicy, // Option<(i128, i128)> — (min_amount, max_amount) set by set_amount_policy
+    DeadlineHorizon, // Option<u64> — max seconds from now for allowed deadlines (Issue #40)
     AggregateCounters, // AggregateStats — O(1) incremental counters maintained on state transitions
 }
 
@@ -1209,6 +1213,12 @@ impl BountyEscrowContract {
             return Err(Error::BountyExists);
         }
 
+        // Validate amount is positive (Issue #40).
+        // This catches zero and negative amounts even when no AmountPolicy is set.
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
         // Enforce min/max amount policy if one has been configured (Issue #62).
         // When no policy is set this block is skipped entirely, preserving
         // backward-compatible behaviour for callers that never call set_amount_policy.
@@ -1222,6 +1232,23 @@ impl BountyEscrowContract {
             }
             if amount > max_amount {
                 return Err(Error::AmountAboveMaximum);
+            }
+        }
+
+        // Validate deadline (Issue #40):
+        // - Reject past deadlines (already expired)
+        // - Reject deadlines beyond the configurable max horizon
+        let now = env.ledger().timestamp();
+        if deadline <= now {
+            return Err(Error::InvalidDeadline);
+        }
+        if let Some(max_horizon) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::DeadlineHorizon)
+        {
+            if deadline > now.saturating_add(max_horizon) {
+                return Err(Error::InvalidDeadline);
             }
         }
 
@@ -2553,6 +2580,42 @@ impl BountyEscrowContract {
         Ok(())
     }
 
+    /// Set the maximum deadline horizon (admin only).
+    ///
+    /// When set to a positive value, `lock_funds` rejects deadlines that are more
+    /// than `max_horizon` seconds in the future. This prevents escrows with
+    /// unreachable deadlines that would lock funds forever.
+    ///
+    /// Pass `0` to clear the horizon restriction (no upper bound on deadlines).
+    pub fn set_deadline_horizon(
+        env: Env,
+        caller: Address,
+        max_horizon: u64,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+        admin.require_auth();
+
+        if max_horizon == 0 {
+            // Use u64::MAX as sentinel to indicate no horizon restriction.
+            // Soroban instance storage does not support remove().
+            env.storage()
+                .instance()
+                .set(&DataKey::DeadlineHorizon, &u64::MAX);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::DeadlineHorizon, &max_horizon);
+        }
+
+        Ok(())
+    }
+
     /// Get escrow IDs by status
     pub fn get_escrow_ids_by_status(
         env: Env,
@@ -2803,6 +2866,20 @@ impl BountyEscrowContract {
             // Validate amount
             if item.amount <= 0 {
                 return Err(Error::InvalidAmount);
+            }
+
+            // Validate deadline (Issue #40)
+            if item.deadline <= timestamp {
+                return Err(Error::InvalidDeadline);
+            }
+            if let Some(max_horizon) = env
+                .storage()
+                .instance()
+                .get::<DataKey, u64>(&DataKey::DeadlineHorizon)
+            {
+                if item.deadline > timestamp.saturating_add(max_horizon) {
+                    return Err(Error::InvalidDeadline);
+                }
             }
 
             // Check for duplicate bounty_ids in the batch
