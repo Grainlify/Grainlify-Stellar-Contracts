@@ -473,3 +473,42 @@ fn hostile_token_cannot_double_spend_partial_release_during_transfer() {
     );
     assert_eq!(hostile_token.balance(&contributor), payout_amount);
 }
+
+#[test]
+fn test_all_methods_guard_not_leaked_on_error() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    // Helper to assert guard is NOT set in storage
+    let assert_no_guard = || {
+        env.as_contract(&contract_id, || {
+            use crate::DataKey;
+            let has_guard = env.storage().instance().has(&DataKey::ReentrancyGuard);
+            assert!(!has_guard, "Reentrancy guard leaked!");
+        });
+    };
+
+    // 1. release_funds with non-existent bounty (returns Err)
+    let _ = client.try_release_funds(&999, &Address::generate(&env));
+    assert_no_guard();
+
+    // 2. claim with non-existent bounty (returns Err)
+    let _ = client.try_claim(&999);
+    assert_no_guard();
+
+    // 3. partial_release with non-existent bounty (returns Err)
+    let _ = client.try_partial_release(&999, &Address::generate(&env), &100);
+    assert_no_guard();
+
+    // 4. refund with non-existent bounty (returns Err)
+    let _ = client.try_refund(&999);
+    assert_no_guard();
+
+    // 5. batch_release_funds with empty list (returns Err)
+    let _ = client.try_batch_release_funds(&soroban_sdk::vec![&env]);
+    assert_no_guard();
+}
