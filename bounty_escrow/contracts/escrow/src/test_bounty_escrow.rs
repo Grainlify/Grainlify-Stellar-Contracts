@@ -1161,3 +1161,135 @@ fn test_one_above_maximum_boundary_rejected() {
     // 10_001 == max(10_000) + 1 → must be rejected.
     client.lock_funds(&depositor, &10, &10_001_i128, &deadline);
 }
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_past_deadline_rejected() {
+    let (env, client, _) = create_test_env();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let past_deadline = 990; // less than 1_000
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    client.lock_funds(&depositor, &100, &100_i128, &past_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_current_deadline_rejected() {
+    let (env, client, _) = create_test_env();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let current_deadline = 1_000;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    client.lock_funds(&depositor, &100, &100_i128, &current_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")] // InvalidAmount
+fn test_lock_funds_negative_amount_rejected() {
+    let (env, client, _) = create_test_env();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = 1_100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    client.lock_funds(&depositor, &100, &-100_i128, &deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_past_deadline_rejected() {
+    let (env, client, _) = create_test_env();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline_ok = 1_100;
+    let deadline_bad = 990;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    use crate::LockFundsItem;
+    let items = soroban_sdk::vec![
+        &env,
+        LockFundsItem {
+            bounty_id: 10,
+            depositor: depositor.clone(),
+            amount: 100,
+            deadline: deadline_ok,
+        },
+        LockFundsItem {
+            bounty_id: 20,
+            depositor: depositor.clone(),
+            amount: 200,
+            deadline: deadline_bad,
+        }
+    ];
+
+    client.batch_lock_funds(&items);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")] // AmountBelowMinimum
+fn test_batch_lock_funds_amount_policy_minimum_rejected() {
+    let (env, client, _) = create_test_env();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = 1_100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    use crate::LockFundsItem;
+    let items = soroban_sdk::vec![
+        &env,
+        LockFundsItem {
+            bounty_id: 10,
+            depositor: depositor.clone(),
+            amount: 150,
+            deadline,
+        },
+        LockFundsItem {
+            bounty_id: 20,
+            depositor: depositor.clone(),
+            amount: 50, // violates min of 100
+            deadline,
+        }
+    ];
+
+    client.batch_lock_funds(&items);
+}

@@ -1209,6 +1209,14 @@ impl BountyEscrowContract {
             return Err(Error::BountyExists);
         }
 
+        if amount < 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
+        }
+
         // Enforce min/max amount policy if one has been configured (Issue #62).
         // When no policy is set this block is skipped entirely, preserving
         // backward-compatible behaviour for callers that never call set_amount_policy.
@@ -2855,6 +2863,25 @@ impl BountyEscrowContract {
             // Validate amount
             if item.amount <= 0 {
                 return Err(Error::InvalidAmount);
+            }
+
+            // Validate deadline
+            if item.deadline <= timestamp {
+                return Err(Error::InvalidDeadline);
+            }
+
+            // Enforce min/max amount policy if configured
+            if let Some((min_amount, max_amount)) = env
+                .storage()
+                .instance()
+                .get::<DataKey, (i128, i128)>(&DataKey::AmountPolicy)
+            {
+                if item.amount < min_amount {
+                    return Err(Error::AmountBelowMinimum);
+                }
+                if item.amount > max_amount {
+                    return Err(Error::AmountAboveMaximum);
+                }
             }
         }
 
