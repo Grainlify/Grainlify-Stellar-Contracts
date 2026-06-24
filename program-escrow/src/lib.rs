@@ -176,6 +176,9 @@ mod test_analytics_events;
 #[cfg(test)]
 mod test_governance_integration;
 
+#[cfg(test)]
+mod test_whitelist;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
     String, Symbol, Vec,
@@ -320,6 +323,8 @@ pub enum DataKey {
     Dispute,                         // DisputeRecord (global program-level dispute)
     RecipientDispute(Address),       // recipient -> DisputeRecord
     ScheduleDispute(u64),            // schedule_id -> DisputeRecord
+    Whitelist(Address),              // recipient -> whitelisted status
+    WhitelistEnforced,               // bool -> whitelist enforcement status
 }
 
 #[contracttype]
@@ -1428,7 +1433,16 @@ impl ProgramEscrowContract {
             })
     }
 
-    pub fn set_whitelist(env: Env, _address: Address, _whitelisted: bool) {
+    /// Check if an address is whitelisted.
+    pub fn is_whitelisted(env: Env, address: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Whitelist(address))
+            .unwrap_or(false)
+    }
+
+    /// Set/unset whitelist status for an address (admin only).
+    pub fn set_whitelist(env: Env, address: Address, whitelisted: bool) {
         // Only admin can set whitelist
         let admin: Address = env
             .storage()
@@ -1436,6 +1450,42 @@ impl ProgramEscrowContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("Not initialized"));
         admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Whitelist(address.clone()), &whitelisted);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("WhiteCh"),),
+            (address, whitelisted, admin),
+        );
+    }
+
+    /// Enable or disable whitelist enforcement (admin only).
+    pub fn set_whitelist_enforced(env: Env, enabled: bool) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+
+        env.storage().instance().set(&DataKey::WhitelistEnforced, &enabled);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("WhEnf"),),
+            (enabled, admin),
+        );
+    }
+
+    /// Check if whitelist enforcement is enabled.
+    pub fn is_whitelist_enforced(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforced)
+            .unwrap_or(false)
     }
 
     // ========================================================================
@@ -1559,10 +1609,15 @@ impl ProgramEscrowContract {
             panic!("Batch size exceeds maximum allowed");
         }
 
+        let enforcement = Self::is_whitelist_enforced(env.clone());
         for recipient in recipients.iter() {
-            if Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient)) {
+            if Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient.clone())) {
                 reentrancy_guard::clear_entered(&env);
                 panic!("Dispute in progress");
+            }
+            if enforcement && !Self::is_whitelisted(env.clone(), recipient.clone()) {
+                reentrancy_guard::clear_entered(&env);
+                panic!("Recipient not whitelisted");
             }
         }
 
@@ -1726,6 +1781,12 @@ impl ProgramEscrowContract {
                 });
 
         program_data.authorized_payout_key.require_auth();
+
+        // Verify whitelist if enforcement is enabled
+        if Self::is_whitelist_enforced(env.clone()) && !Self::is_whitelisted(env.clone(), recipient.clone()) {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Recipient not whitelisted");
+        }
 
         // Validate amount
         if amount <= 0 {
