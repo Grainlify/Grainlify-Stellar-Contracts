@@ -26,7 +26,7 @@ use error_recovery::{
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
-    Symbol, Vec,
+    Map, Symbol, Vec,
 };
 
 // ==================== MONITORING MODULE ====================
@@ -1870,17 +1870,19 @@ impl BountyEscrowContract {
         Ok(escrow)
     }
 
-    fn validate_unique_bounty_ids(bounty_ids: &Vec<u64>) -> Result<(), Error> {
+    /// Validates that a list of bounty IDs contains no duplicates.
+    ///
+    /// # Complexity
+    /// - Time complexity: O(N log N) / O(N) using a single-pass scan with `Map` for duplicates,
+    ///   where N is the number of bounty IDs (bounded by `MAX_BATCH_SIZE` = 20).
+    /// - Space complexity: O(N) to store visited bounty IDs.
+    fn validate_unique_bounty_ids(env: &Env, bounty_ids: &Vec<u64>) -> Result<(), Error> {
+        let mut seen = Map::<u64, ()>::new(env);
         for bounty_id in bounty_ids.iter() {
-            let mut count = 0u32;
-            for other_id in bounty_ids.iter() {
-                if other_id == bounty_id {
-                    count += 1;
-                }
-            }
-            if count > 1 {
+            if seen.contains_key(bounty_id) {
                 return Err(Error::DuplicateBountyId);
             }
+            seen.set(bounty_id, ());
         }
         Ok(())
     }
@@ -2073,7 +2075,7 @@ impl BountyEscrowContract {
         if batch_size == 0 || batch_size > MAX_BATCH_SIZE {
             return Err(Error::InvalidBatchSize);
         }
-        Self::validate_unique_bounty_ids(&bounty_ids)?;
+        Self::validate_unique_bounty_ids(&env, &bounty_ids)?;
 
         let now = env.ledger().timestamp();
         for bounty_id in bounty_ids.iter() {
@@ -2826,6 +2828,12 @@ impl BountyEscrowContract {
         let timestamp = env.ledger().timestamp();
 
         // Validate all items before processing (all-or-nothing approach)
+        let mut bounty_ids = Vec::new(&env);
+        for item in items.iter() {
+            bounty_ids.push_back(item.bounty_id);
+        }
+        Self::validate_unique_bounty_ids(&env, &bounty_ids)?;
+
         for item in items.iter() {
             // Check if bounty already exists
             if env
@@ -2839,17 +2847,6 @@ impl BountyEscrowContract {
             // Validate amount
             if item.amount <= 0 {
                 return Err(Error::InvalidAmount);
-            }
-
-            // Check for duplicate bounty_ids in the batch
-            let mut count = 0u32;
-            for other_item in items.iter() {
-                if other_item.bounty_id == item.bounty_id {
-                    count += 1;
-                }
-            }
-            if count > 1 {
-                return Err(Error::DuplicateBountyId);
             }
         }
 
@@ -2999,6 +2996,12 @@ impl BountyEscrowContract {
         let timestamp = env.ledger().timestamp();
 
         // Validate all items before processing (all-or-nothing approach)
+        let mut bounty_ids = Vec::new(&env);
+        for item in items.iter() {
+            bounty_ids.push_back(item.bounty_id);
+        }
+        Self::validate_unique_bounty_ids(&env, &bounty_ids)?;
+
         let mut total_amount: i128 = 0;
         for item in items.iter() {
             // Check if bounty exists
@@ -3028,17 +3031,6 @@ impl BountyEscrowContract {
                 .has(&DataKey::PendingClaim(item.bounty_id))
             {
                 return Err(Error::RefundNotApproved);
-            }
-
-            // Check for duplicate bounty_ids in the batch
-            let mut count = 0u32;
-            for other_item in items.iter() {
-                if other_item.bounty_id == item.bounty_id {
-                    count += 1;
-                }
-            }
-            if count > 1 {
-                return Err(Error::DuplicateBountyId);
             }
 
             total_amount = total_amount
