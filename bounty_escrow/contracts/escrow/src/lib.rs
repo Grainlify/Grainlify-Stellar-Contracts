@@ -853,6 +853,7 @@ impl BountyEscrowContract {
         events::emit_fee_config_updated(
             &env,
             events::FeeConfigUpdated {
+                version: EVENT_VERSION_V2,
                 lock_fee_rate: fee_config.lock_fee_rate,
                 release_fee_rate: fee_config.release_fee_rate,
                 fee_recipient: fee_config.fee_recipient.clone(),
@@ -1165,6 +1166,7 @@ impl BountyEscrowContract {
         events::emit_approval_added(
             &env,
             events::ApprovalAdded {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 contributor: contributor.clone(),
                 approver,
@@ -1527,6 +1529,7 @@ impl BountyEscrowContract {
         env.events().publish(
             (symbol_short!("claim"), symbol_short!("created")),
             ClaimCreated {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient,
                 amount: escrow.remaining_amount,
@@ -1611,6 +1614,7 @@ impl BountyEscrowContract {
         env.events().publish(
             (symbol_short!("claim"), symbol_short!("done")),
             ClaimExecuted {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient: claim.recipient.clone(),
                 amount: claim.amount,
@@ -1660,6 +1664,7 @@ impl BountyEscrowContract {
         env.events().publish(
             (symbol_short!("claim"), symbol_short!("cancel")),
             ClaimCancelled {
+                version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient: claim.recipient,
                 amount: claim.amount,
@@ -2969,6 +2974,7 @@ impl BountyEscrowContract {
         emit_batch_funds_locked(
             &env,
             BatchFundsLocked {
+                version: EVENT_VERSION_V2,
                 count: locked_count,
                 total_amount: items.iter().map(|i| i.amount).sum(),
                 timestamp,
@@ -3117,6 +3123,7 @@ impl BountyEscrowContract {
         emit_batch_funds_released(
             &env,
             BatchFundsReleased {
+                version: EVENT_VERSION_V2,
                 count: released_count,
                 total_amount,
                 timestamp,
