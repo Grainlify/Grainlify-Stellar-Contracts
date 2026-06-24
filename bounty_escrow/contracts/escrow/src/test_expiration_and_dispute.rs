@@ -677,3 +677,18 @@ fn test_claim_cancellation_restores_refund_eligibility() {
 
     assert_eq!(setup.token.balance(&setup.depositor), 10_000_000);
 }
+
+#[test]
+fn test_sweep_expired_refunds_duplicate_bounty_ids() {
+    let setup = TestSetup::new();
+    
+    // Duplicate bounty_ids in sweep request should fail with DuplicateBountyId
+    let ids = vec![&setup.env, 10_u64, 20_u64, 10_u64];
+    let result = try_sweep_direct(&setup, ids);
+    assert_eq!(result, Err(Error::DuplicateBountyId));
+
+    // Adjacent duplicate
+    let ids_adj = vec![&setup.env, 10_u64, 10_u64, 20_u64];
+    let result_adj = try_sweep_direct(&setup, ids_adj);
+    assert_eq!(result_adj, Err(Error::DuplicateBountyId));
+}
