@@ -1373,6 +1373,8 @@ impl BountyEscrowContract {
             return Err(Error::FundsNotLocked);
         }
 
+        let release_amount = escrow.remaining_amount;
+
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
 
@@ -1380,7 +1382,7 @@ impl BountyEscrowContract {
         client.transfer(
             &env.current_contract_address(),
             &contributor,
-            &escrow.amount,
+            &release_amount,
         );
 
         escrow.status = EscrowStatus::Released;
@@ -1394,10 +1396,10 @@ impl BountyEscrowContract {
         let timestamp = env.ledger().timestamp();
 
         // Update analytics
-        update_analytics_on_release(&env, bounty_id, escrow.amount, timestamp);
+        update_analytics_on_release(&env, bounty_id, release_amount, timestamp);
 
         // Update incremental aggregate counters
-        Self::transition_locked_to_released(&env, escrow.amount);
+        Self::transition_locked_to_released(&env, release_amount);
 
         // Emit state transition event
         emit_bounty_state_transitioned(
@@ -1407,7 +1409,7 @@ impl BountyEscrowContract {
                 bounty_id,
                 previous_state: symbol_short!("locked"),
                 new_state: symbol_short!("released"),
-                amount: escrow.amount,
+                amount: release_amount,
                 actor: admin.clone(),
                 timestamp,
             },
@@ -1420,7 +1422,7 @@ impl BountyEscrowContract {
                 version: analytics::ANALYTICS_VERSION_V1,
                 bounty_id,
                 activity_type: symbol_short!("released"),
-                amount: escrow.amount,
+                amount: release_amount,
                 timestamp,
             },
         );
@@ -1430,7 +1432,7 @@ impl BountyEscrowContract {
             FundsReleased {
                 version: EVENT_VERSION_V2,
                 bounty_id,
-                amount: escrow.amount,
+                amount: release_amount,
                 recipient: contributor.clone(),
                 timestamp,
             },
@@ -1505,7 +1507,7 @@ impl BountyEscrowContract {
         let claim = ClaimRecord {
             bounty_id,
             recipient: recipient.clone(),
-            amount: escrow.amount,
+            amount: escrow.remaining_amount,
             expires_at: now.saturating_add(claim_window),
             claimed: false,
         };
@@ -1519,7 +1521,7 @@ impl BountyEscrowContract {
             ClaimCreated {
                 bounty_id,
                 recipient,
-                amount: escrow.amount,
+                amount: escrow.remaining_amount,
                 expires_at: claim.expires_at,
             },
         );
@@ -2523,19 +2525,25 @@ impl BountyEscrowContract {
                 .persistent()
                 .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
             {
+                let mut escrow_refunded_amount = 0;
+                for record in escrow.refund_history.iter() {
+                    escrow_refunded_amount += record.amount;
+                }
+
+                let escrow_released_amount = escrow.amount - escrow.remaining_amount - escrow_refunded_amount;
+
+                stats.total_released += escrow_released_amount;
+                stats.total_refunded += escrow_refunded_amount;
+
                 match escrow.status {
                     EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
                         stats.total_locked += escrow.remaining_amount;
                         stats.count_locked += 1;
                     }
                     EscrowStatus::Released => {
-                        stats.total_released += escrow.amount;
                         stats.count_released += 1;
                     }
                     EscrowStatus::Refunded => {
-                        // For refunded, we count the original amount in total_refunded
-                        // The actual refund amounts are tracked in refund_history
-                        stats.total_refunded += escrow.amount;
                         stats.count_refunded += 1;
                     }
                 }
@@ -3034,7 +3042,7 @@ impl BountyEscrowContract {
             }
 
             total_amount = total_amount
-                .checked_add(escrow.amount)
+                .checked_add(escrow.remaining_amount)
                 .ok_or(Error::InvalidAmount)?;
         }
 
@@ -3046,10 +3054,11 @@ impl BountyEscrowContract {
                 .persistent()
                 .get(&DataKey::Escrow(item.bounty_id))
                 .unwrap();
+            let release_amount = escrow.remaining_amount;
             Self::bump_escrow_ttl(&env, item.bounty_id);
 
             // Transfer funds to contributor
-            client.transfer(&contract_address, &item.contributor, &escrow.amount);
+            client.transfer(&contract_address, &item.contributor, &release_amount);
 
             // Update escrow status; zero remaining_amount to maintain invariant.
             escrow.status = EscrowStatus::Released;
@@ -3060,7 +3069,7 @@ impl BountyEscrowContract {
             Self::bump_escrow_ttl(&env, item.bounty_id);
 
             // Update incremental aggregate counters
-            Self::transition_locked_to_released(&env, escrow.amount);
+            Self::transition_locked_to_released(&env, release_amount);
 
             // Emit individual event for each released bounty
             emit_funds_released(
@@ -3068,7 +3077,7 @@ impl BountyEscrowContract {
                 FundsReleased {
                     version: EVENT_VERSION_V2,
                     bounty_id: item.bounty_id,
-                    amount: escrow.amount,
+                    amount: release_amount,
                     recipient: item.contributor.clone(),
                     timestamp,
                 },

@@ -172,24 +172,27 @@ fn assert_invariants(
         let actual_status = escrow.status.clone();
         prop_assert_eq!(actual_status, expected_status(expected.status));
 
+        let mut escrow_refunded_amount = 0;
+        for record in escrow.refund_history.iter() {
+            escrow_refunded_amount += record.amount;
+        }
+
+        let escrow_released_amount = escrow.amount - escrow.remaining_amount - escrow_refunded_amount;
+
+        stats_released += escrow_released_amount;
+        stats_refunded += escrow_refunded_amount;
+
         match escrow.status {
-            EscrowStatus::Locked => {
+            EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
                 count_locked += 1;
-                stats_locked += escrow.amount;
+                stats_locked += escrow.remaining_amount;
                 active_contract_balance += escrow.remaining_amount;
             }
             EscrowStatus::Released => {
                 count_released += 1;
-                stats_released += escrow.amount;
             }
             EscrowStatus::Refunded => {
                 count_refunded += 1;
-                stats_refunded += escrow.amount;
-            }
-            EscrowStatus::PartiallyRefunded => {
-                count_refunded += 1;
-                stats_refunded += escrow.amount;
-                active_contract_balance += escrow.remaining_amount;
             }
         }
     }
