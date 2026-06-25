@@ -3405,3 +3405,6 @@ mod test_circuit_breaker_integration;
 
 #[cfg(test)]
 mod test_balance_invariant;
+
+#[cfg(test)]
+mod proptest_schedules;
