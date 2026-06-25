@@ -165,12 +165,59 @@ export interface FeeConfig {
 
 /** Pause switches for bounty escrow operations. */
 export interface PauseFlags {
+  /** Whether operations are globally paused. */
+  global_paused: boolean;
   /** Whether lock operations are paused. */
   lock_paused: boolean;
   /** Whether release operations are paused. */
   release_paused: boolean;
   /** Whether refund operations are paused. */
   refund_paused: boolean;
+}
+
+/** Multisig configuration on the bounty escrow contract. */
+export interface MultisigConfig {
+  /** The threshold amount above which releases require multisig approvals. */
+  threshold_amount: bigint;
+  /** Addresses authorized to approve large releases. */
+  signers: string[];
+  /** Minimum number of required signatures from signers. */
+  required_signatures: number;
+}
+
+/** Configuration thresholds for the circuit breaker. */
+export interface CircuitBreakerConfig {
+  /** Consecutive failures before opening the circuit. */
+  failure_threshold: number;
+  /** Consecutive successes in HalfOpen state before closing the circuit. */
+  success_threshold: number;
+  /** Maximum number of records to retain in the error log. */
+  max_error_log: number;
+}
+
+/** Error log record stored by the circuit breaker. */
+export interface ErrorEntry {
+  /** Symbol identifying the operation that failed. */
+  operation: string;
+  /** Error code or description. */
+  error_code: number;
+  /** Unix timestamp when the error occurred. */
+  timestamp: number;
+}
+
+/** Status values for the circuit breaker. */
+export type CircuitState = 'Closed' | 'Open' | 'HalfOpen';
+
+/** Current operational status of the circuit breaker. */
+export interface CircuitBreakerStatus {
+  /** Current state of the circuit breaker. */
+  state: CircuitState;
+  /** Number of consecutive failures in Closed state. */
+  consecutive_failures: number;
+  /** Number of consecutive successes in HalfOpen state. */
+  consecutive_successes: number;
+  /** Unix timestamp when the state last transitioned. */
+  last_state_change: number;
 }
 
 /**
@@ -693,6 +740,406 @@ export class BountyEscrowClient {
     try {
       const result = await this.invokeContract('get_pause_flags', []);
       return result as PauseFlags;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Update fee configuration. Admin-only.
+   * @param lockFeeRate Optional lock fee rate in basis points.
+   * @param releaseFeeRate Optional release fee rate in basis points.
+   * @param feeRecipient Optional Stellar address of the fee recipient.
+   * @param feeEnabled Optional boolean to enable/disable fees.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async updateFeeConfig(
+    lockFeeRate: bigint | null,
+    releaseFeeRate: bigint | null,
+    feeRecipient: string | null,
+    feeEnabled: boolean | null,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    if (feeRecipient) {
+      this.validateAddress(feeRecipient, 'feeRecipient');
+    }
+    if (lockFeeRate !== null && (lockFeeRate < 0n || lockFeeRate > 10000n)) {
+      throw new ValidationError('Lock fee rate must be between 0 and 10000 basis points', 'lockFeeRate');
+    }
+    if (releaseFeeRate !== null && (releaseFeeRate < 0n || releaseFeeRate > 10000n)) {
+      throw new ValidationError('Release fee rate must be between 0 and 10000 basis points', 'releaseFeeRate');
+    }
+
+    try {
+      await this.invokeContract(
+        'update_fee_config',
+        [lockFeeRate, releaseFeeRate, feeRecipient, feeEnabled],
+        sourceKeypair
+      );
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Update pause flags. Admin-only.
+   * @param lock Optional boolean to pause lock operations.
+   * @param release Optional boolean to pause release operations.
+   * @param refund Optional boolean to pause refund operations.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setPaused(
+    lock: boolean | null,
+    release: boolean | null,
+    refund: boolean | null,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    try {
+      await this.invokeContract('set_paused', [lock, release, refund], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Set the emergency pause switch. Admin-only.
+   * @param paused Boolean indicating whether contract is globally paused.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setEmergencyPause(
+    paused: boolean,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    try {
+      await this.invokeContract('set_emergency_pause', [paused], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Set the governance contract address. Admin-only.
+   * @param governanceAddr Stellar address of the governance contract.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setGovernanceContract(
+    governanceAddr: string,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(governanceAddr, 'governanceAddr');
+    try {
+      await this.invokeContract('set_governance_contract', [governanceAddr], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the governance contract address.
+   * @returns Governance contract address or null if not set.
+   */
+  async getGovernanceContract(): Promise<string | null> {
+    try {
+      const result = await this.invokeContract('get_governance_contract', []);
+      return result as string | null;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Set the minimum required governance version. Admin-only.
+   * @param minVersion Minimum required version number.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setMinGovernanceVersion(
+    minVersion: number,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    if (!Number.isInteger(minVersion) || minVersion < 0) {
+      throw new ValidationError('Min version must be a non-negative integer', 'minVersion');
+    }
+    try {
+      await this.invokeContract('set_min_governance_version', [minVersion], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the minimum required governance version.
+   * @returns Minimum required version number.
+   */
+  async getMinGovernanceVersion(): Promise<number> {
+    try {
+      const result = await this.invokeContract('get_min_governance_version', []);
+      return Number(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Set the circuit breaker admin address. Admin-only.
+   * @param admin Stellar address of the circuit breaker admin.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setCircuitBreakerAdmin(
+    admin: string,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(admin, 'admin');
+    try {
+      await this.invokeContract('set_circuit_breaker_admin', [admin], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the circuit breaker admin address.
+   * @returns Circuit breaker admin address or null if not set.
+   */
+  async getCircuitBreakerAdmin(): Promise<string | null> {
+    try {
+      const result = await this.invokeContract('get_circuit_breaker_admin', []);
+      return result as string | null;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Configure circuit breaker threshold parameters. Admin-only.
+   * @param failureThreshold Number of failures before tripping circuit.
+   * @param successThreshold Number of successes to close circuit from half-open.
+   * @param maxErrorLog Max length of error log history.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setCircuitBreakerConfig(
+    failureThreshold: number,
+    successThreshold: number,
+    maxErrorLog: number,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    if (!Number.isInteger(failureThreshold) || failureThreshold <= 0) {
+      throw new ValidationError('Failure threshold must be a positive integer', 'failureThreshold');
+    }
+    if (!Number.isInteger(successThreshold) || successThreshold <= 0) {
+      throw new ValidationError('Success threshold must be a positive integer', 'successThreshold');
+    }
+    if (!Number.isInteger(maxErrorLog) || maxErrorLog < 0) {
+      throw new ValidationError('Max error log must be a non-negative integer', 'maxErrorLog');
+    }
+    try {
+      await this.invokeContract(
+        'set_circuit_breaker_config',
+        [failureThreshold, successThreshold, maxErrorLog],
+        sourceKeypair
+      );
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the current circuit breaker configuration.
+   * @returns Config details including thresholds.
+   */
+  async getCircuitBreakerConfig(): Promise<CircuitBreakerConfig> {
+    try {
+      const result = await this.invokeContract('get_circuit_breaker_config', []);
+      return result as CircuitBreakerConfig;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get current operational status of the circuit breaker.
+   * @returns Current state and counter details.
+   */
+  async getCircuitBreakerStatus(): Promise<CircuitBreakerStatus> {
+    try {
+      const result = await this.invokeContract('get_circuit_breaker_status', []);
+      return result as CircuitBreakerStatus;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Reset the circuit breaker. Circuit breaker admin-only.
+   * @param admin Stellar address of the circuit breaker admin executing the reset.
+   * @param sourceKeypair Signing keypair of the circuit breaker admin.
+   */
+  async resetCircuit(
+    admin: string,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(admin, 'admin');
+    try {
+      await this.invokeContract('reset_circuit', [admin], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the error log recorded by the circuit breaker.
+   * @returns List of failure entries.
+   */
+  async getCircuitErrorLog(): Promise<ErrorEntry[]> {
+    try {
+      const result = await this.invokeContract('get_circuit_error_log', []);
+      return result as ErrorEntry[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Update the multisig configuration thresholds and signers. Admin-only.
+   * @param thresholdAmount Minimum amount requiring multisig approval.
+   * @param signers Array of authorized signer Stellar addresses.
+   * @param requiredSignatures Minimum number of approvals required.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async updateMultisigConfig(
+    thresholdAmount: bigint,
+    signers: string[],
+    requiredSignatures: number,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    if (thresholdAmount < 0n) {
+      throw new ValidationError('Threshold amount cannot be negative', 'thresholdAmount');
+    }
+    if (!Number.isInteger(requiredSignatures) || requiredSignatures < 0) {
+      throw new ValidationError('Required signatures must be a non-negative integer', 'requiredSignatures');
+    }
+    if (requiredSignatures > signers.length) {
+      throw new ValidationError('Required signatures cannot exceed the number of signers', 'requiredSignatures');
+    }
+    for (let i = 0; i < signers.length; i++) {
+      this.validateAddress(signers[i], `signers[${i}]`);
+    }
+    try {
+      await this.invokeContract(
+        'update_multisig_config',
+        [thresholdAmount, signers, requiredSignatures],
+        sourceKeypair
+      );
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get current multisig configuration.
+   * @returns Current threshold amount and signers.
+   */
+  async getMultisigConfig(): Promise<MultisigConfig> {
+    try {
+      const result = await this.invokeContract('get_multisig_config', []);
+      return result as MultisigConfig;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Approve a release that exceeds the multisig threshold amount. Signer-only.
+   * @param bountyId Application-level bounty identifier.
+   * @param contributor Stellar address of the contributor receiving released funds.
+   * @param approver Stellar address of the signer giving approval.
+   * @param sourceKeypair Signing keypair of the approver.
+   */
+  async approveLargeRelease(
+    bountyId: bigint,
+    contributor: string,
+    approver: string,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(contributor, 'contributor');
+    this.validateAddress(approver, 'approver');
+    try {
+      await this.invokeContract('approve_large_release', [bountyId, contributor, approver], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Configure minimum/maximum lock amount limits. Admin-only.
+   * @param caller Stellar address of the admin caller.
+   * @param minAmount Minimum lock amount allowed.
+   * @param maxAmount Maximum lock amount allowed.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setAmountPolicy(
+    caller: string,
+    minAmount: bigint,
+    maxAmount: bigint,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(caller, 'caller');
+    if (minAmount < 0n) {
+      throw new ValidationError('Min amount cannot be negative', 'minAmount');
+    }
+    if (maxAmount < minAmount) {
+      throw new ValidationError('Max amount cannot be less than min amount', 'maxAmount');
+    }
+    try {
+      await this.invokeContract('set_amount_policy', [caller, minAmount, maxAmount], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Set the anti-abuse admin address. Admin-only.
+   * @param admin Stellar address of the anti-abuse admin.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setAntiAbuseAdmin(
+    admin: string,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(admin, 'admin');
+    try {
+      await this.invokeContract('set_anti_abuse_admin', [admin], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the anti-abuse admin address.
+   * @returns Anti-abuse admin address or null if not set.
+   */
+  async getAntiAbuseAdmin(): Promise<string | null> {
+    try {
+      const result = await this.invokeContract('get_anti_abuse_admin', []);
+      return result as string | null;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Set whitelist status for an address. Admin-only.
+   * @param whitelistedAddress Stellar address to update.
+   * @param whitelisted Boolean whitelist status.
+   * @param sourceKeypair Signing keypair of the admin.
+   */
+  async setWhitelist(
+    whitelistedAddress: string,
+    whitelisted: boolean,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(whitelistedAddress, 'whitelistedAddress');
+    try {
+      await this.invokeContract('set_whitelist', [whitelistedAddress, whitelisted], sourceKeypair);
     } catch (error) {
       throw this.handleError(error);
     }
