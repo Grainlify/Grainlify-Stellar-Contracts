@@ -182,9 +182,76 @@ validate_inputs() {
 
     # Check contract ID
     if [[ -z "$CONTRACT_ID" ]]; then
-        log_error "No contract ID specified"
-        echo "Usage: $0 <contract_id> [options]"
+        log_error "No contract ID or contract name specified"
+        echo "Usage: $0 <contract_id|contract_name> [options]"
         exit 2
+    fi
+
+    local registry_file="${PROJECT_ROOT}/deployments/${NETWORK}.json"
+
+    # If it is a contract name (does not match contract ID format)
+    if [[ ! "$CONTRACT_ID" =~ ^C[A-Z0-9]{55}$ ]]; then
+        local contract_name="$CONTRACT_ID"
+        if [[ "$OUTPUT_JSON" != "true" ]]; then
+            log_info "Input matches contract name format. Resolving from registry..."
+        fi
+        
+        if [[ ! -f "$registry_file" ]]; then
+            log_error "Registry file not found at: $registry_file. Cannot resolve contract name '$contract_name'."
+            exit 1
+        fi
+        
+        # Resolve ID from registry
+        local resolved_id
+        resolved_id=$(jq -r --arg name "$contract_name" '
+            .deployments
+            | map(select(.contract_name == $name))
+            | sort_by(.deployed_at, .timestamp)
+            | last
+            | .contract_id // empty
+        ' "$registry_file")
+        
+        if [[ -z "$resolved_id" ]]; then
+            log_error "Contract name '$contract_name' not found in registry: $registry_file"
+            exit 1
+        fi
+        
+        if [[ "$OUTPUT_JSON" != "true" ]]; then
+            log_info "Resolved contract name '$contract_name' to ID: $resolved_id"
+        fi
+        CONTRACT_ID="$resolved_id"
+    fi
+
+    # If expected WASM or hash is not specified, resolve expected hash from registry
+    if [[ -z "$EXPECTED_WASM_PATH" && -z "$EXPECTED_WASM_HASH" ]]; then
+        if [[ -f "$registry_file" ]]; then
+            if [[ "$OUTPUT_JSON" != "true" ]]; then
+                log_info "No expected WASM or hash specified. Resolving expected hash from registry..."
+            fi
+            local resolved_hash
+            resolved_hash=$(jq -r --arg id "$CONTRACT_ID" '
+                .deployments
+                | map(select(.contract_id == $id))
+                | sort_by(.deployed_at, .timestamp)
+                | last
+                | .wasm_hash // empty
+            ' "$registry_file")
+            
+            if [[ -n "$resolved_hash" ]]; then
+                EXPECTED_WASM_HASH="$resolved_hash"
+                if [[ "$OUTPUT_JSON" != "true" ]]; then
+                    log_info "Resolved expected WASM hash from registry: $EXPECTED_WASM_HASH"
+                fi
+            else
+                if [[ "$OUTPUT_JSON" != "true" ]]; then
+                    log_warn "Contract ID '$CONTRACT_ID' not found in registry. Cannot resolve expected hash."
+                fi
+            fi
+        else
+            if [[ "$OUTPUT_JSON" != "true" ]]; then
+                log_warn "Registry file not found at: $registry_file. Cannot resolve expected hash."
+            fi
+        fi
     fi
 
     # Basic format validation
@@ -694,8 +761,8 @@ perform_verification() {
 
 main() {
     parse_args "$@"
-    validate_inputs
     load_verify_config
+    validate_inputs
     perform_verification
 }
 

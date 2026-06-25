@@ -415,7 +415,7 @@ deploy_contract() {
 
     # Record deployment
     log_info "Recording deployment..."
-    append_to_registry "$DEPLOYMENT_LOG" "$contract_id" "$wasm_hash" "$CONTRACT_NAME"
+    append_to_registry "$DEPLOYMENT_LOG" "$contract_id" "$wasm_hash" "$CONTRACT_NAME" "$WASM_FILE"
 
     # Summary
     log_section "Deployment Complete"

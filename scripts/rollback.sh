@@ -166,25 +166,70 @@ validate_inputs() {
 
     # Check contract ID
     if [[ -z "$CONTRACT_ID" ]]; then
-        log_error "No contract ID specified"
-        echo "Usage: $0 <contract_id> <previous_wasm_hash> [options]"
+        log_error "No contract ID or contract name specified"
+        echo "Usage: $0 <contract_id|contract_name> [previous_wasm_hash] [options]"
         exit 1
     fi
 
+    local registry_file="${PROJECT_ROOT}/deployments/${NETWORK}.json"
+
+    # If it is a contract name (does not match contract ID format)
     if [[ ! "$CONTRACT_ID" =~ ^C[A-Z0-9]{55}$ ]]; then
-        log_warn "Contract ID format may be invalid: $CONTRACT_ID"
+        local contract_name="$CONTRACT_ID"
+        log_info "Input matches contract name format. Resolving from registry..."
+        
+        if [[ ! -f "$registry_file" ]]; then
+            log_error "Registry file not found at: $registry_file. Cannot resolve contract name '$contract_name'."
+            exit 1
+        fi
+        
+        # Resolve ID from registry
+        local resolved_id
+        resolved_id=$(jq -r --arg name "$contract_name" '
+            .deployments
+            | map(select(.contract_name == $name))
+            | sort_by(.deployed_at, .timestamp)
+            | last
+            | .contract_id // empty
+        ' "$registry_file")
+        
+        if [[ -z "$resolved_id" ]]; then
+            log_error "Contract name '$contract_name' not found in registry: $registry_file"
+            exit 1
+        fi
+        
+        log_info "Resolved contract name '$contract_name' to ID: $resolved_id"
+        CONTRACT_ID="$resolved_id"
     fi
 
     log_info "Contract ID: $CONTRACT_ID"
 
     # Check WASM hash
     if [[ -z "$PREVIOUS_WASM_HASH" ]]; then
-        log_error "No previous WASM hash specified"
-        echo ""
-        echo "To find previous WASM hashes, check:"
-        echo "  - deployments/upgrades.json (old_wasm_hash field)"
-        echo "  - deployments/${NETWORK}.json (wasm_hash field)"
-        exit 1
+        log_info "No previous WASM hash specified. Attempting to automatically read from registry..."
+        
+        if [[ ! -f "$registry_file" ]]; then
+            log_error "Registry file not found at: $registry_file. Cannot automatically resolve previous WASM hash."
+            exit 1
+        fi
+        
+        # Read the second-to-last (.[-2]) wasm_hash for this contract
+        local auto_hash
+        auto_hash=$(jq -r --arg id "$CONTRACT_ID" '
+            .deployments
+            | map(select(.contract_id == $id))
+            | sort_by(.deployed_at, .timestamp)
+            | .[-2].wasm_hash // empty
+        ' "$registry_file")
+        
+        if [[ -z "$auto_hash" ]]; then
+            log_error "Could not retrieve previous WASM hash (second to last) from registry for contract $CONTRACT_ID."
+            log_error "Ensure there are at least two deployments recorded in '$registry_file' for this contract."
+            exit 1
+        fi
+        
+        PREVIOUS_WASM_HASH="$auto_hash"
+        log_info "Automatically resolved previous WASM hash from registry: $PREVIOUS_WASM_HASH"
     fi
 
     # Basic WASM hash format validation (64 hex chars)
@@ -246,9 +291,11 @@ load_rollback_config() {
     : "${CLI_TIMEOUT:=120}"
 
     ROLLBACK_LOG="${PROJECT_ROOT}/deployments/rollbacks.json"
+    DEPLOYMENT_LOG="${PROJECT_ROOT}/deployments/${NETWORK}.json"
 
     export SOROBAN_RPC_URL
     export SOROBAN_NETWORK
+    export DEPLOYMENT_LOG
 
     log_info "RPC URL: $SOROBAN_RPC_URL"
     log_info "Network: $SOROBAN_NETWORK"
@@ -435,6 +482,22 @@ perform_rollback() {
     # Record the rollback
     record_rollback "$CONTRACT_ID" "$PREVIOUS_WASM_HASH"
 
+    # Also record the rolled-back deployment in the main registry
+    local registry_file="${PROJECT_ROOT}/deployments/${NETWORK}.json"
+    local contract_name
+    contract_name=$(jq -r --arg id "$CONTRACT_ID" '
+        .deployments
+        | map(select(.contract_id == $id))
+        | last
+        | .contract_name // empty
+    ' "$registry_file" 2>/dev/null || echo "unknown")
+    if [[ -z "$contract_name" || "$contract_name" == "null" ]]; then
+        contract_name="unknown"
+    fi
+
+    log_info "Recording rolled-back version to deployment registry..."
+    append_to_registry "$DEPLOYMENT_LOG" "$CONTRACT_ID" "$PREVIOUS_WASM_HASH" "$contract_name"
+
     # Post-rollback summary
     log_section "Rollback Complete"
     echo ""
@@ -462,8 +525,8 @@ main() {
     log_info "Started at $(get_timestamp)"
 
     parse_args "$@"
-    validate_inputs
     load_rollback_config
+    validate_inputs
     preflight_checks
     perform_rollback
 

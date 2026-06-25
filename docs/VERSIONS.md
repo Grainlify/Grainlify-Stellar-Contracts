@@ -112,6 +112,10 @@ assert_eq!(contract.get_version(&env), 20000);
 
 - 2.0.0 (core): Require explicit migration; introduce MigrationState recording as hard requirement for post-2.x features.
 
+## Deployment Registry Versioning
+
+Starting from script tooling version `1.1.0`, a machine-readable deployment registry is maintained under `deployments/<network>.json` to track contract metadata (contract name, ID, WASM hash, SDK version, deployer, and timestamp) for automated verification and rollback tools.
+
 ## Notes
 
 - WASM hashes should be recorded post-deploy in this document under the appropriate version row when known.

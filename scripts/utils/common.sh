@@ -316,13 +316,78 @@ init_registry() {
     log_debug "Registry ready: $registry_file"
 }
 
+# Get the Soroban SDK version from Cargo.toml or Cargo.lock
+# Usage: get_soroban_sdk_version "path/to/contract.wasm"
+get_soroban_sdk_version() {
+    local wasm_path="${1:-}"
+    
+    if [[ -n "$wasm_path" ]]; then
+        # Find Cargo.toml by going up from the WASM path
+        local dir
+        dir=$(dirname "$wasm_path")
+        while [[ "$dir" != "/" && "$dir" != "." ]]; do
+            if [[ -f "$dir/Cargo.toml" ]]; then
+                # Parse soroban-sdk version from Cargo.toml
+                # Look for lines like: soroban-sdk = "..." or soroban-sdk = { version = "..." }
+                local sdk_ver
+                sdk_ver=$(grep -E '^[[:space:]]*soroban-sdk[[:space:]]*=' "$dir/Cargo.toml" | head -n 1 | cut -d'=' -f2 | xargs | tr -d '"' | tr -d "'" || true)
+                if [[ -n "$sdk_ver" ]]; then
+                    # If it's a table like { version = "21.0.0" }
+                    if [[ "$sdk_ver" =~ "version" ]]; then
+                        sdk_ver=$(echo "$sdk_ver" | grep -oE 'version[[:space:]]*=[[:space:]]*"[^"]+"' | cut -d'"' -f2 || true)
+                    fi
+                    if [[ -n "$sdk_ver" ]]; then
+                        echo "$sdk_ver"
+                        return 0
+                    fi
+                fi
+            fi
+            dir=$(dirname "$dir")
+        done
+    fi
+    
+    # Fallback to search any Cargo.toml or Cargo.lock in project
+    local project_root
+    project_root=$(get_project_root)
+    
+    # Find Cargo.lock files
+    local lock_file
+    for lock_file in $(find "$project_root" -maxdepth 3 -name "Cargo.lock" 2>/dev/null); do
+        local lock_ver
+        lock_ver=$(grep -A 2 'name = "soroban-sdk"' "$lock_file" | grep 'version =' | head -n 1 | cut -d'=' -f2 | xargs | tr -d '"' || true)
+        if [[ -n "$lock_ver" ]]; then
+            echo "$lock_ver"
+            return 0
+        fi
+    done
+    
+    # Check all Cargo.toml files
+    local toml_file
+    for toml_file in $(find "$project_root" -maxdepth 3 -name "Cargo.toml" 2>/dev/null); do
+        local sdk_ver
+        sdk_ver=$(grep -E '^[[:space:]]*soroban-sdk[[:space:]]*=' "$toml_file" | head -n 1 | cut -d'=' -f2 | xargs | tr -d '"' | tr -d "'" || true)
+        if [[ -n "$sdk_ver" ]]; then
+            if [[ "$sdk_ver" =~ "version" ]]; then
+                sdk_ver=$(echo "$sdk_ver" | grep -oE 'version[[:space:]]*=[[:space:]]*"[^"]+"' | cut -d'"' -f2 || true)
+            fi
+            if [[ -n "$sdk_ver" ]]; then
+                echo "$sdk_ver"
+                return 0
+            fi
+        fi
+    done
+
+    echo "21.0.0"  # Default fallback to the known SDK version in the repository
+}
+
 # Append a deployment record to the registry
-# Usage: append_to_registry "deployments/testnet.json" "contract_id" "wasm_hash" "contract_name"
+# Usage: append_to_registry "deployments/testnet.json" "contract_id" "wasm_hash" "contract_name" ["wasm_file"]
 append_to_registry() {
     local registry_file="$1"
     local contract_id="$2"
     local wasm_hash="$3"
     local contract_name="${4:-unknown}"
+    local wasm_file="${5:-}"
     local network="${SOROBAN_NETWORK:-unknown}"
     local deployer="${DEPLOYER_IDENTITY:-unknown}"
 
@@ -330,6 +395,9 @@ append_to_registry() {
 
     local timestamp
     timestamp=$(get_timestamp)
+
+    local soroban_sdk
+    soroban_sdk=$(get_soroban_sdk_version "$wasm_file")
 
     # Create the new deployment record
     local new_record
@@ -340,12 +408,15 @@ append_to_registry() {
         --arg network "$network" \
         --arg deployer "$deployer" \
         --arg timestamp "$timestamp" \
+        --arg sdk "$soroban_sdk" \
         '{
+            contract_name: $name,
             contract_id: $id,
             wasm_hash: $hash,
-            contract_name: $name,
-            network: $network,
+            soroban_sdk: $sdk,
             deployer: $deployer,
+            timestamp: $timestamp,
+            network: $network,
             deployed_at: $timestamp,
             status: "deployed"
         }')

@@ -234,14 +234,17 @@ load_upgrade_config() {
 
     # Set upgrade log location
     UPGRADE_LOG="${PROJECT_ROOT}/deployments/upgrades.json"
+    DEPLOYMENT_LOG="${PROJECT_ROOT}/deployments/${NETWORK}.json"
 
     export SOROBAN_RPC_URL
     export SOROBAN_NETWORK
+    export DEPLOYMENT_LOG
 
     log_info "RPC URL: $SOROBAN_RPC_URL"
     log_info "Network: $SOROBAN_NETWORK"
     log_info "Source: $DEPLOYER_IDENTITY"
     log_info "Upgrade Log: $UPGRADE_LOG"
+    log_info "Deployment Log: $DEPLOYMENT_LOG"
 
     log_success "Configuration loaded"
 }
@@ -339,7 +342,11 @@ record_upgrade() {
     jq --argjson record "$record" '.upgrades += [$record]' "$UPGRADE_LOG" > "$temp_file"
     mv "$temp_file" "$UPGRADE_LOG"
 
-    log_success "Upgrade recorded to registry"
+    log_success "Upgrade recorded to upgrade registry"
+
+    # Also record to main deployment registry
+    log_info "Recording upgrade in deployment registry..."
+    append_to_registry "$DEPLOYMENT_LOG" "$contract_id" "$new_wasm_hash" "$contract_name" "$wasm_file"
 }
 
 # ------------------------------------------------------------------------------

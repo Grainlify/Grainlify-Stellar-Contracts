@@ -258,13 +258,14 @@ Upgrades an existing contract to a new WASM version.
 
 Checks if a deployed contract is healthy and responsive. When
 `--expected-wasm` or `--expected-wasm-hash` is provided, it reads the deployed
-WASM hash with `stellar contract info hash --contract-id` and compares it with
-the expected artifact or hash.
+WASM hash and compares it with the expected artifact or hash.
+
+If no expected WASM or hash is provided, the script automatically resolves the expected WASM hash from the deployment registry. It can also accept a contract name (e.g., `escrow`) instead of a contract ID, automatically resolving the ID and expected hash from the registry. If a mismatch/drift is found between the on-chain hash and the expected registry hash, the script exits with code `1`.
 
 #### Usage
 
 ```bash
-./contracts/scripts/verify-deployment.sh <contract_id> [options]
+./contracts/scripts/verify-deployment.sh <contract_id|contract_name> [options]
 ```
 
 #### Options
@@ -370,12 +371,14 @@ fi
 
 ### rollback.sh
 
-Reverts a contract to a previous WASM version.
+Reverts a contract to a previous WASM version. 
+
+If no `<previous_wasm_hash>` is supplied, the script automatically reads the second-to-last deployed WASM hash from the registry. It can also accept a contract name (e.g., `escrow`) instead of a contract ID, resolving it first from the registry. After a successful rollback, it appends a new record to the deployment registry with the rolled-back WASM hash.
 
 #### Usage
 
 ```bash
-./contracts/scripts/rollback.sh <contract_id> <previous_wasm_hash> [options]
+./contracts/scripts/rollback.sh <contract_id|contract_name> [previous_wasm_hash] [options]
 ```
 
 #### Options
@@ -506,17 +509,19 @@ All deployments and operations are logged in `contracts/deployments/`:
 {
   "deployments": [
     {
+      "contract_name": "escrow",
       "contract_id": "CABC123...",
       "wasm_hash": "7a8b9c0d...",
-      "contract_name": "escrow",
-      "network": "testnet",
+      "soroban_sdk": "21.0.0",
       "deployer": "grainlify-deployer",
-      "deployed_at": "2024-01-15T10:30:00Z",
+      "timestamp": "2026-06-25T10:30:00Z",
+      "network": "testnet",
+      "deployed_at": "2026-06-25T10:30:00Z",
       "status": "deployed"
     }
   ],
   "metadata": {
-    "created": "2024-01-15T10:00:00Z",
+    "created": "2026-06-25T10:00:00Z",
     "version": "1.0"
   }
 }

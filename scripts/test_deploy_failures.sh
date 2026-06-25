@@ -19,6 +19,10 @@ mkdir -p "$MOCK_BIN"
 enable_identity_mock() {
     echo '#!/usr/bin/env bash
 if [[ "$1" = "keys" && "$2" = "address" ]]; then
+    if [[ "${3:-}" == "ghost_id" ]]; then
+        echo "mock keys address failure" >&2
+        exit 1
+    fi
     echo FAKE_ADDRESS
     exit 0
 fi
@@ -26,14 +30,14 @@ echo "Mock stellar call"
 exit 0' > "$MOCK_BIN/stellar"
 
     chmod +x "$MOCK_BIN/stellar"
-    export PATH="$MOCK_BIN:$ORIGINAL_PATH"
 }
 
 disable_identity_mock() {
-    export PATH="$ORIGINAL_PATH"
+    enable_identity_mock
 }
 
 ORIGINAL_PATH="$PATH"
+export PATH="$MOCK_BIN:$PATH"
 
 # --------------------- TEST RUNNER --------------------------
 

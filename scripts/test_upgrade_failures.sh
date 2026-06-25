@@ -7,6 +7,29 @@ UPGRADE_SCRIPT="$SCRIPT_DIR/upgrade.sh"
 FAKE_WASM=/tmp/fake_valid.wasm
 echo -n -e "\x00\x61\x73\x6D\x01" > "$FAKE_WASM"  # Minimal WASM magic header
 
+# --------------------- MOCKING HELPERS ----------------------
+MOCK_BIN="$(pwd)/mock_bin"
+mkdir -p "$MOCK_BIN"
+
+enable_identity_mock() {
+    echo '#!/usr/bin/env bash
+if [[ "$1" = "keys" && "$2" = "address" ]]; then
+    if [[ "${3:-}" == "ghost_id" ]]; then
+        echo "mock keys address failure" >&2
+        exit 1
+    fi
+    echo FAKE_ADDRESS
+    exit 0
+fi
+echo "Mock stellar call"
+exit 0' > "$MOCK_BIN/stellar"
+
+    chmod +x "$MOCK_BIN/stellar"
+}
+
+export PATH="$MOCK_BIN:$PATH"
+enable_identity_mock
+
 fail() { echo "✘ FAIL: $1"; exit 1; }
 pass() { echo "✔ PASS: $1"; }
 

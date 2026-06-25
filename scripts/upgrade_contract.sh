@@ -1,8 +1,15 @@
 #!/bin/bash
-set -e
+# ==============================================================================
+# Grainlify - Smart Contract Upgrade Helper
+# ==============================================================================
 
-# Usage: ./upgrade_contract.sh <CONTRACT_ID> <WASM_FILE> <NETWORK> <SOURCE_IDENTITY>
-# Example: ./upgrade_contract.sh C... contracts/grainlify-core/target/wasm32-unknown-unknown/release/grainlify_core.wasm testnet demo_user
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Source common utilities
+source "$SCRIPT_DIR/utils/common.sh"
 
 CONTRACT_ID=$1
 WASM_FILE=$2
@@ -14,13 +21,25 @@ if [ -z "$CONTRACT_ID" ] || [ -z "$WASM_FILE" ]; then
     exit 1
 fi
 
-echo "Uploading WASM..."
-# Use 'upload' instead of 'install' as per deprecation warning
-WASM_HASH=$(soroban contract upload --wasm "$WASM_FILE" --network "$NETWORK" --source "$SOURCE")
-echo "WASM Hash: $WASM_HASH"
+# Set configuration environment variables for common utilities
+export SOROBAN_NETWORK="$NETWORK"
+export DEPLOYER_IDENTITY="$SOURCE"
+DEPLOYMENT_LOG="${PROJECT_ROOT}/deployments/${NETWORK}.json"
 
-echo "Upgrading contract..."
-soroban contract invoke \
+# Run check_dependencies to ensure CLI & jq are installed
+check_dependencies
+
+CLI_CMD=$(get_cli_command)
+
+# Derive contract name from WASM file
+CONTRACT_NAME=$(basename "$WASM_FILE" .wasm)
+
+log_info "Uploading WASM ($WASM_FILE)..."
+WASM_HASH=$($CLI_CMD contract install --wasm "$WASM_FILE" --network "$NETWORK" --source "$SOURCE")
+log_info "WASM Hash: $WASM_HASH"
+
+log_info "Upgrading contract $CONTRACT_ID to new WASM..."
+$CLI_CMD contract invoke \
     --id "$CONTRACT_ID" \
     --network "$NETWORK" \
     --source "$SOURCE" \
@@ -29,4 +48,8 @@ soroban contract invoke \
     upgrade \
     --new_wasm_hash "$WASM_HASH"
 
-echo "Upgrade complete."
+log_success "Upgrade complete."
+
+# Record deployment to registry
+log_info "Recording upgrade in registry..."
+append_to_registry "$DEPLOYMENT_LOG" "$CONTRACT_ID" "$WASM_HASH" "$CONTRACT_NAME" "$WASM_FILE"
