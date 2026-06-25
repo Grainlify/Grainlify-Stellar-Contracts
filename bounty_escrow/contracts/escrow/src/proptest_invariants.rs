@@ -172,24 +172,41 @@ fn assert_invariants(
         let actual_status = escrow.status.clone();
         prop_assert_eq!(actual_status, expected_status(expected.status));
 
+        let mut total_refunded_for_escrow = 0;
+        for record in escrow.refund_history.iter() {
+            total_refunded_for_escrow += record.amount;
+        }
+
         match escrow.status {
             EscrowStatus::Locked => {
                 count_locked += 1;
-                stats_locked += escrow.amount;
+                stats_locked += escrow.remaining_amount;
                 active_contract_balance += escrow.remaining_amount;
+
+                let released_amount = escrow.amount - escrow.remaining_amount - total_refunded_for_escrow;
+                stats_released += released_amount;
+                stats_refunded += total_refunded_for_escrow;
             }
             EscrowStatus::Released => {
                 count_released += 1;
-                stats_released += escrow.amount;
+                let released_amount = escrow.amount - total_refunded_for_escrow;
+                stats_released += released_amount;
+                stats_refunded += total_refunded_for_escrow;
             }
             EscrowStatus::Refunded => {
                 count_refunded += 1;
-                stats_refunded += escrow.amount;
+                let released_amount = escrow.amount - total_refunded_for_escrow;
+                stats_released += released_amount;
+                stats_refunded += total_refunded_for_escrow;
             }
             EscrowStatus::PartiallyRefunded => {
-                count_refunded += 1;
-                stats_refunded += escrow.amount;
+                count_locked += 1;
+                stats_locked += escrow.remaining_amount;
                 active_contract_balance += escrow.remaining_amount;
+
+                let released_amount = escrow.amount - escrow.remaining_amount - total_refunded_for_escrow;
+                stats_released += released_amount;
+                stats_refunded += total_refunded_for_escrow;
             }
         }
     }

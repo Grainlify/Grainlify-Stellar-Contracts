@@ -2521,19 +2521,30 @@ impl BountyEscrowContract {
                 .persistent()
                 .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
             {
+                let mut total_refunded_for_escrow = 0;
+                for record in escrow.refund_history.iter() {
+                    total_refunded_for_escrow += record.amount;
+                }
+
                 match escrow.status {
                     EscrowStatus::Locked | EscrowStatus::PartiallyRefunded => {
                         stats.total_locked += escrow.remaining_amount;
                         stats.count_locked += 1;
+
+                        let released_amount = escrow.amount - escrow.remaining_amount - total_refunded_for_escrow;
+                        stats.total_released += released_amount;
+                        stats.total_refunded += total_refunded_for_escrow;
                     }
                     EscrowStatus::Released => {
-                        stats.total_released += escrow.amount;
+                        let released_amount = escrow.amount - total_refunded_for_escrow;
+                        stats.total_released += released_amount;
+                        stats.total_refunded += total_refunded_for_escrow;
                         stats.count_released += 1;
                     }
                     EscrowStatus::Refunded => {
-                        // For refunded, we count the original amount in total_refunded
-                        // The actual refund amounts are tracked in refund_history
-                        stats.total_refunded += escrow.amount;
+                        let released_amount = escrow.amount - total_refunded_for_escrow;
+                        stats.total_released += released_amount;
+                        stats.total_refunded += total_refunded_for_escrow;
                         stats.count_refunded += 1;
                     }
                 }
@@ -3528,3 +3539,6 @@ mod test_reentrancy;
 
 #[cfg(test)]
 mod test_balance_invariant;
+
+#[cfg(test)]
+mod test_query_pagination;
