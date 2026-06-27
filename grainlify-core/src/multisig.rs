@@ -108,6 +108,19 @@ impl MultiSig {
 
         env.events().publish((symbol_short!("proposal"),), counter);
 
+        #[allow(irrefutable_let_patterns)]
+        if let ProposalAction::Upgrade(ref wasm_hash) = proposal.action {
+            env.events().publish(
+                (symbol_short!("upg_prop"),),
+                crate::UpgradeProposed {
+                    version: crate::EVENT_VERSION,
+                    proposal_id: counter,
+                    proposer: proposer.clone(),
+                    wasm_hash: wasm_hash.clone(),
+                },
+            );
+        }
+
         counter
     }
 
@@ -133,7 +146,20 @@ impl MultiSig {
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
-            .publish((symbol_short!("approved"),), (proposal_id, signer));
+            .publish((symbol_short!("approved"),), (proposal_id, signer.clone()));
+
+        #[allow(irrefutable_let_patterns)]
+        if let ProposalAction::Upgrade(_) = proposal.action {
+            env.events().publish(
+                (symbol_short!("upg_appr"),),
+                crate::UpgradeApproved {
+                    version: crate::EVENT_VERSION,
+                    proposal_id,
+                    signer: signer.clone(),
+                    approval_count: proposal.approvals.len() as u32,
+                },
+            );
+        }
     }
 
     /// Check if proposal is executable

@@ -205,6 +205,8 @@ const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
 const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
 const FUND_CAP_CONFIG: Symbol = symbol_short!("FnCapCfg");
 const BASIS_POINTS: i128 = 10_000;
+const TTL_THRESHOLD: u32 = 17280;
+const TTL_EXTEND_TO: u32 = 518400;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PayoutRecord {
@@ -577,7 +579,8 @@ impl ProgramEscrowContract {
         token_address: Address,
     ) -> ProgramData {
         // Check if program already exists
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             panic!("Program already initialized");
         }
 
@@ -591,13 +594,16 @@ impl ProgramEscrowContract {
         };
 
         // Store program data
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         env.storage()
-            .instance()
+            .persistent()
             .set(&SCHEDULES, &Vec::<ProgramReleaseSchedule>::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         env.storage()
-            .instance()
+            .persistent()
             .set(&RELEASE_HISTORY, &Vec::<ProgramReleaseHistory>::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         env.storage().instance().set(&NEXT_SCHEDULE_ID, &1_u64);
 
         // Emit ProgramInitialized event
@@ -638,7 +644,8 @@ impl ProgramEscrowContract {
         }
         for i in 0..batch_size {
             let program_key = DataKey::Program(items.get(i).unwrap().program_id.clone());
-            if env.storage().instance().has(&program_key) {
+            if env.storage().persistent().has(&program_key) {
+                Self::bump_persistent_datakey_ttl(&env, &program_key);
                 return Err(BatchError::ProgramAlreadyExists);
             }
         }
@@ -663,7 +670,8 @@ impl ProgramEscrowContract {
                 token_address: token_address.clone(),
             };
             let program_key = DataKey::Program(program_id.clone());
-            env.storage().instance().set(&program_key, &program_data);
+            env.storage().persistent().set(&program_key, &program_data);
+            Self::bump_persistent_datakey_ttl(&env, &program_key);
 
             env.events().publish(
                 (symbol_short!("BatchReg"),),
@@ -687,6 +695,16 @@ impl ProgramEscrowContract {
             .unwrap_or(0)
     }
 
+    /// Bump the TTL for single-program persistent storage keys
+    fn bump_persistent_symbol_ttl(env: &Env, key: &Symbol) {
+        env.storage().persistent().extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Bump the TTL for multi-program persistent storage keys
+    fn bump_persistent_datakey_ttl(env: &Env, key: &DataKey) {
+        env.storage().persistent().extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
     /// Get fee configuration (internal helper)
     fn get_fee_config_internal(env: &Env) -> FeeConfig {
         env.storage()
@@ -704,9 +722,10 @@ impl ProgramEscrowContract {
     fn emit_aggregate_stats(env: &Env, program_data: &ProgramData) {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(env));
+        Self::bump_persistent_symbol_ttl(env, &SCHEDULES);
 
         let mut scheduled_count = 0u32;
         for i in 0..schedules.len() {
@@ -756,7 +775,8 @@ impl ProgramEscrowContract {
     /// * `bool` - True if program exists, false otherwise
     pub fn program_exists(env: Env) -> bool {
         // Check both PROGRAM_DATA (single program) and DataKey::Program registry
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             return true;
         }
         // Check if any programs exist in registry
@@ -796,9 +816,10 @@ impl ProgramEscrowContract {
 
         let mut program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Check fund caps if configured
         let cap_config: FundCapConfig = env
@@ -846,7 +867,8 @@ impl ProgramEscrowContract {
         }
 
         // Store updated data
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Emit FundsLocked event
         env.events().publish(
@@ -999,9 +1021,10 @@ impl ProgramEscrowContract {
     fn program_id_for_event(env: &Env) -> String {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         program_data.program_id
     }
 
@@ -1528,15 +1551,15 @@ impl ProgramEscrowContract {
             panic!("Dispute in progress");
         }
 
-        // Verify authorization
         let mut program_data: ProgramData =
             env.storage()
-                .instance()
+                .persistent()
                 .get(&PROGRAM_DATA)
                 .unwrap_or_else(|| {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Program not initialized")
                 });
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
 
@@ -1642,7 +1665,8 @@ impl ProgramEscrowContract {
             });
 
         // Store updated data
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Emit BatchPayout event
         env.events().publish(
@@ -1718,12 +1742,13 @@ impl ProgramEscrowContract {
         // Verify authorization
         let program_data: ProgramData =
             env.storage()
-                .instance()
+                .persistent()
                 .get(&PROGRAM_DATA)
                 .unwrap_or_else(|| {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Program not initialized")
                 });
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
 
@@ -1773,7 +1798,8 @@ impl ProgramEscrowContract {
         updated_data.payout_history = updated_history;
 
         // Store updated data
-        env.storage().instance().set(&PROGRAM_DATA, &updated_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &updated_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Emit Payout event
         env.events().publish(
@@ -1812,10 +1838,12 @@ impl ProgramEscrowContract {
     /// # Returns
     /// ProgramData containing all program information
     pub fn get_program_info(env: Env) -> ProgramData {
-        env.storage()
-            .instance()
+        let val = env.storage()
+            .persistent()
             .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"))
+            .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
+        val
     }
 
     /// Get remaining balance
@@ -1825,9 +1853,10 @@ impl ProgramEscrowContract {
     pub fn get_remaining_balance(env: Env) -> i128 {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.remaining_balance
     }
@@ -1841,9 +1870,10 @@ impl ProgramEscrowContract {
     ) -> ProgramReleaseSchedule {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
 
@@ -1853,9 +1883,10 @@ impl ProgramEscrowContract {
 
         let mut schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let schedule_id: u64 = env
             .storage()
             .instance()
@@ -1873,7 +1904,8 @@ impl ProgramEscrowContract {
         };
         schedules.push_back(schedule.clone());
 
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         env.storage()
             .instance()
             .set(&NEXT_SCHEDULE_ID, &(schedule_id + 1));
@@ -1901,24 +1933,27 @@ impl ProgramEscrowContract {
 
         let mut program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| {
                 reentrancy_guard::clear_entered(&env);
                 panic!("Program not initialized")
             });
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         program_data.authorized_payout_key.require_auth();
 
         let mut schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut release_history: Vec<ProgramReleaseHistory> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&RELEASE_HISTORY)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
 
         let now = env.ledger().timestamp();
         let contract_address = env.current_contract_address();
@@ -1988,11 +2023,14 @@ impl ProgramEscrowContract {
             released_count += 1;
         }
 
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         env.storage()
-            .instance()
+            .persistent()
             .set(&RELEASE_HISTORY, &release_history);
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
 
         // Inform the circuit breaker of the outcome.
         if released_count > 0 {
@@ -2007,17 +2045,21 @@ impl ProgramEscrowContract {
     }
 
     pub fn get_program_release_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        env.storage()
-            .instance()
+        let val = env.storage()
+            .persistent()
             .get(&SCHEDULES)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
+        val
     }
 
     pub fn get_program_release_history(env: Env) -> Vec<ProgramReleaseHistory> {
-        env.storage()
-            .instance()
+        let val = env.storage()
+            .persistent()
             .get(&RELEASE_HISTORY)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
+        val
     }
 
     // ========================================================================
@@ -2059,9 +2101,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -2094,9 +2137,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -2129,9 +2173,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -2163,9 +2208,10 @@ impl ProgramEscrowContract {
     ) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut results = Vec::new(&env);
         let mut count = 0u32;
         let mut skipped = 0u32;
@@ -2196,9 +2242,10 @@ impl ProgramEscrowContract {
     ) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut results = Vec::new(&env);
         let mut count = 0u32;
         let mut skipped = 0u32;
@@ -2229,9 +2276,10 @@ impl ProgramEscrowContract {
     ) -> Vec<ProgramReleaseHistory> {
         let history: Vec<ProgramReleaseHistory> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&RELEASE_HISTORY)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         let mut results = Vec::new(&env);
         let mut count = 0u32;
         let mut skipped = 0u32;
@@ -2257,14 +2305,16 @@ impl ProgramEscrowContract {
     pub fn get_program_aggregate_stats(env: Env) -> ProgramAggregateStats {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
 
         let mut released_count = 0u32;
         let mut scheduled_count = 0u32;
@@ -2300,9 +2350,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -2329,9 +2380,10 @@ impl ProgramEscrowContract {
     pub fn get_pending_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut results = Vec::new(&env);
 
         for i in 0..schedules.len() {
@@ -2347,9 +2399,10 @@ impl ProgramEscrowContract {
     pub fn get_due_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let now = env.ledger().timestamp();
         let mut results = Vec::new(&env);
 
@@ -2366,9 +2419,10 @@ impl ProgramEscrowContract {
     pub fn get_total_scheduled_amount(env: Env) -> i128 {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut total = 0i128;
 
         for i in 0..schedules.len() {
@@ -2381,7 +2435,8 @@ impl ProgramEscrowContract {
     }
 
     pub fn get_program_count(env: Env) -> u32 {
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             1
         } else {
             0
@@ -2390,7 +2445,8 @@ impl ProgramEscrowContract {
 
     pub fn list_programs(env: Env) -> Vec<ProgramData> {
         let mut results = Vec::new(&env);
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             results.push_back(Self::get_program_info(env.clone()));
         }
         results
@@ -2488,9 +2544,11 @@ impl ProgramEscrowContract {
             panic!("Schedule not found");
         }
 
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         // Persist the updated remaining_balance.
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Transfer succeeded — inform the circuit breaker.
         error_recovery::record_success(&env);
@@ -2499,9 +2557,10 @@ impl ProgramEscrowContract {
         if let Some(s) = released_schedule {
             let mut history: Vec<ProgramReleaseHistory> = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&RELEASE_HISTORY)
                 .unwrap_or_else(|| Vec::new(&env));
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
             history.push_back(ProgramReleaseHistory {
                 schedule_id: s.schedule_id,
                 recipient: s.recipient,
@@ -2509,7 +2568,8 @@ impl ProgramEscrowContract {
                 released_at: now,
                 release_type: ReleaseType::Manual,
             });
-            env.storage().instance().set(&RELEASE_HISTORY, &history);
+            env.storage().persistent().set(&RELEASE_HISTORY, &history);
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         }
 
         // Clear reentrancy guard before returning
@@ -2586,9 +2646,11 @@ impl ProgramEscrowContract {
             panic!("Schedule not found");
         }
 
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         // Persist the updated remaining_balance.
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Transfer succeeded — inform the circuit breaker.
         error_recovery::record_success(&env);
@@ -2597,9 +2659,10 @@ impl ProgramEscrowContract {
         if let Some(s) = released_schedule {
             let mut history: Vec<ProgramReleaseHistory> = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&RELEASE_HISTORY)
                 .unwrap_or_else(|| Vec::new(&env));
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
             history.push_back(ProgramReleaseHistory {
                 schedule_id: s.schedule_id,
                 recipient: s.recipient,
@@ -2607,7 +2670,8 @@ impl ProgramEscrowContract {
                 released_at: now,
                 release_type: ReleaseType::Automatic,
             });
-            env.storage().instance().set(&RELEASE_HISTORY, &history);
+            env.storage().persistent().set(&RELEASE_HISTORY, &history);
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         }
 
         // Clear reentrancy guard before returning
