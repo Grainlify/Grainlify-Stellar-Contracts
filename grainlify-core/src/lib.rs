@@ -571,6 +571,62 @@ pub struct MigrationEvent {
     pub error_message: Option<String>,
 }
 
+/// Event version for versioned governance/upgrade events
+pub const EVENT_VERSION: u32 = 1;
+
+/// Event emitted when an upgrade is proposed (multisig version).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposed {
+    pub version: u32,
+    pub proposal_id: u64,
+    pub proposer: Address,
+    pub wasm_hash: BytesN<32>,
+}
+
+/// Event emitted when an upgrade proposal is approved (multisig version).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeApproved {
+    pub version: u32,
+    pub proposal_id: u64,
+    pub signer: Address,
+    pub approval_count: u32,
+}
+
+/// Event emitted when an upgrade is executed (both multisig and single-admin).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecuted {
+    pub version: u32,
+    pub proposal_id: Option<u64>,
+    pub wasm_hash: BytesN<32>,
+}
+
+/// Event emitted when version number changes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionChanged {
+    pub version: u32,
+    pub old_version: u32,
+    pub new_version: u32,
+    pub admin: Address,
+}
+
+/// Event emitted when migration completes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationCompleted {
+    pub version: u32,
+    pub from_version: u32,
+    pub to_version: u32,
+    pub timestamp: u64,
+    pub migration_hash: BytesN<32>,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+
 /// Pending single-admin upgrade data.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -998,8 +1054,17 @@ impl GrainlifyContract {
         MultiSig::execute(&env, proposal_id, action, || {
             upgrade_env
                 .deployer()
-                .update_current_contract_wasm(wasm_hash);
+                .update_current_contract_wasm(wasm_hash.clone());
         });
+
+        env.events().publish(
+            (symbol_short!("upg_exec2"),),
+            UpgradeExecuted {
+                version: EVENT_VERSION,
+                proposal_id: Some(proposal_id),
+                wasm_hash,
+            },
+        );
 
         // Observational metric only: recorded after the upgrade has been applied.
         monitoring::track_upgrade_executed(&env);
@@ -1034,9 +1099,18 @@ impl GrainlifyContract {
         env.events().publish(
             (symbol_short!("upg_exec"),),
             UpgradeExecutedEvent {
-                wasm_hash: scheduled.wasm_hash,
+                wasm_hash: scheduled.wasm_hash.clone(),
                 executed_at: env.ledger().timestamp(),
                 previous_version: current_version,
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("upg_exec2"),),
+            UpgradeExecuted {
+                version: EVENT_VERSION,
+                proposal_id: None,
+                wasm_hash: scheduled.wasm_hash,
             },
         );
 
@@ -1207,10 +1281,22 @@ impl GrainlifyContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        let old_version = env.storage().instance().get(&DataKey::Version).unwrap_or(1);
+
         // Update version number
         env.storage()
             .instance()
             .set(&DataKey::Version, &new_version);
+
+        env.events().publish(
+            (symbol_short!("ver_chg"),),
+            VersionChanged {
+                version: EVENT_VERSION,
+                old_version,
+                new_version,
+                admin: admin.clone(),
+            },
+        );
 
         // Track successful operation
         monitoring::track_operation(&env, symbol_short!("set_ver"), admin, true);
@@ -1450,7 +1536,20 @@ impl GrainlifyContract {
 
 /// Emits a migration event for audit trail
 fn emit_migration_event(env: &Env, event: MigrationEvent) {
-    env.events().publish((symbol_short!("migration"),), event);
+    env.events().publish((symbol_short!("migration"),), event.clone());
+
+    env.events().publish(
+        (symbol_short!("mig_comp"),),
+        MigrationCompleted {
+            version: EVENT_VERSION,
+            from_version: event.from_version,
+            to_version: event.to_version,
+            timestamp: event.timestamp,
+            migration_hash: event.migration_hash,
+            success: event.success,
+            error_message: event.error_message,
+        },
+    );
 }
 
 fn require_scheduled_upgrade(env: &Env, wasm_hash: &BytesN<32>) -> ScheduledUpgrade {
@@ -1499,7 +1598,7 @@ fn migrate_v2_to_v3(_env: &Env) {
 mod test {
     use super::*;
     use soroban_sdk::testutils::{Events, Ledger};
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::Address as _, Env, IntoVal, TryFromVal};
 
     #[test]
     fn multisig_init_works() {
@@ -2254,5 +2353,160 @@ mod test {
             assert_eq!(analytics.upgrades_executed, 1);
             assert_eq!(analytics.migrations_run, 1);
         });
+    }
+
+    #[test]
+    fn test_governance_versioned_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // 1. Test migrate -> emits MigrationCompleted event
+        let events_len_before = env.events().all().len();
+        let migration_hash = BytesN::from_array(&env, &[9u8; 32]);
+        client.migrate(&3, &migration_hash);
+        let events = env.events().all();
+        assert!(events.len() > events_len_before);
+
+        let mut found_mig_comp = false;
+        for event in events.iter() {
+            if event.0 == contract_id && event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap()) == Ok(symbol_short!("mig_comp")) {
+                let val: MigrationCompleted = event.2.into_val(&env);
+                assert_eq!(val.version, EVENT_VERSION);
+                assert_eq!(val.from_version, 2);
+                assert_eq!(val.to_version, 3);
+                assert_eq!(val.migration_hash, migration_hash);
+                assert!(val.success);
+                found_mig_comp = true;
+            }
+        }
+        assert!(found_mig_comp);
+
+        // 2. Test set_version -> emits VersionChanged event
+        let events_len_before = env.events().all().len();
+        client.set_version(&4);
+        let events = env.events().all();
+        assert!(events.len() > events_len_before);
+        
+        // Find VersionChanged event
+        let mut found_ver_chg = false;
+        for event in events.iter() {
+            if event.0 == contract_id && event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap()) == Ok(symbol_short!("ver_chg")) {
+                let val: VersionChanged = event.2.into_val(&env);
+                assert_eq!(val.version, EVENT_VERSION);
+                assert_eq!(val.old_version, 3);
+                assert_eq!(val.new_version, 4);
+                assert_eq!(val.admin, admin);
+                found_ver_chg = true;
+            }
+        }
+        assert!(found_ver_chg);
+
+        // 3. Test single-admin upgrade -> emits UpgradeExecuted
+        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&wasm_hash);
+
+        env.ledger().with_mut(|li| li.timestamp = 600);
+        let events_len_before = env.events().all().len();
+        client.upgrade(&wasm_hash);
+        let events = env.events().all();
+        assert!(events.len() > events_len_before);
+
+        let mut found_upg_exec = false;
+        for event in events.iter() {
+            if event.0 == contract_id && event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap()) == Ok(symbol_short!("upg_exec2")) {
+                let val: UpgradeExecuted = event.2.into_val(&env);
+                assert_eq!(val.version, EVENT_VERSION);
+                assert!(val.proposal_id.is_none());
+                assert_eq!(val.wasm_hash, wasm_hash);
+                found_upg_exec = true;
+            }
+        }
+        assert!(found_upg_exec);
+    }
+
+    #[test]
+    fn test_multisig_upgrade_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+        signers.push_back(signer_a.clone());
+        signers.push_back(signer_b.clone());
+
+        // Initialize multisig with threshold 2
+        client.init(&signers, &2);
+
+        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+
+        // 1. Propose -> emits UpgradeProposed
+        let events_len_before = env.events().all().len();
+        let proposal_id = client.propose_upgrade(&signer_a, &wasm_hash);
+        let events = env.events().all();
+        assert!(events.len() > events_len_before);
+
+        let mut found_upg_prop = false;
+        for event in events.iter() {
+            if event.0 == contract_id && event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap()) == Ok(symbol_short!("upg_prop")) {
+                let val: UpgradeProposed = event.2.into_val(&env);
+                assert_eq!(val.version, EVENT_VERSION);
+                assert_eq!(val.proposal_id, proposal_id);
+                assert_eq!(val.proposer, signer_a);
+                assert_eq!(val.wasm_hash, wasm_hash);
+                found_upg_prop = true;
+            }
+        }
+        assert!(found_upg_prop);
+
+        // 2. Approve -> emits UpgradeApproved
+        let events_len_before = env.events().all().len();
+        client.approve_upgrade(&proposal_id, &signer_a);
+        let events = env.events().all();
+        assert!(events.len() > events_len_before);
+
+        let mut found_upg_appr = false;
+        for event in events.iter() {
+            if event.0 == contract_id && event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap()) == Ok(symbol_short!("upg_appr")) {
+                let val: UpgradeApproved = event.2.into_val(&env);
+                assert_eq!(val.version, EVENT_VERSION);
+                assert_eq!(val.proposal_id, proposal_id);
+                assert_eq!(val.signer, signer_a);
+                assert_eq!(val.approval_count, 1);
+                found_upg_appr = true;
+            }
+        }
+        assert!(found_upg_appr);
+
+        // Approve second signer
+        client.approve_upgrade(&proposal_id, &signer_b);
+
+        // 3. Execute -> emits UpgradeExecuted
+        let events_len_before = env.events().all().len();
+        client.execute_upgrade(&proposal_id);
+        let events = env.events().all();
+        assert!(events.len() > events_len_before);
+
+        let mut found_upg_exec = false;
+        for event in events.iter() {
+            if event.0 == contract_id && event.1.len() > 0 && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap()) == Ok(symbol_short!("upg_exec2")) {
+                let val: UpgradeExecuted = event.2.into_val(&env);
+                assert_eq!(val.version, EVENT_VERSION);
+                assert_eq!(val.proposal_id, Some(proposal_id));
+                assert_eq!(val.wasm_hash, wasm_hash);
+                found_upg_exec = true;
+            }
+        }
+        assert!(found_upg_exec);
     }
 }

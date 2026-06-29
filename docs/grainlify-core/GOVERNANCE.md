@@ -158,6 +158,63 @@ activity without scanning full transaction history.
 - **Single-count migrations.** Idempotent `migrate` re-invocations return before
   the counter is touched, so each applied migration is counted exactly once.
 
+## Versioned Governance & Upgrade Events
+
+To support robust long-term indexer queries and backward-compatible changes, versioned structured events are emitted during the upgrade, governance, version change, and migration lifecycles. All versioned events contain a `version` field (currently set to `1`).
+
+### Event Versioning Constant
+
+- `EVENT_VERSION` = `1` (of type `u32`)
+
+### 1. Upgrade Proposed (`upg_prop`)
+Emitted when a multisig contract upgrade proposal is created.
+- **Topic**: `("upg_prop",)`
+- **Payload (`UpgradeProposed`)**:
+  - `version: u32` — Event schema version.
+  - `proposal_id: u64` — The unique ID of the multisig proposal.
+  - `proposer: Address` — The address of the proposal creator.
+  - `wasm_hash: BytesN<32>` — The hash of the proposed WASM binary.
+
+### 2. Upgrade Approved (`upg_appr`)
+Emitted when a multisig signer approves a pending upgrade proposal.
+- **Topic**: `("upg_appr",)`
+- **Payload (`UpgradeApproved`)**:
+  - `version: u32` — Event schema version.
+  - `proposal_id: u64` — The unique ID of the multisig proposal.
+  - `signer: Address` — The address of the signer casting their approval.
+  - `approval_count: u32` — The current total number of approvals gathered.
+
+### 3. Upgrade Executed (`upg_exec2`)
+Emitted when a scheduled upgrade is executed (both for multisig upgrades and single-admin upgrades).
+> [!NOTE]
+> Published under the topic `upg_exec2` to prevent breaking existing indexers listening to the unversioned `upg_exec` event.
+- **Topic**: `("upg_exec2",)`
+- **Payload (`UpgradeExecuted`)**:
+  - `version: u32` — Event schema version.
+  - `proposal_id: Option<u64>` — `Some(proposal_id)` if executed via multisig, or `None` if executed via the single-admin timelock.
+  - `wasm_hash: BytesN<32>` — The hash of the executed WASM binary.
+
+### 4. Version Changed (`ver_chg`)
+Emitted when the contract's stored version is set manually by the administrator.
+- **Topic**: `("ver_chg",)`
+- **Payload (`VersionChanged`)**:
+  - `version: u32` — Event schema version.
+  - `old_version: u32` — The version number before the change.
+  - `new_version: u32` — The version number after the change.
+  - `admin: Address` — The administrator address authorizing the version change.
+
+### 5. Migration Completed (`mig_comp`)
+Emitted when a migration run finishes (emitted both on success and failure to provide a complete audit trail).
+- **Topic**: `("mig_comp",)`
+- **Payload (`MigrationCompleted`)**:
+  - `version: u32` — Event schema version.
+  - `from_version: u32` — The source version migrated from.
+  - `to_version: u32` — The target version migrated to.
+  - `timestamp: u64` — Ledger timestamp when the migration was processed.
+  - `migration_hash: BytesN<32>` — Verification hash for the migration payload.
+  - `success: bool` — Whether the migration completed successfully.
+  - `error_message: Option<String>` — Error description if the migration failed.
+
 ## TODO / Future Enhancements
 
 - [ ] Integrate with a native Soroban token for precise `TokenWeighted` voting power.
