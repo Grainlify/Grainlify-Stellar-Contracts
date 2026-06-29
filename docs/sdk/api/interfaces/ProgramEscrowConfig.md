@@ -6,7 +6,7 @@
 
 # Interface: ProgramEscrowConfig
 
-Defined in: [src/program-escrow-client.ts:4](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L4)
+Defined in: [src/program-escrow-client.ts:4](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L4)
 
 ## Properties
 
@@ -14,7 +14,7 @@ Defined in: [src/program-escrow-client.ts:4](https://github.com/Grainlify/Grainl
 
 > **contractId**: `string`
 
-Defined in: [src/program-escrow-client.ts:6](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L6)
+Defined in: [src/program-escrow-client.ts:6](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L6)
 
 Deployed ProgramEscrow contract address.
 
@@ -24,7 +24,7 @@ Deployed ProgramEscrow contract address.
 
 > **networkPassphrase**: `string`
 
-Defined in: [src/program-escrow-client.ts:10](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L10)
+Defined in: [src/program-escrow-client.ts:10](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L10)
 
 Stellar network passphrase for the target network.
 
@@ -34,6 +34,6 @@ Stellar network passphrase for the target network.
 
 > **rpcUrl**: `string`
 
-Defined in: [src/program-escrow-client.ts:8](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L8)
+Defined in: [src/program-escrow-client.ts:8](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L8)
 
 Soroban RPC endpoint used for reads and transaction submission.

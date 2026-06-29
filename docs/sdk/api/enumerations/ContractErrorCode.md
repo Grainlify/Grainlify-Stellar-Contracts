@@ -6,7 +6,7 @@
 
 # Enumeration: ContractErrorCode
 
-Defined in: [src/errors.ts:64](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L64)
+Defined in: [src/errors.ts:64](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L64)
 
 Unified enum of every known contract error across all Grainlify contracts.
 
@@ -28,7 +28,7 @@ separate BOUNTY_* codes because their on-chain discriminants differ.
 
 > **ALREADY\_INITIALIZED**: `"ALREADY_INITIALIZED"`
 
-Defined in: [src/errors.ts:70](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L70)
+Defined in: [src/errors.ts:70](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L70)
 
 ***
 
@@ -36,7 +36,7 @@ Defined in: [src/errors.ts:70](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **AMOUNT\_ABOVE\_MAX**: `"AMOUNT_ABOVE_MAX"`
 
-Defined in: [src/errors.ts:75](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L75)
+Defined in: [src/errors.ts:75](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L75)
 
 ***
 
@@ -44,7 +44,7 @@ Defined in: [src/errors.ts:75](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **AMOUNT\_BELOW\_MIN**: `"AMOUNT_BELOW_MIN"`
 
-Defined in: [src/errors.ts:74](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L74)
+Defined in: [src/errors.ts:74](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L74)
 
 ***
 
@@ -52,7 +52,7 @@ Defined in: [src/errors.ts:74](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_ALREADY\_INITIALIZED**: `"BOUNTY_ALREADY_INITIALIZED"`
 
-Defined in: [src/errors.ts:79](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L79)
+Defined in: [src/errors.ts:79](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L79)
 
 ***
 
@@ -60,7 +60,7 @@ Defined in: [src/errors.ts:79](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_AMOUNT\_ABOVE\_MAXIMUM**: `"BOUNTY_AMOUNT_ABOVE_MAXIMUM"`
 
-Defined in: [src/errors.ts:97](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L97)
+Defined in: [src/errors.ts:97](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L97)
 
 ***
 
@@ -68,7 +68,7 @@ Defined in: [src/errors.ts:97](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_AMOUNT\_BELOW\_MINIMUM**: `"BOUNTY_AMOUNT_BELOW_MINIMUM"`
 
-Defined in: [src/errors.ts:96](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L96)
+Defined in: [src/errors.ts:96](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L96)
 
 ***
 
@@ -76,7 +76,7 @@ Defined in: [src/errors.ts:96](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_BATCH\_SIZE\_MISMATCH**: `"BOUNTY_BATCH_SIZE_MISMATCH"`
 
-Defined in: [src/errors.ts:89](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L89)
+Defined in: [src/errors.ts:89](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L89)
 
 ***
 
@@ -84,7 +84,7 @@ Defined in: [src/errors.ts:89](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_CIRCUIT\_BREAKER\_OPEN**: `"BOUNTY_CIRCUIT_BREAKER_OPEN"`
 
-Defined in: [src/errors.ts:98](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L98)
+Defined in: [src/errors.ts:98](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L98)
 
 ***
 
@@ -92,7 +92,7 @@ Defined in: [src/errors.ts:98](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_CLAIM\_EXPIRED**: `"BOUNTY_CLAIM_EXPIRED"`
 
-Defined in: [src/errors.ts:99](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L99)
+Defined in: [src/errors.ts:99](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L99)
 
 ***
 
@@ -100,7 +100,7 @@ Defined in: [src/errors.ts:99](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_DEADLINE\_NOT\_PASSED**: `"BOUNTY_DEADLINE_NOT_PASSED"`
 
-Defined in: [src/errors.ts:84](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L84)
+Defined in: [src/errors.ts:84](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L84)
 
 ***
 
@@ -108,7 +108,7 @@ Defined in: [src/errors.ts:84](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_DUPLICATE\_ID**: `"BOUNTY_DUPLICATE_ID"`
 
-Defined in: [src/errors.ts:90](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L90)
+Defined in: [src/errors.ts:90](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L90)
 
 ***
 
@@ -116,7 +116,7 @@ Defined in: [src/errors.ts:90](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_EXISTS**: `"BOUNTY_EXISTS"`
 
-Defined in: [src/errors.ts:81](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L81)
+Defined in: [src/errors.ts:81](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L81)
 
 ***
 
@@ -124,7 +124,7 @@ Defined in: [src/errors.ts:81](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_FEE\_RECIPIENT\_NOT\_SET**: `"BOUNTY_FEE_RECIPIENT_NOT_SET"`
 
-Defined in: [src/errors.ts:87](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L87)
+Defined in: [src/errors.ts:87](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L87)
 
 ***
 
@@ -132,7 +132,7 @@ Defined in: [src/errors.ts:87](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_FUNDS\_NOT\_LOCKED**: `"BOUNTY_FUNDS_NOT_LOCKED"`
 
-Defined in: [src/errors.ts:83](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L83)
+Defined in: [src/errors.ts:83](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L83)
 
 ***
 
@@ -140,7 +140,7 @@ Defined in: [src/errors.ts:83](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_FUNDS\_PAUSED**: `"BOUNTY_FUNDS_PAUSED"`
 
-Defined in: [src/errors.ts:95](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L95)
+Defined in: [src/errors.ts:95](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L95)
 
 ***
 
@@ -148,7 +148,7 @@ Defined in: [src/errors.ts:95](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_GOVERNANCE\_VERSION\_TOO\_LOW**: `"BOUNTY_GOVERNANCE_VERSION_TOO_LOW"`
 
-Defined in: [src/errors.ts:100](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L100)
+Defined in: [src/errors.ts:100](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L100)
 
 ***
 
@@ -156,7 +156,7 @@ Defined in: [src/errors.ts:100](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **BOUNTY\_INSUFFICIENT\_FUNDS**: `"BOUNTY_INSUFFICIENT_FUNDS"`
 
-Defined in: [src/errors.ts:93](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L93)
+Defined in: [src/errors.ts:93](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L93)
 
 ***
 
@@ -164,7 +164,7 @@ Defined in: [src/errors.ts:93](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_INVALID\_AMOUNT**: `"BOUNTY_INVALID_AMOUNT"`
 
-Defined in: [src/errors.ts:91](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L91)
+Defined in: [src/errors.ts:91](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L91)
 
 ***
 
@@ -172,7 +172,7 @@ Defined in: [src/errors.ts:91](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_INVALID\_BATCH\_SIZE**: `"BOUNTY_INVALID_BATCH_SIZE"`
 
-Defined in: [src/errors.ts:88](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L88)
+Defined in: [src/errors.ts:88](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L88)
 
 ***
 
@@ -180,7 +180,7 @@ Defined in: [src/errors.ts:88](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_INVALID\_DEADLINE**: `"BOUNTY_INVALID_DEADLINE"`
 
-Defined in: [src/errors.ts:92](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L92)
+Defined in: [src/errors.ts:92](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L92)
 
 ***
 
@@ -188,7 +188,7 @@ Defined in: [src/errors.ts:92](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_INVALID\_FEE\_RATE**: `"BOUNTY_INVALID_FEE_RATE"`
 
-Defined in: [src/errors.ts:86](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L86)
+Defined in: [src/errors.ts:86](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L86)
 
 ***
 
@@ -196,7 +196,7 @@ Defined in: [src/errors.ts:86](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_NOT\_FOUND**: `"BOUNTY_NOT_FOUND"`
 
-Defined in: [src/errors.ts:82](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L82)
+Defined in: [src/errors.ts:82](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L82)
 
 ***
 
@@ -204,7 +204,7 @@ Defined in: [src/errors.ts:82](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_NOT\_INITIALIZED**: `"BOUNTY_NOT_INITIALIZED"`
 
-Defined in: [src/errors.ts:80](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L80)
+Defined in: [src/errors.ts:80](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L80)
 
 ***
 
@@ -212,7 +212,7 @@ Defined in: [src/errors.ts:80](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_REFUND\_NOT\_APPROVED**: `"BOUNTY_REFUND_NOT_APPROVED"`
 
-Defined in: [src/errors.ts:94](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L94)
+Defined in: [src/errors.ts:94](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L94)
 
 ***
 
@@ -220,7 +220,7 @@ Defined in: [src/errors.ts:94](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **BOUNTY\_UNAUTHORIZED**: `"BOUNTY_UNAUTHORIZED"`
 
-Defined in: [src/errors.ts:85](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L85)
+Defined in: [src/errors.ts:85](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L85)
 
 ***
 
@@ -228,7 +228,7 @@ Defined in: [src/errors.ts:85](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **CIRCUIT\_INSUFFICIENT\_BALANCE**: `"CIRCUIT_INSUFFICIENT_BALANCE"`
 
-Defined in: [src/errors.ts:121](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L121)
+Defined in: [src/errors.ts:121](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L121)
 
 ***
 
@@ -236,7 +236,7 @@ Defined in: [src/errors.ts:121](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **CIRCUIT\_OPEN**: `"CIRCUIT_OPEN"`
 
-Defined in: [src/errors.ts:119](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L119)
+Defined in: [src/errors.ts:119](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L119)
 
 ***
 
@@ -244,7 +244,7 @@ Defined in: [src/errors.ts:119](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **CIRCUIT\_TRANSFER\_FAILED**: `"CIRCUIT_TRANSFER_FAILED"`
 
-Defined in: [src/errors.ts:120](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L120)
+Defined in: [src/errors.ts:120](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L120)
 
 ***
 
@@ -252,7 +252,7 @@ Defined in: [src/errors.ts:120](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **EMPTY\_BATCH**: `"EMPTY_BATCH"`
 
-Defined in: [src/errors.ts:71](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L71)
+Defined in: [src/errors.ts:71](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L71)
 
 ***
 
@@ -260,7 +260,7 @@ Defined in: [src/errors.ts:71](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **GOV\_ALREADY\_VOTED**: `"GOV_ALREADY_VOTED"`
 
-Defined in: [src/errors.ts:113](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L113)
+Defined in: [src/errors.ts:113](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L113)
 
 ***
 
@@ -268,7 +268,7 @@ Defined in: [src/errors.ts:113](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_EXECUTION\_DELAY\_NOT\_MET**: `"GOV_EXECUTION_DELAY_NOT_MET"`
 
-Defined in: [src/errors.ts:115](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L115)
+Defined in: [src/errors.ts:115](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L115)
 
 ***
 
@@ -276,7 +276,7 @@ Defined in: [src/errors.ts:115](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_INSUFFICIENT\_STAKE**: `"GOV_INSUFFICIENT_STAKE"`
 
-Defined in: [src/errors.ts:106](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L106)
+Defined in: [src/errors.ts:106](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L106)
 
 ***
 
@@ -284,7 +284,7 @@ Defined in: [src/errors.ts:106](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_INVALID\_THRESHOLD**: `"GOV_INVALID_THRESHOLD"`
 
-Defined in: [src/errors.ts:104](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L104)
+Defined in: [src/errors.ts:104](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L104)
 
 ***
 
@@ -292,7 +292,7 @@ Defined in: [src/errors.ts:104](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_NOT\_INITIALIZED**: `"GOV_NOT_INITIALIZED"`
 
-Defined in: [src/errors.ts:103](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L103)
+Defined in: [src/errors.ts:103](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L103)
 
 ***
 
@@ -300,7 +300,7 @@ Defined in: [src/errors.ts:103](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_PROPOSAL\_EXPIRED**: `"GOV_PROPOSAL_EXPIRED"`
 
-Defined in: [src/errors.ts:116](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L116)
+Defined in: [src/errors.ts:116](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L116)
 
 ***
 
@@ -308,7 +308,7 @@ Defined in: [src/errors.ts:116](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_PROPOSAL\_NOT\_ACTIVE**: `"GOV_PROPOSAL_NOT_ACTIVE"`
 
-Defined in: [src/errors.ts:109](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L109)
+Defined in: [src/errors.ts:109](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L109)
 
 ***
 
@@ -316,7 +316,7 @@ Defined in: [src/errors.ts:109](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_PROPOSAL\_NOT\_APPROVED**: `"GOV_PROPOSAL_NOT_APPROVED"`
 
-Defined in: [src/errors.ts:114](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L114)
+Defined in: [src/errors.ts:114](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L114)
 
 ***
 
@@ -324,7 +324,7 @@ Defined in: [src/errors.ts:114](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_PROPOSAL\_NOT\_FOUND**: `"GOV_PROPOSAL_NOT_FOUND"`
 
-Defined in: [src/errors.ts:108](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L108)
+Defined in: [src/errors.ts:108](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L108)
 
 ***
 
@@ -332,7 +332,7 @@ Defined in: [src/errors.ts:108](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_PROPOSALS\_NOT\_FOUND**: `"GOV_PROPOSALS_NOT_FOUND"`
 
-Defined in: [src/errors.ts:107](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L107)
+Defined in: [src/errors.ts:107](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L107)
 
 ***
 
@@ -340,7 +340,7 @@ Defined in: [src/errors.ts:107](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_THRESHOLD\_TOO\_LOW**: `"GOV_THRESHOLD_TOO_LOW"`
 
-Defined in: [src/errors.ts:105](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L105)
+Defined in: [src/errors.ts:105](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L105)
 
 ***
 
@@ -348,7 +348,7 @@ Defined in: [src/errors.ts:105](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_VOTING\_ENDED**: `"GOV_VOTING_ENDED"`
 
-Defined in: [src/errors.ts:111](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L111)
+Defined in: [src/errors.ts:111](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L111)
 
 ***
 
@@ -356,7 +356,7 @@ Defined in: [src/errors.ts:111](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_VOTING\_NOT\_STARTED**: `"GOV_VOTING_NOT_STARTED"`
 
-Defined in: [src/errors.ts:110](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L110)
+Defined in: [src/errors.ts:110](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L110)
 
 ***
 
@@ -364,7 +364,7 @@ Defined in: [src/errors.ts:110](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOV\_VOTING\_STILL\_ACTIVE**: `"GOV_VOTING_STILL_ACTIVE"`
 
-Defined in: [src/errors.ts:112](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L112)
+Defined in: [src/errors.ts:112](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L112)
 
 ***
 
@@ -372,7 +372,7 @@ Defined in: [src/errors.ts:112](https://github.com/Grainlify/Grainlify-Stellar-C
 
 > **GOVERNANCE\_VERSION\_TOO\_LOW**: `"GOVERNANCE_VERSION_TOO_LOW"`
 
-Defined in: [src/errors.ts:76](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L76)
+Defined in: [src/errors.ts:76](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L76)
 
 ***
 
@@ -380,7 +380,7 @@ Defined in: [src/errors.ts:76](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **INSUFFICIENT\_BALANCE**: `"INSUFFICIENT_BALANCE"`
 
-Defined in: [src/errors.ts:68](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L68)
+Defined in: [src/errors.ts:68](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L68)
 
 ***
 
@@ -388,7 +388,7 @@ Defined in: [src/errors.ts:68](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **INVALID\_AMOUNT**: `"INVALID_AMOUNT"`
 
-Defined in: [src/errors.ts:69](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L69)
+Defined in: [src/errors.ts:69](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L69)
 
 ***
 
@@ -396,7 +396,7 @@ Defined in: [src/errors.ts:69](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **LENGTH\_MISMATCH**: `"LENGTH_MISMATCH"`
 
-Defined in: [src/errors.ts:72](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L72)
+Defined in: [src/errors.ts:72](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L72)
 
 ***
 
@@ -404,7 +404,7 @@ Defined in: [src/errors.ts:72](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **NOT\_INITIALIZED**: `"NOT_INITIALIZED"`
 
-Defined in: [src/errors.ts:66](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L66)
+Defined in: [src/errors.ts:66](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L66)
 
 ***
 
@@ -412,7 +412,7 @@ Defined in: [src/errors.ts:66](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **OVERFLOW**: `"OVERFLOW"`
 
-Defined in: [src/errors.ts:73](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L73)
+Defined in: [src/errors.ts:73](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L73)
 
 ***
 
@@ -420,4 +420,4 @@ Defined in: [src/errors.ts:73](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > **UNAUTHORIZED**: `"UNAUTHORIZED"`
 
-Defined in: [src/errors.ts:67](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L67)
+Defined in: [src/errors.ts:67](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L67)

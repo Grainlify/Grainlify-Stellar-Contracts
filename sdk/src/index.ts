@@ -22,7 +22,12 @@ export type {
   RefundApproval,
   RefundEligibility,
   FeeConfig,
-  PauseFlags
+  PauseFlags,
+  MultisigConfig,
+  CircuitBreakerConfig,
+  CircuitState,
+  CircuitBreakerStatus,
+  AdminConfigSnapshot
 } from './bounty-escrow-client';
 
 export { 
