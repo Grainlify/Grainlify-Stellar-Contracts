@@ -6,7 +6,7 @@
 
 # Class: ProgramEscrowClient
 
-Defined in: [src/program-escrow-client.ts:56](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L56)
+Defined in: [src/program-escrow-client.ts:56](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L56)
 
 Client for interacting with the ProgramEscrow Soroban contract
 
@@ -16,7 +16,7 @@ Client for interacting with the ProgramEscrow Soroban contract
 
 > **new ProgramEscrowClient**(`config`): `ProgramEscrowClient`
 
-Defined in: [src/program-escrow-client.ts:64](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L64)
+Defined in: [src/program-escrow-client.ts:64](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L64)
 
 Create a client bound to one ProgramEscrow contract and Soroban RPC endpoint.
 
@@ -36,7 +36,7 @@ Create a client bound to one ProgramEscrow contract and Soroban RPC endpoint.
 
 > **batchPayout**(`recipients`, `amounts`, `sourceKeypair`): `Promise`\<[`ProgramData`](../interfaces/ProgramData.md)\>
 
-Defined in: [src/program-escrow-client.ts:135](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L135)
+Defined in: [src/program-escrow-client.ts:135](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L135)
 
 Execute batch payouts to multiple recipients
 
@@ -64,7 +64,7 @@ Execute batch payouts to multiple recipients
 
 > **createProgramReleaseSchedule**(`recipient`, `amount`, `releaseTimestamp`, `sourceKeypair`): `Promise`\<[`ProgramReleaseSchedule`](../interfaces/ProgramReleaseSchedule.md)\>
 
-Defined in: [src/program-escrow-client.ts:229](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L229)
+Defined in: [src/program-escrow-client.ts:229](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L229)
 
 Create a release schedule
 
@@ -96,7 +96,7 @@ Create a release schedule
 
 > **getProgramInfo**(): `Promise`\<[`ProgramData`](../interfaces/ProgramData.md)\>
 
-Defined in: [src/program-escrow-client.ts:205](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L205)
+Defined in: [src/program-escrow-client.ts:205](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L205)
 
 Get program information
 
@@ -110,7 +110,7 @@ Get program information
 
 > **getRemainingBalance**(): `Promise`\<`bigint`\>
 
-Defined in: [src/program-escrow-client.ts:217](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L217)
+Defined in: [src/program-escrow-client.ts:217](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L217)
 
 Get remaining balance
 
@@ -124,7 +124,7 @@ Get remaining balance
 
 > **initProgram**(`programId`, `authorizedPayoutKey`, `tokenAddress`, `sourceKeypair`): `Promise`\<[`ProgramData`](../interfaces/ProgramData.md)\>
 
-Defined in: [src/program-escrow-client.ts:83](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L83)
+Defined in: [src/program-escrow-client.ts:83](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L83)
 
 Initialize a new program escrow
 
@@ -156,7 +156,7 @@ Initialize a new program escrow
 
 > **lockProgramFunds**(`from`, `amount`, `sourceKeypair`): `Promise`\<[`ProgramData`](../interfaces/ProgramData.md)\>
 
-Defined in: [src/program-escrow-client.ts:111](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L111)
+Defined in: [src/program-escrow-client.ts:111](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L111)
 
 Lock funds into the program escrow
 
@@ -184,7 +184,7 @@ Lock funds into the program escrow
 
 > **singlePayout**(`recipient`, `amount`, `sourceKeypair`): `Promise`\<[`ProgramData`](../interfaces/ProgramData.md)\>
 
-Defined in: [src/program-escrow-client.ts:179](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L179)
+Defined in: [src/program-escrow-client.ts:179](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L179)
 
 Execute a single payout
 
@@ -212,7 +212,7 @@ Execute a single payout
 
 > **triggerProgramReleases**(`sourceKeypair`): `Promise`\<`number`\>
 
-Defined in: [src/program-escrow-client.ts:256](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L256)
+Defined in: [src/program-escrow-client.ts:256](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L256)
 
 Trigger program releases
 

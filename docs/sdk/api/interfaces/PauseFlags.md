@@ -6,7 +6,7 @@
 
 # Interface: PauseFlags
 
-Defined in: [src/bounty-escrow-client.ts:166](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L166)
+Defined in: [src/bounty-escrow-client.ts:166](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L166)
 
 Pause switches for bounty escrow operations.
 
@@ -16,7 +16,7 @@ Pause switches for bounty escrow operations.
 
 > **lock\_paused**: `boolean`
 
-Defined in: [src/bounty-escrow-client.ts:168](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L168)
+Defined in: [src/bounty-escrow-client.ts:168](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L168)
 
 Whether lock operations are paused.
 
@@ -26,7 +26,7 @@ Whether lock operations are paused.
 
 > **refund\_paused**: `boolean`
 
-Defined in: [src/bounty-escrow-client.ts:172](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L172)
+Defined in: [src/bounty-escrow-client.ts:172](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L172)
 
 Whether refund operations are paused.
 
@@ -36,6 +36,6 @@ Whether refund operations are paused.
 
 > **release\_paused**: `boolean`
 
-Defined in: [src/bounty-escrow-client.ts:170](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L170)
+Defined in: [src/bounty-escrow-client.ts:170](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L170)
 
 Whether release operations are paused.

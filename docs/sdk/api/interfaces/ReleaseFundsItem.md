@@ -6,7 +6,7 @@
 
 # Interface: ReleaseFundsItem
 
-Defined in: [src/bounty-escrow-client.ts:26](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L26)
+Defined in: [src/bounty-escrow-client.ts:26](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L26)
 
 Input item for batch-releasing a bounty escrow.
 
@@ -16,7 +16,7 @@ Input item for batch-releasing a bounty escrow.
 
 > **bounty\_id**: `bigint`
 
-Defined in: [src/bounty-escrow-client.ts:28](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L28)
+Defined in: [src/bounty-escrow-client.ts:28](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L28)
 
 Application-level bounty identifier.
 
@@ -26,6 +26,6 @@ Application-level bounty identifier.
 
 > **contributor**: `string`
 
-Defined in: [src/bounty-escrow-client.ts:30](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L30)
+Defined in: [src/bounty-escrow-client.ts:30](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L30)
 
 Stellar account that should receive the released bounty funds.

@@ -1,4 +1,4 @@
-import { ProgramEscrowClient } from '../program-escrow-client';
+import { ProgramEscrowClient } from '../index';
 import {
   ValidationError,
   ContractError,
