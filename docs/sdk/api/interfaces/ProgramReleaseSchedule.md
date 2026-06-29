@@ -6,7 +6,7 @@
 
 # Interface: ProgramReleaseSchedule
 
-Defined in: [src/program-escrow-client.ts:40](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L40)
+Defined in: [src/program-escrow-client.ts:40](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L40)
 
 Scheduled release entry for program escrow funds.
 
@@ -16,7 +16,7 @@ Scheduled release entry for program escrow funds.
 
 > **amount**: `bigint`
 
-Defined in: [src/program-escrow-client.ts:46](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L46)
+Defined in: [src/program-escrow-client.ts:46](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L46)
 
 Scheduled amount in the contract token's smallest unit.
 
@@ -26,7 +26,7 @@ Scheduled amount in the contract token's smallest unit.
 
 > **recipient**: `string`
 
-Defined in: [src/program-escrow-client.ts:44](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L44)
+Defined in: [src/program-escrow-client.ts:44](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L44)
 
 Stellar account that should receive the scheduled release.
 
@@ -36,7 +36,7 @@ Stellar account that should receive the scheduled release.
 
 > **release\_timestamp**: `number`
 
-Defined in: [src/program-escrow-client.ts:48](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L48)
+Defined in: [src/program-escrow-client.ts:48](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L48)
 
 Unix timestamp when the release becomes executable.
 
@@ -46,7 +46,7 @@ Unix timestamp when the release becomes executable.
 
 > **released**: `boolean`
 
-Defined in: [src/program-escrow-client.ts:50](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L50)
+Defined in: [src/program-escrow-client.ts:50](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L50)
 
 Whether the scheduled release has already been executed.
 
@@ -56,6 +56,6 @@ Whether the scheduled release has already been executed.
 
 > **schedule\_id**: `bigint`
 
-Defined in: [src/program-escrow-client.ts:42](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/program-escrow-client.ts#L42)
+Defined in: [src/program-escrow-client.ts:42](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/program-escrow-client.ts#L42)
 
 Unique schedule identifier.

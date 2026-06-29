@@ -8,7 +8,7 @@
 
 > **parseContractErrorByCode**(`numericCode`, `contract`): [`ContractError`](../classes/ContractError.md)
 
-Defined in: [src/errors.ts:268](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L268)
+Defined in: [src/errors.ts:268](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L268)
 
 Resolve a numeric on-chain error code to a typed ContractError.
 

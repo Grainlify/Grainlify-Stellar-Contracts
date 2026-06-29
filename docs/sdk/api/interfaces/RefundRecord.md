@@ -6,7 +6,7 @@
 
 # Interface: RefundRecord
 
-Defined in: [src/bounty-escrow-client.ts:40](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L40)
+Defined in: [src/bounty-escrow-client.ts:40](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L40)
 
 Historical refund record attached to an escrow.
 
@@ -16,7 +16,7 @@ Historical refund record attached to an escrow.
 
 > **amount**: `bigint`
 
-Defined in: [src/bounty-escrow-client.ts:42](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L42)
+Defined in: [src/bounty-escrow-client.ts:42](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L42)
 
 Refunded amount in the contract token's smallest unit.
 
@@ -26,7 +26,7 @@ Refunded amount in the contract token's smallest unit.
 
 > **mode**: [`RefundMode`](../type-aliases/RefundMode.md)
 
-Defined in: [src/bounty-escrow-client.ts:48](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L48)
+Defined in: [src/bounty-escrow-client.ts:48](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L48)
 
 Whether the refund closed the escrow or returned a partial amount.
 
@@ -36,7 +36,7 @@ Whether the refund closed the escrow or returned a partial amount.
 
 > **recipient**: `string`
 
-Defined in: [src/bounty-escrow-client.ts:44](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L44)
+Defined in: [src/bounty-escrow-client.ts:44](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L44)
 
 Stellar account that received the refund.
 
@@ -46,6 +46,6 @@ Stellar account that received the refund.
 
 > **timestamp**: `number`
 
-Defined in: [src/bounty-escrow-client.ts:46](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/bounty-escrow-client.ts#L46)
+Defined in: [src/bounty-escrow-client.ts:46](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/bounty-escrow-client.ts#L46)
 
 Unix timestamp when the refund was executed.
