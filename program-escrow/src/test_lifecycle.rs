@@ -976,3 +976,44 @@ fn test_complete_lifecycle_all_transitions() {
     // Contract still has 100_000 that was minted but never locked
     assert_eq!(token_client.balance(&contract_id), 0);
 }
+
+/// Verify that long-lived persistent storage entries (schedules, history, data)
+/// remain accessible and are extended during release-path operations.
+#[test]
+fn test_persistent_storage_ttl_extension() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // 1. Initialize and fund
+    let (client, _admin, _cid, token_client) = setup_active_program(&env, 100_000);
+    let recipient = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    // 2. Create a schedule far in the future (60 days)
+    let release_at = now + 60 * 24 * 60 * 60;
+    client.create_program_release_schedule(&50_000, &release_at, &recipient);
+
+    // 3. Advance ledger time significantly (40 days)
+    // On a real network, unextended entries might be archived by now.
+    env.ledger().set_timestamp(now + 40 * 24 * 60 * 60);
+
+    // 4. Perform a release-path read (trigger_program_releases)
+    // This should NOT release yet but MUST successfully read and re-bump SCHEDULES.
+    let count = client.trigger_program_releases();
+    assert_eq!(count, 0);
+
+    // 5. Advance past the scheduled release time
+    env.ledger().set_timestamp(release_at + 1);
+
+    // 6. Trigger again — should successfully release the long-lived schedule
+    let count2 = client.trigger_program_releases();
+    assert_eq!(count2, 1);
+
+    // 7. Verify final state
+    assert_eq!(token_client.balance(&recipient), 50_000);
+    assert_eq!(client.get_remaining_balance(), 50_000);
+
+    // 8. Verify history is still accessible
+    let history = client.get_program_release_history();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().amount, 50_000);
+}

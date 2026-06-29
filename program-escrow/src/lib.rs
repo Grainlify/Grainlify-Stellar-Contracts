@@ -207,8 +207,11 @@ const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
 const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
 const FUND_CAP_CONFIG: Symbol = symbol_short!("FnCapCfg");
 const BASIS_POINTS: i128 = 10_000;
-const TTL_THRESHOLD: u32 = 17280;
-const TTL_EXTEND_TO: u32 = 518400;
+/// Threshold for bumping persistent storage TTL (approx. 1 day on 5s ledgers).
+const PERSISTENT_TTL_THRESHOLD: u32 = 17_280;
+/// Extension horizon for persistent storage TTL (approx. 30 days on 5s ledgers).
+/// This ensures long-lived release schedules and history remain accessible.
+const PERSISTENT_TTL_EXTEND_TO: u32 = 518_400;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PayoutRecord {
@@ -622,6 +625,7 @@ impl ProgramEscrowContract {
             .set(&RELEASE_HISTORY, &Vec::<ProgramReleaseHistory>::new(&env));
         Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         env.storage().instance().set(&NEXT_SCHEDULE_ID, &1_u64);
+        Self::bump_instance_ttl(&env);
 
         // Emit ProgramInitialized event
         env.events().publish(
@@ -714,13 +718,24 @@ impl ProgramEscrowContract {
 
     /// Bump the TTL for single-program persistent storage keys
     fn bump_persistent_symbol_ttl(env: &Env, key: &Symbol) {
-        env.storage().persistent().extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
 
     /// Bump the TTL for multi-program persistent storage keys
     fn bump_persistent_datakey_ttl(env: &Env, key: &DataKey) {
-        env.storage().persistent().extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
+    /// Bump the TTL for the contract instance storage
+    fn bump_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    }
+
 
     /// Get fee configuration (internal helper)
     fn get_fee_config_internal(env: &Env) -> FeeConfig {
@@ -798,6 +813,7 @@ impl ProgramEscrowContract {
         }
         // Check if any programs exist in registry
         let registry: Option<Vec<String>> = env.storage().instance().get(&PROGRAM_REGISTRY);
+        Self::bump_instance_ttl(&env);
         if let Some(reg) = registry {
             return reg.len() > 0;
         }
@@ -916,9 +932,11 @@ impl ProgramEscrowContract {
     /// This must be called before any admin protected functions (like pause) can be used.
     pub fn initialize_contract(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
+            Self::bump_instance_ttl(&env);
             panic!("Already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Self::bump_instance_ttl(&env);
     }
 
     /// Register or replace the contract admin. Can be called multiple times to rotate the admin.
@@ -926,14 +944,18 @@ impl ProgramEscrowContract {
         // If admin is already set, require auth from the current admin
         if env.storage().instance().has(&DataKey::Admin) {
             let currentadmin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::bump_instance_ttl(&env);
             currentadmin.require_auth();
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Self::bump_instance_ttl(&env);
     }
 
     /// Get the current admin
     pub fn getadmin(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Admin)
+        let admin = env.storage().instance().get(&DataKey::Admin);
+        if admin.is_some() { Self::bump_instance_ttl(&env); }
+        admin
     }
 
     /// Update pause flags (admin only)
@@ -944,10 +966,12 @@ impl ProgramEscrowContract {
         refund: Option<bool>,
     ) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
+            Self::bump_instance_ttl(&env);
             panic!("Not initialized");
         }
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::bump_instance_ttl(&env);
         admin.require_auth();
 
         // Check governance requirements
@@ -980,6 +1004,7 @@ impl ProgramEscrowContract {
         }
 
         env.storage().instance().set(&DataKey::PauseFlags, &flags);
+        Self::bump_instance_ttl(&env);
         Ok(())
     }
 
@@ -1023,6 +1048,7 @@ impl ProgramEscrowContract {
     /// Returns true when the given dispute key currently stores an open dispute.
     fn is_dispute_open_for_key(env: &Env, key: &DataKey) -> bool {
         if let Some(record) = env.storage().instance().get::<DataKey, DisputeRecord>(key) {
+            Self::bump_instance_ttl(&env);
             record.status == DisputeStatus::Open
         } else {
             false
@@ -1071,6 +1097,7 @@ impl ProgramEscrowContract {
         };
 
         env.storage().instance().set(&key, &record);
+        Self::bump_instance_ttl(&env);
 
         env.events().publish(
             (DISPUTE_OPENED,),
@@ -1094,6 +1121,7 @@ impl ProgramEscrowContract {
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic!("{}", missing_message));
+        Self::bump_instance_ttl(&env);
 
         if record.status != DisputeStatus::Open {
             panic!("No open dispute to resolve");
@@ -1106,6 +1134,7 @@ impl ProgramEscrowContract {
         record.resolved_at = Some(now);
 
         env.storage().instance().set(&key, &record);
+        Self::bump_instance_ttl(&env);
 
         env.events().publish(
             (DISPUTE_RESOLVED,),
@@ -1128,6 +1157,7 @@ impl ProgramEscrowContract {
             .instance()
             .get(&key)
             .unwrap_or_else(|| panic!("{}", missing_message));
+        Self::bump_instance_ttl(&env);
 
         if record.status != DisputeStatus::Open {
             panic!("No open dispute to cancel");
@@ -1140,6 +1170,7 @@ impl ProgramEscrowContract {
         record.resolved_at = Some(now);
 
         env.storage().instance().set(&key, &record);
+        Self::bump_instance_ttl(&env);
 
         env.events().publish(
             (DISPUTE_CANCELLED,),
@@ -1269,21 +1300,27 @@ impl ProgramEscrowContract {
 
     /// Returns the current dispute record, if any.
     pub fn get_dispute(env: Env) -> Option<DisputeRecord> {
-        env.storage().instance().get(&DataKey::Dispute)
+        let dispute = env.storage().instance().get(&DataKey::Dispute);
+        if dispute.is_some() { Self::bump_instance_ttl(&env); }
+        dispute
     }
 
     /// Returns the current recipient-scoped dispute record, if any.
     pub fn get_recipient_dispute(env: Env, recipient: Address) -> Option<DisputeRecord> {
-        env.storage()
+        let record = env.storage()
             .instance()
-            .get(&DataKey::RecipientDispute(recipient))
+            .get(&DataKey::RecipientDispute(recipient));
+        if record.is_some() { Self::bump_instance_ttl(&env); }
+        record
     }
 
     /// Returns the current schedule-scoped dispute record, if any.
     pub fn get_schedule_dispute(env: Env, schedule_id: u64) -> Option<DisputeRecord> {
-        env.storage()
+        let record = env.storage()
             .instance()
-            .get(&DataKey::ScheduleDispute(schedule_id))
+            .get(&DataKey::ScheduleDispute(schedule_id));
+        if record.is_some() { Self::bump_instance_ttl(&env); }
+        record
     }
 
     /// Returns true if a dispute is currently open.
@@ -1305,6 +1342,7 @@ impl ProgramEscrowContract {
 
     pub fn set_circuitadmin(env: Env, newadmin: Address, caller: Option<Address>) {
         error_recovery::set_circuitadmin(&env, newadmin, caller);
+        Self::bump_instance_ttl(&env);
     }
 
     pub fn get_circuitadmin(env: Env) -> Option<Address> {
@@ -2020,6 +2058,7 @@ impl ProgramEscrowContract {
             .instance()
             .set(&NEXT_SCHEDULE_ID, &(schedule_id + 1));
 
+        Self::bump_instance_ttl(&env);
         schedule
     }
 
