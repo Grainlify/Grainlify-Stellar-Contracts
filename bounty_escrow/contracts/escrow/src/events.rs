@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
 pub const EVENT_VERSION_V2: u32 = 2;
 
@@ -61,6 +61,24 @@ pub fn emit_funds_refunded(env: &Env, event: FundsRefunded) {
     env.events().publish(topics, event.clone());
 }
 
+/// Emitted when a sweep observes an expired bounty immediately before
+/// refunding the remaining locked funds to the depositor.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BountyExpired {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub depositor: Address,
+    pub amount: i128,
+    pub deadline: u64,
+    pub expired_at: u64,
+}
+
+pub fn emit_bounty_expired(env: &Env, event: BountyExpired) {
+    let topics = (symbol_short!("b_exp"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FeeOperationType {
@@ -68,9 +86,12 @@ pub enum FeeOperationType {
     Release,
 }
 
+/// Fee collected during a lock or release operation.
+/// `version` is always [`EVENT_VERSION_V2`] for schema-evolution tracking.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeCollected {
+    pub version: u32,
     pub operation_type: FeeOperationType,
     pub amount: i128,
     pub fee_rate: i128,
@@ -83,9 +104,12 @@ pub fn emit_fee_collected(env: &Env, event: FeeCollected) {
     env.events().publish(topics, event.clone());
 }
 
+/// Emitted once per `batch_lock_funds` call summarising the whole batch.
+/// `version` is always [`EVENT_VERSION_V2`].
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchFundsLocked {
+    pub version: u32,
     pub count: u32,
     pub total_amount: i128,
     pub timestamp: u64,
@@ -96,9 +120,12 @@ pub fn emit_batch_funds_locked(env: &Env, event: BatchFundsLocked) {
     env.events().publish(topics, event.clone());
 }
 
+/// Emitted when the admin updates fee rates or the fee recipient.
+/// `version` is always [`EVENT_VERSION_V2`].
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeConfigUpdated {
+    pub version: u32,
     pub lock_fee_rate: i128,
     pub release_fee_rate: i128,
     pub fee_recipient: Address,
@@ -111,9 +138,12 @@ pub fn emit_fee_config_updated(env: &Env, event: FeeConfigUpdated) {
     env.events().publish(topics, event.clone());
 }
 
+/// Emitted once per `batch_release_funds` call summarising the whole batch.
+/// `version` is always [`EVENT_VERSION_V2`].
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchFundsReleased {
+    pub version: u32,
     pub count: u32,
     pub total_amount: i128,
     pub timestamp: u64,
@@ -124,9 +154,12 @@ pub fn emit_batch_funds_released(env: &Env, event: BatchFundsReleased) {
     env.events().publish(topics, event.clone());
 }
 
+/// Emitted when a multisig signer approves a large release.
+/// `version` is always [`EVENT_VERSION_V2`].
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ApprovalAdded {
+    pub version: u32,
     pub bounty_id: u64,
     pub contributor: Address,
     pub approver: Address,
@@ -138,32 +171,57 @@ pub fn emit_approval_added(env: &Env, event: ApprovalAdded) {
     env.events().publish(topics, event.clone());
 }
 
+/// Emitted by `authorize_claim` when the admin creates a pending claim.
+/// `version` is always [`EVENT_VERSION_V2`].
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimCreated {
+    pub version: u32,
     pub bounty_id: u64, // use program_id+schedule_id equivalent in program-escrow
     pub recipient: Address,
     pub amount: i128,
     pub expires_at: u64,
 }
 
+pub fn emit_claim_created(env: &Env, event: ClaimCreated) {
+    let topics = (symbol_short!("claim"), symbol_short!("created"));
+    env.events().publish(topics, event.clone());
+}
+
+/// Emitted by `claim` when the beneficiary successfully claims their funds.
+/// `version` is always [`EVENT_VERSION_V2`].
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimExecuted {
+    pub version: u32,
     pub bounty_id: u64,
     pub recipient: Address,
     pub amount: i128,
     pub claimed_at: u64,
 }
 
+pub fn emit_claim_executed(env: &Env, event: ClaimExecuted) {
+    let topics = (symbol_short!("claim"), symbol_short!("done"));
+    env.events().publish(topics, event.clone());
+}
+
+/// Emitted by `cancel_pending_claim` when the admin cancels a pending claim.
+/// `version` is always [`EVENT_VERSION_V2`].
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimCancelled {
+    pub version: u32,
     pub bounty_id: u64,
     pub recipient: Address,
     pub amount: i128,
     pub cancelled_at: u64,
     pub cancelled_by: Address,
+    pub reason: Symbol,
+}
+
+pub fn emit_claim_cancelled(env: &Env, event: ClaimCancelled) {
+    let topics = (symbol_short!("claim"), symbol_short!("cancel"));
+    env.events().publish(topics, event.clone());
 }
 
 pub fn emit_pause_state_changed(env: &Env, event: crate::PauseStateChanged) {

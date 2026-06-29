@@ -121,10 +121,9 @@ fn test_single_payout_normal_execution() {
     client.init_program(&program_id, &authorized_key, &token_client.address);
 
     // Transfer tokens to contract
-    token_client.transfer(&authorized_key, &contract_id, &amount);
 
     // Lock funds
-    client.lock_program_funds(&amount);
+    client.lock_program_funds(&authorized_key, &amount);
 
     // Execute single payout (should succeed)
     let result = client.single_payout(&recipient, &(amount / 2));
@@ -151,8 +150,7 @@ fn test_single_payout_blocks_reentrancy() {
     token_admin.mint(&authorized_key, &amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &amount);
-    client.lock_program_funds(&amount);
+    client.lock_program_funds(&authorized_key, &amount);
 
     // Manually set the reentrancy guard to simulate an ongoing call
     env.as_contract(&contract_id, || {
@@ -187,8 +185,7 @@ fn test_batch_payout_normal_execution() {
     token_admin.mint(&authorized_key, &total_amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &total_amount);
-    client.lock_program_funds(&total_amount);
+    client.lock_program_funds(&authorized_key, &total_amount);
 
     // Execute batch payout
     let recipients = vec![&env, recipient1, recipient2];
@@ -220,8 +217,7 @@ fn test_batch_payout_blocks_reentrancy() {
     token_admin.mint(&authorized_key, &total_amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &total_amount);
-    client.lock_program_funds(&total_amount);
+    client.lock_program_funds(&authorized_key, &total_amount);
 
     // Manually set the reentrancy guard
     env.as_contract(&contract_id, || {
@@ -258,8 +254,7 @@ fn test_cross_function_reentrancy_single_to_batch() {
     token_admin.mint(&authorized_key, &amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &amount);
-    client.lock_program_funds(&amount);
+    client.lock_program_funds(&authorized_key, &amount);
 
     // Simulate being inside single_payout
     env.as_contract(&contract_id, || {
@@ -292,8 +287,7 @@ fn test_cross_function_reentrancy_batch_to_single() {
     token_admin.mint(&authorized_key, &amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &amount);
-    client.lock_program_funds(&amount);
+    client.lock_program_funds(&authorized_key, &amount);
 
     // Simulate being inside batch_payout
     env.as_contract(&contract_id, || {
@@ -328,8 +322,7 @@ fn test_trigger_releases_normal_execution() {
     token_admin.mint(&authorized_key, &amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &amount);
-    client.lock_program_funds(&amount);
+    client.lock_program_funds(&authorized_key, &amount);
 
     // Create schedule
     client.create_program_release_schedule(&amount, &release_timestamp, &recipient);
@@ -364,8 +357,7 @@ fn test_trigger_releases_blocks_reentrancy() {
     token_admin.mint(&authorized_key, &amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &amount);
-    client.lock_program_funds(&amount);
+    client.lock_program_funds(&authorized_key, &amount);
 
     // Create schedule
     client.create_program_release_schedule(&amount, &release_timestamp, &recipient);
@@ -408,8 +400,7 @@ fn test_multiple_sequential_payouts_succeed() {
     token_admin.mint(&authorized_key, &total_amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &total_amount);
-    client.lock_program_funds(&total_amount);
+    client.lock_program_funds(&authorized_key, &total_amount);
 
     // Execute multiple sequential payouts (all should succeed)
     client.single_payout(&recipient1, &payout_amount);
@@ -448,8 +439,7 @@ fn test_guard_cleared_after_successful_payout() {
     token_admin.mint(&authorized_key, &amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &amount);
-    client.lock_program_funds(&amount);
+    client.lock_program_funds(&authorized_key, &amount);
 
     // Guard should not be set initially
     let initially_set = env.as_contract(&contract_id, || is_entered(&env));
@@ -485,8 +475,7 @@ fn test_guard_state_across_multiple_operations() {
     token_admin.mint(&authorized_key, &total_amount);
 
     client.init_program(&program_id, &authorized_key, &token_client.address);
-    token_client.transfer(&authorized_key, &contract_id, &total_amount);
-    client.lock_program_funds(&total_amount);
+    client.lock_program_funds(&authorized_key, &total_amount);
 
     // Verify guard state through multiple operations
     assert!(!env.as_contract(&contract_id, || is_entered(&env)));

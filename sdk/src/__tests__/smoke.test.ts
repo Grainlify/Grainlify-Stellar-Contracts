@@ -1,10 +1,11 @@
-import { ProgramEscrowClient } from '../program-escrow-client';
+import { ProgramEscrowClient, BountyEscrowClient } from '../index';
 import { Keypair } from '@stellar/stellar-sdk';
 import { lockFundsExample } from '../../examples/lock-funds';
 import { releaseFundsExample } from '../../examples/release-funds';
 import { fullLifecycleExample } from '../../examples/full-lifecycle';
 import { batchLockExample } from '../../examples/batch-lock';
 import { queryEscrowExample } from '../../examples/query-escrow';
+import { runAdminOpsExample } from '../../examples/bounty-admin-ops';
 
 // Mock the console methods to keep test output clean
 jest.spyOn(console, 'log').mockImplementation(() => { });
@@ -54,7 +55,7 @@ describe('SDK Example Smoke Tests', () => {
         const result = await lockFundsExample(client, mockKeypair);
         expect(result).toBeDefined();
         //@ts-ignore - accessing private field
-        expect(client.invokeContract).toHaveBeenCalledWith('lock_program_funds', [10000000n], mockKeypair);
+        expect(client.invokeContract).toHaveBeenCalledWith('lock_program_funds', [mockKeypair.publicKey(), 10000000n], mockKeypair);
     });
 
     it('should run release-funds example successfully', async () => {
@@ -90,5 +91,45 @@ describe('SDK Example Smoke Tests', () => {
         expect(result.program_id).toBe(mockProgramId);
         //@ts-ignore - accessing private field
         expect(client.invokeContract).toHaveBeenCalledWith('get_program_info', []);
+    });
+
+    it('should run bounty admin-ops example successfully', async () => {
+        const bountyClient = new BountyEscrowClient({
+            contractId: 'CBTG2M4XXWNDH7GCHXZT6E2I3J644MFRZQK6CUKL4WJY6WQZXY3P2M6L',
+            rpcUrl: 'https://soroban-testnet.stellar.org',
+            networkPassphrase: 'Test SDF Network ; September 2015'
+        });
+        
+        // Mock invokeContract to simulate successful Soroban interactions
+        // @ts-ignore - accessing private method
+        jest.spyOn(bountyClient, 'invokeContract').mockImplementation(async (method: string, args: any[]) => {
+            if (method === 'get_admin_audit_view') {
+                return {
+                    version: 1,
+                    admin: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+                    token: 'GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+                    fee_config: { lock_fee_rate: 0n, release_fee_rate: 0n, fee_recipient: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', fee_enabled: false },
+                    pause_flags: { lock_paused: false, release_paused: false, refund_paused: false },
+                    governance_contract: 'GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+                    min_governance_version: 1,
+                    claim_window: 3600n,
+                    has_amount_policy: false,
+                    min_lock_amount: 0n,
+                    max_lock_amount: 0n
+                };
+            }
+            return null;
+        });
+
+        await runAdminOpsExample(
+            bountyClient,
+            mockKeypair,
+            Keypair.random(),
+            Keypair.random(),
+            Keypair.random()
+        );
+        
+        // @ts-ignore - accessing private field
+        expect(bountyClient.invokeContract).toHaveBeenCalledWith('get_admin_audit_view', []);
     });
 });

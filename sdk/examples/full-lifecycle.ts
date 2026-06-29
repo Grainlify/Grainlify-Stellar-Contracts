@@ -16,7 +16,7 @@ export async function fullLifecycleExample(
     console.log('Program initialized:', initData.program_id);
 
     console.log('--- Step 2: Lock Funds ---');
-    await client.lockProgramFunds(50000000n, sourceKeypair);
+    await client.lockProgramFunds(sourceKeypair.publicKey(), 50000000n, sourceKeypair);
     console.log('Funds locked.');
 
     console.log('--- Step 3: Batch Payout ---');

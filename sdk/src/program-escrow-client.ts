@@ -1,32 +1,53 @@
-import { Contract, SorobanRpc, TransactionBuilder, Networks, Account, Keypair, Operation } from '@stellar/stellar-sdk';
+import { Contract, SorobanRpc, Keypair } from '@stellar/stellar-sdk';
 import { NetworkError, ValidationError, parseContractError, ContractError } from './errors';
+import { invokeContract, InvocationConfig } from './invocation';
 
 export interface ProgramEscrowConfig {
+  /** Deployed ProgramEscrow contract address. */
   contractId: string;
+  /** Soroban RPC endpoint used for reads and transaction submission. */
   rpcUrl: string;
+  /** Stellar network passphrase for the target network. */
   networkPassphrase: string;
 }
 
+/** Program escrow state returned by contract read methods. */
 export interface ProgramData {
+  /** Application-level program identifier. */
   program_id: string;
+  /** Total funds deposited into the program escrow. */
   total_funds: bigint;
+  /** Remaining spendable balance in the program escrow. */
   remaining_balance: bigint;
+  /** Stellar account authorized to execute payouts. */
   authorized_payout_key: string;
+  /** Historical payout records for the program. */
   payout_history: PayoutRecord[];
+  /** Token contract address used by the program escrow. */
   token_address: string;
 }
 
+/** Single payout event recorded by the program escrow. */
 export interface PayoutRecord {
+  /** Stellar account that received the payout. */
   recipient: string;
+  /** Payout amount in the contract token's smallest unit. */
   amount: bigint;
+  /** Unix timestamp when the payout was recorded. */
   timestamp: number;
 }
 
+/** Scheduled release entry for program escrow funds. */
 export interface ProgramReleaseSchedule {
+  /** Unique schedule identifier. */
   schedule_id: bigint;
+  /** Stellar account that should receive the scheduled release. */
   recipient: string;
+  /** Scheduled amount in the contract token's smallest unit. */
   amount: bigint;
+  /** Unix timestamp when the release becomes executable. */
   release_timestamp: number;
+  /** Whether the scheduled release has already been executed. */
   released: boolean;
 }
 
@@ -37,7 +58,11 @@ export class ProgramEscrowClient {
   private contract: Contract;
   private server: SorobanRpc.Server;
   private config: ProgramEscrowConfig;
+  private invocationConfig: InvocationConfig;
 
+  /**
+   * Create a client bound to one ProgramEscrow contract and Soroban RPC endpoint.
+   */
   constructor(config: ProgramEscrowConfig) {
     this.config = config;
     try {
@@ -52,6 +77,12 @@ export class ProgramEscrowClient {
       // Allow server initialization to fail for testing
       this.server = null as any;
     }
+    this.invocationConfig = {
+      server: this.server,
+      contract: this.contract,
+      networkPassphrase: config.networkPassphrase,
+      rpcUrl: config.rpcUrl,
+    };
   }
 
   /**
@@ -86,6 +117,7 @@ export class ProgramEscrowClient {
    * Lock funds into the program escrow
    */
   async lockProgramFunds(
+    from: string,
     amount: bigint,
     sourceKeypair: Keypair
   ): Promise<ProgramData> {
@@ -96,7 +128,7 @@ export class ProgramEscrowClient {
     try {
       const result = await this.invokeContract(
         'lock_program_funds',
-        [amount],
+        [from, amount],
         sourceKeypair
       );
       return this.parseProgramData(result);
@@ -257,36 +289,15 @@ export class ProgramEscrowClient {
     args: any[],
     sourceKeypair?: Keypair
   ): Promise<any> {
-    try {
-      // This is a simplified implementation
-      // In a real implementation, you would:
-      // 1. Build the transaction with proper parameters
-      // 2. Simulate the transaction
-      // 3. Sign and submit if sourceKeypair is provided
-      // 4. Parse and return the result
-      
-      // For now, this throws to simulate contract behavior
-      throw new Error('Contract invocation not implemented - this is a mock for testing');
-    } catch (error: any) {
-      // Check for network errors
-      if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        throw new NetworkError(
-          `Failed to connect to RPC server: ${this.config.rpcUrl}`,
-          undefined,
-          error
-        );
+    return invokeContract(
+      method,
+      args,
+      this.invocationConfig,
+      {
+        sourceKeypair,
+        readOnly: !sourceKeypair,
       }
-      
-      if (error.response?.status) {
-        throw new NetworkError(
-          `RPC request failed with status ${error.response.status}`,
-          error.response.status,
-          error
-        );
-      }
-      
-      throw error;
-    }
+    );
   }
 
   private handleError(error: any): Error {

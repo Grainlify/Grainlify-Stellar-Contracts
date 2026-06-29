@@ -12,6 +12,7 @@ import {
   parseContractError,
   parseContractErrorByCode,
   getContractErrorMessage,
+  PROGRAM_ESCROW_ERROR_MAP,
   BOUNTY_ESCROW_ERROR_MAP,
   GOVERNANCE_ERROR_MAP,
   CIRCUIT_BREAKER_ERROR_MAP,
@@ -22,9 +23,13 @@ import {
 // Sourced directly from the Rust source files — keep in sync.
 // -----------------------------------------------------------------------
 
+/** contracts/program-escrow/src/lib.rs — Error enum */
+const PROGRAM_ESCROW_DISCRIMINANTS: number[] = [4];
+
 /** contracts/bounty_escrow/contracts/escrow/src/lib.rs — Error enum */
 const BOUNTY_ESCROW_DISCRIMINANTS: number[] = [
   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, /* gap at 15 */ 16, 17, 18,
+  19, 20, 21, 22, 23,
 ];
 
 /** contracts/grainlify-core/src/governance.rs — Error enum */
@@ -70,8 +75,25 @@ describe('Error mapping completeness', () => {
 // 2. Numeric look-up tables cover every on-chain discriminant
 // =======================================================================
 describe('Numeric error code tables', () => {
+  describe('Program-escrow', () => {
+    it('maps every contract discriminant', () => {
+      for (const code of PROGRAM_ESCROW_DISCRIMINANTS) {
+        expect(PROGRAM_ESCROW_ERROR_MAP[code]).toBeDefined();
+      }
+    });
+
+    it('resolves via parseContractErrorByCode', () => {
+      for (const code of PROGRAM_ESCROW_DISCRIMINANTS) {
+        const err = parseContractErrorByCode(code, 'program_escrow');
+        expect(err).toBeInstanceOf(ContractError);
+        expect(err.code).not.toBe('CONTRACT_ERROR');
+        expect(err.contractErrorCode).toBe(code);
+      }
+    });
+  });
+
   describe('Bounty-escrow', () => {
-    it('maps every contract discriminant (1-18, excluding 15)', () => {
+    it('maps every contract discriminant (1-23, excluding 15)', () => {
       for (const code of BOUNTY_ESCROW_DISCRIMINANTS) {
         expect(BOUNTY_ESCROW_ERROR_MAP[code]).toBeDefined();
       }
@@ -158,6 +180,7 @@ describe('parseContractError string matching', () => {
     ['AmountBelowMinimum',                             ContractErrorCode.AMOUNT_BELOW_MIN],
     ['Amount exceeds maximum allowed',                 ContractErrorCode.AMOUNT_ABOVE_MAX],
     ['AmountAboveMaximum',                             ContractErrorCode.AMOUNT_ABOVE_MAX],
+    ['GovernanceVersionTooLow',                       ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW],
   ];
 
   it.each(programEscrowCases)(
@@ -171,10 +194,14 @@ describe('parseContractError string matching', () => {
 
   // ── Bounty-escrow ──────────────────────────────────────────────────
   const bountyEscrowCases: [string, ContractErrorCode][] = [
+    ['Bounty escrow already initialized',              ContractErrorCode.BOUNTY_ALREADY_INITIALIZED],
+    ['Bounty escrow has not been initialized',         ContractErrorCode.BOUNTY_NOT_INITIALIZED],
     ['BountyExists',                                   ContractErrorCode.BOUNTY_EXISTS],
     ['Bounty not found',                               ContractErrorCode.BOUNTY_NOT_FOUND],
     ['FundsNotLocked',                                 ContractErrorCode.BOUNTY_FUNDS_NOT_LOCKED],
+    ['ClaimExpired',                                  ContractErrorCode.BOUNTY_CLAIM_EXPIRED],
     ['DeadlineNotPassed',                              ContractErrorCode.BOUNTY_DEADLINE_NOT_PASSED],
+    ['Bounty Unauthorized',                            ContractErrorCode.BOUNTY_UNAUTHORIZED],
     ['InvalidFeeRate',                                 ContractErrorCode.BOUNTY_INVALID_FEE_RATE],
     ['Fee recipient address not set',                  ContractErrorCode.BOUNTY_FEE_RECIPIENT_NOT_SET],
     ['InvalidBatchSize',                               ContractErrorCode.BOUNTY_INVALID_BATCH_SIZE],
@@ -185,6 +212,10 @@ describe('parseContractError string matching', () => {
     ['InsufficientFunds',                              ContractErrorCode.BOUNTY_INSUFFICIENT_FUNDS],
     ['RefundNotApproved',                              ContractErrorCode.BOUNTY_REFUND_NOT_APPROVED],
     ['FundsPaused',                                    ContractErrorCode.BOUNTY_FUNDS_PAUSED],
+    ['Bounty AmountBelowMinimum',                      ContractErrorCode.BOUNTY_AMOUNT_BELOW_MINIMUM],
+    ['Bounty amount is above configured maximum',       ContractErrorCode.BOUNTY_AMOUNT_ABOVE_MAXIMUM],
+    ['CircuitBreakerOpen',                             ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN],
+    ['Bounty GovernanceVersionTooLow',                 ContractErrorCode.BOUNTY_GOVERNANCE_VERSION_TOO_LOW],
   ];
 
   it.each(bountyEscrowCases)(
@@ -267,6 +298,11 @@ describe('Cross-layer consistency', () => {
       [4,  'Bounty not found'],
       [13, 'Bounty amount is invalid'],
       [16, 'InsufficientFunds'],
+      [19, 'Bounty amount below configured minimum'],
+      [20, 'Bounty amount above configured maximum'],
+      [21, 'CircuitBreakerOpen'],
+      [22, 'ClaimExpired'],
+      [23, 'Bounty GovernanceVersionTooLow'],
     ];
 
     for (const [code, message] of numericToString) {
@@ -298,12 +334,16 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 10 program-escrow + 17 bounty-escrow + 14 governance + 3 circuit-breaker = 44
-    expect(count).toBe(44);
+    // 11 program-escrow + 22 bounty-escrow + 14 governance + 3 circuit-breaker = 50
+    expect(count).toBe(50);
   });
 
-  it('BOUNTY_ESCROW_ERROR_MAP has 17 entries', () => {
-    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(17);
+  it('PROGRAM_ESCROW_ERROR_MAP has 1 entry', () => {
+    expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(1);
+  });
+
+  it('BOUNTY_ESCROW_ERROR_MAP has 22 entries', () => {
+    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(22);
   });
 
   it('GOVERNANCE_ERROR_MAP has 14 entries', () => {

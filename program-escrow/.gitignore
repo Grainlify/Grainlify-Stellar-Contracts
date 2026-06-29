@@ -1,2 +1,8 @@
+# Rust and Soroban build outputs
 target/
+*.d
+*.wasm
+*.rs.bk
+
+# Test snapshots
 test_snapshots/

@@ -1,4 +1,4 @@
-import { ProgramEscrowClient } from '../program-escrow-client';
+import { ProgramEscrowClient, BountyEscrowClient } from '../index';
 import { NetworkError } from '../errors';
 import { Keypair } from '@stellar/stellar-sdk';
 
@@ -86,11 +86,11 @@ describe('SDK Network Error Handling', () => {
       };
 
       await expect(
-        client.lockProgramFunds(1000n, mockKeypair)
+        client.lockProgramFunds(mockKeypair.publicKey(), 1000n, mockKeypair)
       ).rejects.toThrow(NetworkError);
 
       try {
-        await client.lockProgramFunds(1000n, mockKeypair);
+        await client.lockProgramFunds(mockKeypair.publicKey(), 1000n, mockKeypair);
       } catch (error: any) {
         expect(error.statusCode).toBe(400);
       }
@@ -253,6 +253,72 @@ describe('SDK Network Error Handling', () => {
       const balance = await client.getRemainingBalance();
       expect(balance).toBe(5000n);
       expect(callCount).toBe(2);
+    });
+  });
+
+  describe('BountyEscrowClient Network Error Handling', () => {
+    it('handles ECONNREFUSED error', async () => {
+      const client = new BountyEscrowClient({
+        contractId: 'CBTG2M4XXWNDH7GCHXZT6E2I3J644MFRZQK6CUKL4WJY6WQZXY3P2M6L',
+        rpcUrl: 'http://localhost:9999',
+        networkPassphrase: 'Test SDF Network ; September 2015'
+      });
+
+      (client as any).invokeContract = async () => {
+        const error: any = new Error('Connection refused');
+        error.code = 'ECONNREFUSED';
+        throw error;
+      };
+
+      await expect(client.getBalance()).rejects.toThrow(NetworkError);
+    });
+
+    it('handles HTTP status error', async () => {
+      const client = new BountyEscrowClient({
+        contractId: 'CBTG2M4XXWNDH7GCHXZT6E2I3J644MFRZQK6CUKL4WJY6WQZXY3P2M6L',
+        rpcUrl: 'http://localhost:9999',
+        networkPassphrase: 'Test SDF Network ; September 2015'
+      });
+
+      (client as any).invokeContract = async () => {
+        const error: any = new Error('Bad Request');
+        error.response = { status: 400 };
+        throw error;
+      };
+
+      await expect(client.getBalance()).rejects.toThrow(NetworkError);
+    });
+
+    it('returns the same error if it is already ValidationError, NetworkError, or ContractError', async () => {
+      const client = new BountyEscrowClient({
+        contractId: 'CBTG2M4XXWNDH7GCHXZT6E2I3J644MFRZQK6CUKL4WJY6WQZXY3P2M6L',
+        rpcUrl: 'http://localhost:9999',
+        networkPassphrase: 'Test SDF Network ; September 2015'
+      });
+
+      const networkErr = new NetworkError('Custom network error');
+      (client as any).invokeContract = async () => {
+        throw networkErr;
+      };
+
+      await expect(client.getBalance()).rejects.toThrow(networkErr);
+    });
+  });
+
+  describe('ProgramEscrowClient Passthrough Error Handling', () => {
+    it('returns the same error if it is already ValidationError, NetworkError, or ContractError', async () => {
+      const client = new ProgramEscrowClient({
+        contractId: 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC',
+        rpcUrl: 'http://localhost:9999',
+        networkPassphrase: 'Test SDF Network ; September 2015'
+      });
+
+      const networkErr = new NetworkError('Custom network error');
+      (client as any).invokeContract = async () => {
+        throw networkErr;
+      };
+
+      await expect(client.getRemainingBalance()).rejects.toThrow(networkErr);
     });
   });
 });

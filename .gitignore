@@ -1,4 +1,18 @@
+# Rust and Soroban build outputs
 target/
 **/target/
+*.d
+*.wasm
+*.rs.bk
+
+# Test snapshots and generated local reports
 **/test_snapshots/
 
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

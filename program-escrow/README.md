@@ -2,6 +2,14 @@
 
 A Soroban smart contract for managing program-level escrow funds for hackathons and grant programs. This contract handles prize pools, tracks balances, and enables automated batch payouts to multiple contributors.
 
+## Documentation
+
+Detailed documentation for this contract is available in the [`docs/`](../docs/index.md) directory:
+
+- [Reentrancy Guard](../docs/program-escrow/REENTRANCY_GUARD_DOCUMENTATION.md)
+- [Analytics Events](../docs/program-escrow/ANALYTICS_EVENTS.md)
+- [Implementation Summary](../docs/program-escrow/IMPLEMENTATION_SUMMARY.md)
+
 ## Features
 
 - **Program Initialization**: Create a new escrow program with authorized payout key
@@ -41,7 +49,7 @@ Initialize a new program escrow.
 
 **Events:** `ProgramInitialized`
 
-#### `lock_program_funds(amount)`
+#### `lock_program_funds(from, amount)`
 
 Lock funds into the escrow. Updates both `total_funds` and `remaining_balance`.
 
@@ -84,9 +92,16 @@ Transfer funds to multiple recipients in a single transaction. Requires authoriz
 **Validation:**
 - Only `authorized_payout_key` can call this function
 - Recipients and amounts vectors must have same length
+- `recipients.len()` must be in the range `[1, MAX_BATCH_SIZE]` (currently 100)
 - All amounts must be > 0
 - Total payout must not exceed remaining balance
 - Cannot process empty batch
+
+**Batch size cap (`MAX_BATCH_SIZE = 100`):**
+The cap is enforced before any token transfer. Calls with zero recipients or
+more than 100 recipients panic with a clear message and clear the reentrancy
+guard, so no partial payout or stuck guard can occur. The same constant is
+used by `batch_initialize_programs` for consistency.
 
 #### `get_program_info()`
 
@@ -106,7 +121,10 @@ Create a time-based release that can be executed once the ledger timestamp reach
 
 #### `trigger_program_releases()`
 
-Execute all due release schedules where `ledger_timestamp >= release_timestamp`.
+Execute due release schedules where `ledger_timestamp >= release_timestamp`.
+At most `MAX_BATCH_SIZE` (100) schedules are processed per invocation to bound
+Soroban instruction and memory usage. Remaining due schedules can be processed
+by calling again.
 
 **Edge-case behavior validated in tests:**
 - Exact boundary is accepted: release executes when `now == release_timestamp`
@@ -146,6 +164,19 @@ Gas proxy fields are lightweight instrumentation for payout profiling. They trac
 high-level operation counts without adding per-recipient events, keeping event
 footprint bounded for large batches.
 
+## Batch Size Cap
+
+`MAX_BATCH_SIZE = 100` is enforced in three places:
+
+| Function | Behaviour |
+|---|---|
+| `batch_initialize_programs` | Returns `BatchError::InvalidBatchSize` if `items.len() == 0` or `> 100` |
+| `batch_payout` | Panics `"Batch size exceeds maximum allowed"` before any transfer if `recipients.len() > 100` |
+| `trigger_program_releases` | Processes at most 100 due schedules per call; remaining due schedules are left for the next call |
+
+This keeps instruction count and `payout_history` growth deterministic and bounded.
+The constant is defined once (`pub const MAX_BATCH_SIZE: u32 = 100`) and shared across all three functions.
+
 ## Batch Payout Gas and Footprint Notes
 
 - `batch_payout()` emits exactly one contract-level batch event per call.
@@ -162,8 +193,36 @@ footprint bounded for large batches.
 The test suite includes:
 - `test_batch_payout_stress_large_batch_event_footprint_is_bounded`
 - `test_batch_payout_gas_proxy_improves_vs_legacy_model_for_large_batch`
+- `budget_profiling_batch_payout_scales_linearly_to_max_batch_size`
+- `budget_profiling_single_payout_and_trigger_releases_stay_under_regression_ceiling`
+- `budget_profiling_gas_proxy_fields_match_operation_counts`
 
-These validate bounded event growth and improved proxy metrics for large batches.
+These validate bounded event growth, improved proxy metrics for large batches,
+and real Soroban `env.budget()` CPU/memory regression ceilings.
+
+### Budget Profiling
+
+Run the profiling guard with:
+
+```bash
+cargo test budget_profiling -- --nocapture
+```
+
+Current native testutils measurements, excluding setup/mint/init cost:
+
+| Operation | Size | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `batch_payout` | 1 | 355,276 | 54,175 |
+| `batch_payout` | 10 | 1,877,730 | 277,195 |
+| `batch_payout` | 50 | 9,889,779 | 1,658,435 |
+| `batch_payout` | 100 (`MAX_BATCH_SIZE`) | 22,491,709 | 4,280,485 |
+| `single_payout` | 1 | 345,503 | 53,351 |
+| `trigger_program_releases` | 10 due schedules | 2,370,396 | 385,935 |
+
+The regression test resets `env.budget()` immediately before each measured call,
+then asserts CPU and memory stay below documented ceilings. The Soroban SDK notes
+that native Rust test execution can underestimate WASM costs, so these numbers
+are CI regression guards rather than mainnet fee quotes.
 
 ## Usage Flow
 
@@ -233,7 +292,7 @@ let program_data = contract.init_program(
 );
 
 // Lock funds (50,000 XLM in stroops)
-contract.lock_program_funds(&env, 50_000_000_000);
+contract.lock_program_funds(&env, &admin, &50_000_000_000);
 
 // Batch payout to winners
 let recipients = vec![&env, winner1, winner2, winner3];

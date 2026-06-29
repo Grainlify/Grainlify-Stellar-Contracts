@@ -1,4 +1,4 @@
-import { ProgramEscrowClient } from '../program-escrow-client';
+import { ProgramEscrowClient } from '../index';
 import { 
   ContractError, 
   NetworkError, 
@@ -91,17 +91,17 @@ describe('SDK Client Error Handling', () => {
     describe('lockProgramFunds', () => {
       it('should throw ValidationError for zero amount', async () => {
         await expect(
-          client.lockProgramFunds(0n, mockKeypair)
+          client.lockProgramFunds(mockKeypair.publicKey(), 0n, mockKeypair)
         ).rejects.toThrow(ValidationError);
 
         await expect(
-          client.lockProgramFunds(0n, mockKeypair)
+          client.lockProgramFunds(mockKeypair.publicKey(), 0n, mockKeypair)
         ).rejects.toThrow('Amount must be greater than zero');
       });
 
       it('should throw ValidationError for negative amount', async () => {
         await expect(
-          client.lockProgramFunds(-100n, mockKeypair)
+          client.lockProgramFunds(mockKeypair.publicKey(), -100n, mockKeypair)
         ).rejects.toThrow(ValidationError);
       });
     });
@@ -366,6 +366,26 @@ describe('SDK Client Error Handling', () => {
       expect(validationError.name).toBe('ValidationError');
       expect(validationError.code).toBe('VALIDATION_ERROR');
       expect(validationError.field).toBe('username');
+    });
+
+    it('should successfully run createProgramReleaseSchedule and parse release schedule', async () => {
+      const schedule = {
+        schedule_id: 1n,
+        recipient: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        amount: 1000n,
+        release_timestamp: 123456,
+        released: false
+      };
+      (client as any).invokeContract = async () => {
+        return schedule;
+      };
+      const result = await client.createProgramReleaseSchedule(
+        'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        1000n,
+        123456,
+        mockKeypair
+      );
+      expect(result).toEqual(schedule);
     });
   });
 });

@@ -161,7 +161,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "set_admin"
+                "symbol": "setadmin"
               }
             ],
             "data": {
@@ -184,7 +184,7 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "set_admin"
+                "symbol": "setadmin"
               }
             ],
             "data": "void"

@@ -1,11 +1,13 @@
 # Dependencies
 node_modules/
-package-lock.json
 yarn.lock
 
 # Build output
 dist/
 *.tsbuildinfo
+*.d
+*.wasm
+*.rs.bk
 
 # Test coverage
 coverage/

@@ -2,7 +2,7 @@
 //!
 //! Wires grainlify-core governance state into escrow contracts for upgrade and configuration control.
 
-use soroban_sdk::{Address, BytesN, Env, Symbol};
+use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol};
 
 /// Storage key for governance contract address
 const GOVERNANCE_CONTRACT: Symbol = soroban_sdk::symbol_short!("GOV_ADDR");
@@ -10,9 +10,19 @@ const GOVERNANCE_CONTRACT: Symbol = soroban_sdk::symbol_short!("GOV_ADDR");
 /// Storage key for minimum required governance version
 const MIN_GOV_VERSION: Symbol = soroban_sdk::symbol_short!("MIN_VER");
 
+#[contractclient(name = "GovernanceClient")]
+#[allow(dead_code)]
+pub trait GovernanceInterface {
+    fn get_ver(env: Env) -> u32;
+    fn get_version_numeric_encoded(env: Env) -> u32;
+    fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool;
+}
+
 /// Set the governance contract address (admin only)
 pub fn set_governance_contract(env: &Env, governance_addr: Address) {
-    env.storage().instance().set(&GOVERNANCE_CONTRACT, &governance_addr);
+    env.storage()
+        .instance()
+        .set(&GOVERNANCE_CONTRACT, &governance_addr);
 }
 
 /// Get the governance contract address
@@ -35,26 +45,27 @@ pub fn check_governance_version(env: &Env) -> bool {
     if let Some(gov_addr) = get_governance_contract(env) {
         let min_version = get_min_governance_version(env);
         if min_version > 0 {
-            // Call governance contract to get version
-            let version: u32 = env.invoke_contract(
-                &gov_addr,
-                &soroban_sdk::symbol_short!("get_ver"),
-                soroban_sdk::vec![env],
-            );
+            let governance = GovernanceClient::new(env, &gov_addr);
+            let version = if min_version >= 10_000 {
+                governance.get_version_numeric_encoded()
+            } else {
+                governance.get_ver()
+            };
             return version >= min_version;
         }
     }
     true // No governance configured or no minimum version set
 }
 
-/// Check if an upgrade is approved by governance
-pub fn check_upgrade_approval(env: &Env, _wasm_hash: &BytesN<32>) -> bool {
-    if let Some(_gov_addr) = get_governance_contract(env) {
-        // If governance is configured, check approval
-        // For now, return true if governance version check passes
-        check_governance_version(env)
-    } else {
-        // No governance configured, allow upgrade
-        true
+/// Check if an upgrade hash is approved by an executed governance proposal.
+pub fn check_upgrade_approval(env: &Env, wasm_hash: &BytesN<32>) -> bool {
+    let Some(gov_addr) = get_governance_contract(env) else {
+        return false;
+    };
+
+    if !check_governance_version(env) {
+        return false;
     }
+
+    GovernanceClient::new(env, &gov_addr).is_upg_ok(wasm_hash)
 }

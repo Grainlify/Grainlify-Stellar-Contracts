@@ -2,7 +2,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token, Address, Env,
 };
 
@@ -601,7 +601,7 @@ fn test_claim_within_window_transfers_funds() {
 /// Authorize a claim then advance time past the window. Calling claim() must
 /// fail — funds must NOT leave the contract and escrow must stay Locked.
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // DeadlineNotPassed reused for ClaimExpired
+#[should_panic(expected = "Error(Contract, #22)")] // ClaimExpired
 fn test_claim_after_window_expires_panics() {
     let setup = TestSetup::new();
     let bounty_id = 101_u64;
@@ -781,7 +781,7 @@ fn test_claim_does_not_affect_other_bounties() {
 /// When no claim window is explicitly set (default 0) authorize_claim creates a
 /// claim that expires immediately (expires_at == now). Any claim() call must fail.
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // DeadlineNotPassed / ClaimExpired
+#[should_panic(expected = "Error(Contract, #22)")] // ClaimExpired
 fn test_authorize_claim_zero_window_expires_immediately() {
     let setup = TestSetup::new();
     let bounty_id = 108_u64;
@@ -1779,4 +1779,185 @@ fn test_authorize_claim_creates_pending_claim() {
         assert_eq!(setup.token.balance(&contributor3), 3000);
         assert_eq!(setup.escrow.get_balance(), 0);
     }
+}
+
+// =============================================================================
+// Event version field tests — all 8 previously-unversioned events must now
+// carry version == EVENT_VERSION_V2 (2) as their first field.
+// =============================================================================
+
+fn get_event_version(env: &Env, data: &soroban_sdk::Val) -> Option<u32> {
+    use soroban_sdk::{Map, Symbol, TryFromVal};
+    let map = Map::<Symbol, soroban_sdk::Val>::try_from_val(env, data).ok()?;
+    let val = map.get(Symbol::new(env, "version"))?;
+    u32::try_from_val(env, &val).ok()
+}
+
+fn events_with_version(env: &Env) -> soroban_sdk::Vec<u32> {
+    use soroban_sdk::Vec as SorobanVec;
+    let all = env.events().all();
+    let mut versions = SorobanVec::new(env);
+    for (_contract, _topics, data) in all.iter() {
+        if let Some(v) = get_event_version(env, &data) {
+            versions.push_back(v);
+        }
+    }
+    versions
+}
+
+#[test]
+fn test_fee_config_updated_carries_v2_version() {
+    let setup = TestSetup::new();
+    setup.escrow.update_fee_config(
+        &Some(100_i128), &Some(100_i128), &None::<soroban_sdk::Address>, &Some(true),
+    );
+    let versions = events_with_version(&setup.env);
+    assert!(versions.iter().any(|v| v == 2), "FeeConfigUpdated must emit version=2");
+}
+
+#[test]
+fn test_batch_funds_locked_carries_v2_version() {
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 1000;
+    setup.token_admin.mint(&setup.depositor, &5_000);
+    let items = soroban_sdk::vec![
+        &setup.env,
+        LockFundsItem { bounty_id: 200, depositor: setup.depositor.clone(), amount: 1000, deadline },
+        LockFundsItem { bounty_id: 201, depositor: setup.depositor.clone(), amount: 1000, deadline },
+    ];
+    setup.escrow.batch_lock_funds(&items);
+    let versions = events_with_version(&setup.env);
+    assert!(versions.iter().any(|v| v == 2), "BatchFundsLocked must emit version=2");
+}
+
+#[test]
+fn test_batch_funds_released_carries_v2_version() {
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 1000;
+    setup.escrow.lock_funds(&setup.depositor, &300, &1000, &deadline);
+    setup.escrow.lock_funds(&setup.depositor, &301, &1000, &deadline);
+    let items = soroban_sdk::vec![
+        &setup.env,
+        ReleaseFundsItem { bounty_id: 300, contributor: setup.contributor.clone() },
+        ReleaseFundsItem { bounty_id: 301, contributor: setup.contributor.clone() },
+    ];
+    setup.escrow.batch_release_funds(&items);
+    let versions = events_with_version(&setup.env);
+    assert!(versions.iter().any(|v| v == 2), "BatchFundsReleased must emit version=2");
+}
+
+#[test]
+fn test_approval_added_carries_v2_version() {
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 1000;
+    setup.escrow.lock_funds(&setup.depositor, &400, &5000, &deadline);
+    // Configure multisig so approve_large_release can proceed
+    setup.escrow.update_multisig_config(
+        &1_i128,
+        &soroban_sdk::vec![&setup.env, setup.admin.clone()],
+        &1,
+    );
+    setup.escrow.approve_large_release(&400, &setup.contributor, &setup.admin);
+    let versions = events_with_version(&setup.env);
+    assert!(versions.iter().any(|v| v == 2), "ApprovalAdded must emit version=2");
+}
+
+#[test]
+fn test_claim_created_carries_v2_version() {
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 10_000;
+    setup.escrow.lock_funds(&setup.depositor, &500, &1000, &deadline);
+    setup.escrow.set_claim_window(&300);
+    setup.escrow.authorize_claim(&500, &setup.contributor);
+    let versions = events_with_version(&setup.env);
+    assert!(versions.iter().any(|v| v == 2), "ClaimCreated must emit version=2");
+}
+
+#[test]
+fn test_claim_executed_carries_v2_version() {
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 10_000;
+    setup.escrow.lock_funds(&setup.depositor, &600, &1000, &deadline);
+    setup.escrow.set_claim_window(&300);
+    setup.escrow.authorize_claim(&600, &setup.contributor);
+    setup.escrow.claim(&600);
+    let versions = events_with_version(&setup.env);
+    assert!(versions.iter().any(|v| v == 2), "ClaimExecuted must emit version=2");
+}
+
+#[test]
+fn test_claim_cancelled_carries_v2_version() {
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 10_000;
+    setup.escrow.lock_funds(&setup.depositor, &700, &1000, &deadline);
+    setup.escrow.set_claim_window(&300);
+    setup.escrow.authorize_claim(&700, &setup.contributor);
+    setup.escrow.cancel_pending_claim(&700);
+    let versions = events_with_version(&setup.env);
+    assert!(versions.iter().any(|v| v == 2), "ClaimCancelled must emit version=2");
+}
+
+#[test]
+fn test_all_event_types_carry_v2_version() {
+    // Comprehensive: exercise every versioned event type in one test
+    let setup = TestSetup::new();
+    let deadline = setup.env.ledger().timestamp() + 10_000;
+
+    // FundsLocked (already versioned — sanity check)
+    setup.escrow.lock_funds(&setup.depositor, &800, &2000, &deadline);
+
+    // FeeConfigUpdated
+    setup.escrow.update_fee_config(&Some(50_i128), &None, &None::<soroban_sdk::Address>, &None);
+
+    // BatchFundsLocked
+    setup.token_admin.mint(&setup.depositor, &5_000);
+    let items = soroban_sdk::vec![
+        &setup.env,
+        LockFundsItem { bounty_id: 801, depositor: setup.depositor.clone(), amount: 1000, deadline },
+        LockFundsItem { bounty_id: 802, depositor: setup.depositor.clone(), amount: 1000, deadline },
+    ];
+    setup.escrow.batch_lock_funds(&items);
+
+    // BatchFundsReleased
+    let rel = soroban_sdk::vec![
+        &setup.env,
+        ReleaseFundsItem { bounty_id: 801, contributor: setup.contributor.clone() },
+        ReleaseFundsItem { bounty_id: 802, contributor: setup.contributor.clone() },
+    ];
+    setup.escrow.batch_release_funds(&rel);
+
+    // ApprovalAdded
+    setup.escrow.update_multisig_config(
+        &1_i128,
+        &soroban_sdk::vec![&setup.env, setup.admin.clone()],
+        &1,
+    );
+    setup.escrow.approve_large_release(&800, &setup.contributor, &setup.admin);
+
+    // ClaimCreated
+    setup.escrow.set_claim_window(&300);
+    setup.escrow.lock_funds(&setup.depositor, &803, &2000, &deadline);
+    setup.escrow.authorize_claim(&803, &setup.contributor);
+
+    // ClaimCancelled
+    setup.escrow.cancel_pending_claim(&803);
+
+    // ClaimExecuted
+    setup.escrow.lock_funds(&setup.depositor, &804, &2000, &deadline);
+    setup.escrow.authorize_claim(&804, &setup.contributor);
+    setup.escrow.claim(&804);
+
+    // Every escrow event emitted above must carry version=2.
+    // (Analytics events use ANALYTICS_VERSION_V1=1 and are intentionally excluded here.)
+    let all = setup.env.events().all();
+    let mut v2_count = 0u32;
+    for (_contract, _topics, data) in all.iter() {
+        if let Some(v) = get_event_version(&setup.env, &data) {
+            assert!(v >= 1, "version must be a positive integer, got {}", v);
+            if v == 2 {
+                v2_count += 1;
+            }
+        }
+    }
+    assert!(v2_count >= 8, "expected at least 8 events with version=2, got {}", v2_count);
 }
