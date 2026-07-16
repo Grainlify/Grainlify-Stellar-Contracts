@@ -22,7 +22,9 @@ fn test_monitoring_analytics_and_health() {
 
     let backend = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let token = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
     let prog_id = String::from_str(&env, "TestHealth");
 
