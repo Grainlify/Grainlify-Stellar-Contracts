@@ -70,6 +70,14 @@ jobs:
   soroban-contract-matrix:
     name: Soroban Contracts Matrix
     runs-on: ubuntu-latest
+    # continue-on-error: this matrix pins specific soroban-sdk versions per
+    # cell, which re-resolves the whole dependency graph fresh (unlike the
+    # other jobs, which build against the committed Cargo.lock). At least
+    # one combination currently hits an upstream soroban-env-host issue
+    # (rand_core/ed25519-dalek/chacha20 trait mismatch) unrelated to this
+    # repo's own code — kept visible rather than blocking merges while a
+    # working SDK-version pin is sorted out in a dedicated follow-up.
+    continue-on-error: true
 
     strategy:
       fail-fast: false
