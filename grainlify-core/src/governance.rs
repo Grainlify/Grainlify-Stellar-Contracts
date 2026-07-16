@@ -382,6 +382,57 @@ fn enforce_min_proposal_stake(
     Ok(())
 }
 
+// Add this function to the GovernanceContract impl block
+
+/// Marks an expired proposal as Expired if its voting end timestamp has passed.
+/// Permissionless - anyone can call this to help maintain storage hygiene.
+/// 
+/// Storage Retention Decision:
+/// We choose to flag proposals as Expired rather than deleting them entirely.
+/// Rationale:
+/// 1. Soroban storage TTL: Deleting would free rent, but we'd lose historical
+///    vote records needed for audits and transparency
+/// 2. Off-chain consumers need to verify proposal history - deletion breaks
+///    this and would require additional off-chain indexing
+/// 3. Expired flag with storage TTL extension is sufficient to signal
+///    terminal state while maintaining data integrity
+/// 4. Future optimization: Implement a garbage collection mechanism that
+///    deletes only vote records (not proposal metadata) after a configurable
+///    retention period to balance storage costs
+pub fn sweep_expired_proposal(env: Env, proposal_id: u32) -> Result<(), Error> {
+    let mut proposals: Map<u32, Proposal> = env
+        .storage()
+        .instance()
+        .get(&PROPOSALS)
+        .ok_or(Error::ProposalsNotFound)?;
+    let mut proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+    
+    // Only mark as expired if the voting period has ended
+    let current_time = env.ledger().timestamp();
+    if current_time <= proposal.voting_end {
+        return Err(Error::VotingStillActive);
+    }
+    
+    // If already in terminal state, no-op (don't override Approved/Rejected/Executed)
+    if proposal.status == ProposalStatus::Expired {
+        return Ok(());
+    }
+    
+    // If proposal is in a terminal state (Approved/Rejected/Executed), don't mark as expired
+    // This ensures we don't override legitimate final states
+    match proposal.status {
+        ProposalStatus::Approved | ProposalStatus::Rejected | ProposalStatus::Executed => {
+            return Ok(());
+        }
+        _ => {
+            proposal.status = ProposalStatus::Expired;
+            proposals.set(proposal_id, proposal);
+            env.storage().instance().set(&PROPOSALS, &proposals);
+            Ok(())
+        }
+    }
+}
+
 // Add this helper inside the test module
 fn get_proposal_status(env: &Env, proposal_id: u32) -> Option<ProposalStatus> {
     let proposals: Map<u32, Proposal> = env.storage().instance().get(&PROPOSALS)?;
