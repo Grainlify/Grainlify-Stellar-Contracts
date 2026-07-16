@@ -107,11 +107,11 @@ jobs:
             ${{ runner.os }}-soroban-cargo-${{ matrix.sdk }}-
             ${{ runner.os }}-soroban-cargo-
 
-      - name: Install Stellar CLI build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev libusb-1.0-0-dev pkg-config
-
       - name: Install Stellar CLI
-        run: cargo install stellar-cli
+        run: |
+          curl -sSL https://github.com/stellar/stellar-cli/releases/download/v27.0.0/stellar-cli-27.0.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /usr/local/bin stellar
+          stellar --version
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
