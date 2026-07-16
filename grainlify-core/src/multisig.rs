@@ -457,6 +457,217 @@ mod test {
         });
     }
 
+    // =====================================================================
+    // Threshold edge-case tests (issue #184)
+    // =====================================================================
+
+    /// Helper: build a Vec<Address> from a slice of &Address.
+    fn addr_vec(env: &Env, addrs: &[&Address]) -> Vec<Address> {
+        let mut v = Vec::new(env);
+        for a in addrs {
+            v.push_back((*a).clone());
+        }
+        v
+    }
+
+    // --- 0-threshold is explicitly invalid -----------------------------------
+
+    /// Initialising with threshold=0 must be rejected with InvalidThreshold,
+    /// regardless of the signer count.
+    #[test]
+    #[should_panic(expected = "InvalidThreshold")]
+    fn zero_threshold_is_rejected() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                0, // threshold == 0 → must panic
+            );
+        });
+    }
+
+    /// threshold > signers.len() is also an invalid configuration.
+    #[test]
+    #[should_panic(expected = "InvalidThreshold")]
+    fn threshold_exceeding_signer_count_is_rejected() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 2 signers, threshold = 3 → impossible to ever reach
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                3,
+            );
+        });
+    }
+
+    // --- 1-of-N: any single signer suffices ----------------------------------
+
+    /// A 1-of-3 configuration must become executable as soon as ONE signer
+    /// approves — the other two approvals are unnecessary.
+    #[test]
+    fn one_of_n_single_approval_suffices() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 20));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 1); // 1-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // Before any approval: not executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // After exactly ONE approval: must be executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+            assert!(
+                MultiSig::can_execute(&setup.env, proposal_id),
+                "1-of-3: should be executable after a single approval"
+            );
+        });
+
+        // Execute succeeds and the action closure runs.
+        let did_run = setup.env.as_contract(&setup.contract_id, || {
+            let mut ran = false;
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), || {
+                ran = true;
+            });
+            ran
+        });
+
+        assert!(did_run, "action closure must have been called");
+    }
+
+    // --- N-of-N: all signers must approve (unanimous) -----------------------
+
+    /// A 3-of-3 configuration must NOT be executable until every signer has
+    /// approved.  After the third approval it becomes executable.
+    #[test]
+    fn n_of_n_requires_all_signers() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 21));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 3); // 3-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // After 1st approval: not executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // After 2nd approval: still not executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // After 3rd (final) approval: now executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_c.clone());
+            assert!(
+                MultiSig::can_execute(&setup.env, proposal_id),
+                "3-of-3: should be executable only after all signers approve"
+            );
+        });
+
+        // Execute succeeds.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), || {});
+            let proposal = MultiSig::get_proposal(&setup.env, proposal_id);
+            assert!(proposal.executed);
+        });
+    }
+
+    // --- Exactly-at-threshold: must pass ------------------------------------
+
+    /// With a 2-of-3 config, reaching exactly 2 approvals (= threshold) must
+    /// make the proposal executable.  This guards against an off-by-one where
+    /// the implementation uses `>` instead of `>=`.
+    #[test]
+    fn exactly_at_threshold_is_executable() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 22));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2); // 2-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // 1 approval → below threshold.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // 2 approvals → exactly at threshold → must be executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+            assert!(
+                MultiSig::can_execute(&setup.env, proposal_id),
+                "exactly-at-threshold (2-of-3): must be executable"
+            );
+        });
+
+        // Execute succeeds without needing the third signer.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), || {});
+        });
+    }
+
+    // --- One-short-of-threshold: must fail ----------------------------------
+
+    /// With a 3-of-3 config, having only 2 approvals (one short of the
+    /// threshold) must be rejected when execute is called.  This guards against
+    /// an off-by-one where `>=` is accidentally replaced with `>`.
+    #[test]
+    #[should_panic(expected = "ThresholdNotMet")]
+    fn one_short_of_threshold_is_not_executable() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 23));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 3); // 3-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // Only 2 out of 3 required approvals.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+        });
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+        });
+
+        // Attempting to execute with one approval short must panic.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action, || {});
+        });
+    }
+
     #[test]
     fn signer_and_threshold_snapshot_prevents_retroactive_validation() {
         let setup = setup();
