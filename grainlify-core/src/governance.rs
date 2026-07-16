@@ -382,6 +382,14 @@ fn enforce_min_proposal_stake(
     Ok(())
 }
 
+// Add this helper inside the test module
+fn get_proposal_status(env: &Env, proposal_id: u32) -> Option<ProposalStatus> {
+    let proposals: Map<u32, Proposal> = env.storage().instance().get(&PROPOSALS)?;
+    proposals.get(proposal_id).map(|p| p.status)
+}
+
+
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -680,4 +688,157 @@ mod test {
         assert!(client.is_upgrade_approved(&approved_hash));
         assert!(!client.is_upgrade_approved(&other_hash));
     }
+}
+
+#[test]
+fn test_sweep_expired_before_expiry_rejected() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    
+    // Try to sweep before voting ends - should fail
+    let result = client.try_sweep_expired_proposal(&prop_id);
+    assert_eq!(result, Err(Ok(Error::VotingStillActive)));
+}
+
+#[test]
+fn test_sweep_expired_after_expiry_succeeds() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    
+    // Advance past voting end
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    
+    // Sweep should succeed and mark as Expired
+    client.sweep_expired_proposal(&prop_id);
+    
+    // Verify status is now Expired
+    let status = get_proposal_status(&env, prop_id);
+    assert_eq!(status, Some(ProposalStatus::Expired));
+}
+
+#[test]
+fn test_sweep_expired_no_op_on_terminal_states() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    
+    // Cast vote to make it finalizable
+    client.cast_vote(&proposer, &prop_id, &VoteType::For);
+    
+    // Advance time and finalize to Approved state
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Approved);
+    
+    // Try to sweep - should be no-op
+    client.sweep_expired_proposal(&prop_id);
+    
+    // Verify status remains Approved
+    // We can check by trying to sweep again (should still be Approved)
+    // but we need to verify the status didn't change to Expired
+    // Let's check via execution
+    assert_eq!(client.try_execute_proposal(&prop_id), Ok(()));
+}
+
+#[test]
+fn test_sweep_expired_after_rejected_proposal() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    
+    // Cast insufficient votes (not enough quorum)
+    // With quorum 1000 (10%) and total voters 10, need at least 1 vote for quorum
+    // But no votes = rejected
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Rejected);
+    
+    // Try to sweep - should be no-op since already terminal
+    client.sweep_expired_proposal(&prop_id);
+    
+    // Verify still Rejected
+    // Cannot execute rejected proposal
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+}
+
+#[test]
+fn test_sweep_expired_called_multiple_times() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    
+    // Advance past voting end
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    
+    // First sweep should succeed
+    client.sweep_expired_proposal(&prop_id);
+    
+    // Second sweep should be no-op and succeed
+    client.sweep_expired_proposal(&prop_id);
+    
+    // Verify still expired
+    let vote_result = client.try_cast_vote(&proposer, &prop_id, &VoteType::For);
+    assert_eq!(vote_result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_sweep_expired_with_active_proposal_voting_ongoing() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    
+    // During voting period (timestamp < voting_end)
+    env.ledger().with_mut(|li| li.timestamp = 50);
+    
+    let result = client.try_sweep_expired_proposal(&prop_id);
+    assert_eq!(result, Err(Ok(Error::VotingStillActive)));
+    
+    // Voting should still work
+    client.cast_vote(&proposer, &prop_id, &VoteType::For);
+}
+
+#[test]
+fn test_sweep_expired_with_executed_proposal() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    
+    // Create config with execution delay
+    let admin = Address::generate(&env);
+    let config = GovernanceConfig {
+        voting_period: 100,
+        execution_delay: 50,
+        quorum_percentage: 1000,
+        approval_threshold: 5000,
+        min_proposal_stake: 0,
+        voting_scheme: VotingScheme::OnePersonOneVote,
+        governance_token: Address::generate(&env),
+        one_person_total_voters: 10,
+        token_total_voting_power: 100,
+        snapshot_ledger: None,
+    };
+    
+    env.mock_all_auths();
+    client.init_governance(&admin, &config);
+    let prop_id = client.create_proposal(&proposer, &BytesN::from_array(&env, &[0u8; 32]), &symbol_short!("test"));
+    
+    client.cast_vote(&proposer, &prop_id, &VoteType::For);
+    
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Approved);
+    
+    // Execute
+    client.execute_proposal(&prop_id);
+    
+    // Try to sweep - should be no-op
+    client.sweep_expired_proposal(&prop_id);
+    
+    // Verify still Executed
+    assert!(client.is_upgrade_approved(&BytesN::from_array(&env, &[0u8; 32])));
 }
