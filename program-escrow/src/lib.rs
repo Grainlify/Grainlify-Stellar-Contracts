@@ -3621,3 +3621,7 @@ mod test_balance_invariant;
 
 #[cfg(test)]
 mod test_whitelist;
+
+// Issue #189 — claim/release edge-case tests (zero-balance, double-claim, pre-approval).
+#[cfg(test)]
+mod test_issue_189;
