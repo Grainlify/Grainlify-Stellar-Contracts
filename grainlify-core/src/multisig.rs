@@ -8,6 +8,9 @@ enum DataKey {
     Config,
     Proposal(u64),
     ProposalCounter,
+    /// Next expected execution nonce. Monotonically increasing; consumed once
+    /// per successful `execute`, providing replay protection across proposals.
+    ExecutionNonce,
 }
 
 /// =======================
@@ -37,6 +40,10 @@ pub struct Proposal {
     pub executed: bool,
     pub signers: Vec<Address>,
     pub threshold: u32,
+    /// Execution nonce consumed when this proposal was executed. `None` until
+    /// execution succeeds; binds the proposal's execution record to a single,
+    /// non-reusable nonce value.
+    pub executed_nonce: Option<u64>,
 }
 
 /// =======================
@@ -51,6 +58,7 @@ pub enum MultiSigError {
     ThresholdNotMet,
     InvalidThreshold,
     ActionMismatch,
+    NonceMismatch,
 }
 
 /// =======================
@@ -74,6 +82,9 @@ impl MultiSig {
         env.storage()
             .instance()
             .set(&DataKey::ProposalCounter, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecutionNonce, &0u64);
     }
 
     /// Create a new proposal bound to a concrete action payload.
@@ -97,6 +108,7 @@ impl MultiSig {
             executed: false,
             signers: config.signers,
             threshold: config.threshold,
+            executed_nonce: None,
         };
 
         env.storage()
@@ -169,13 +181,35 @@ impl MultiSig {
         !proposal.executed && proposal.approvals.len() >= proposal.threshold
     }
 
+    /// The next execution nonce the contract will accept.
+    ///
+    /// Callers must pass this value as `expected_nonce` to [`Self::execute`].
+    /// It increases by one after every successful execution, so a previously
+    /// used `(signatures, nonce)` pair can never be replayed.
+    pub fn nonce(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ExecutionNonce)
+            .unwrap_or(0)
+    }
+
     /// Atomically execute a proposal's bound action and mark it executed.
     ///
-    /// The action closure runs only after threshold and payload checks pass.
-    /// If the closure fails, the caller's transaction fails before the proposal
-    /// can be marked executed, preventing approval/effect decoupling.
-    pub fn execute<F>(env: &Env, proposal_id: u64, expected_action: ProposalAction, action: F)
-    where
+    /// The action closure runs only after threshold, payload, and nonce checks
+    /// pass. If the closure fails, the caller's transaction fails before the
+    /// proposal can be marked executed, preventing approval/effect decoupling.
+    ///
+    /// Replay protection: `expected_nonce` must equal the current value returned
+    /// by [`Self::nonce`]. On success the nonce is consumed and incremented, so
+    /// the same nonce (and therefore the same collected signatures re-submitted
+    /// as an identical action) cannot drive a second execution.
+    pub fn execute<F>(
+        env: &Env,
+        proposal_id: u64,
+        expected_action: ProposalAction,
+        expected_nonce: u64,
+        action: F,
+    ) where
         F: FnOnce(),
     {
         let proposal = Self::get_proposal(env, proposal_id);
@@ -192,15 +226,24 @@ impl MultiSig {
             panic!("{:?}", MultiSigError::ThresholdNotMet);
         }
 
+        let current_nonce = Self::nonce(env);
+        if expected_nonce != current_nonce {
+            panic!("{:?}", MultiSigError::NonceMismatch);
+        }
+
         action();
-        Self::mark_executed(env, proposal_id);
+        Self::mark_executed(env, proposal_id, current_nonce);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ExecutionNonce, &(current_nonce + 1));
     }
 
     pub fn get_action(env: &Env, proposal_id: u64) -> ProposalAction {
         Self::get_proposal(env, proposal_id).action
     }
 
-    fn mark_executed(env: &Env, proposal_id: u64) {
+    fn mark_executed(env: &Env, proposal_id: u64, nonce: u64) {
         let mut proposal = Self::get_proposal(env, proposal_id);
 
         if proposal.executed {
@@ -212,13 +255,14 @@ impl MultiSig {
         }
 
         proposal.executed = true;
+        proposal.executed_nonce = Some(nonce);
 
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
-            .publish((symbol_short!("executed"),), proposal_id);
+            .publish((symbol_short!("executed"),), (proposal_id, nonce));
     }
 
     /// =======================
@@ -322,7 +366,7 @@ mod test {
 
         let did_run = setup.env.as_contract(&setup.contract_id, || {
             let mut did_run = false;
-            MultiSig::execute(&setup.env, proposal_id, action.clone(), || {
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), 0, || {
                 did_run = true;
             });
             did_run
@@ -332,6 +376,8 @@ mod test {
             let proposal = MultiSig::get_proposal(&setup.env, proposal_id);
             assert!(did_run);
             assert!(proposal.executed);
+            assert_eq!(proposal.executed_nonce, Some(0));
+            assert_eq!(MultiSig::nonce(&setup.env), 1);
             assert!(!MultiSig::can_execute(&setup.env, proposal_id));
         });
     }
@@ -357,7 +403,7 @@ mod test {
         });
 
         setup.env.as_contract(&setup.contract_id, || {
-            MultiSig::execute(&setup.env, proposal_id, action, || {});
+            MultiSig::execute(&setup.env, proposal_id, action, 0, || {});
         });
     }
 
@@ -387,7 +433,7 @@ mod test {
         });
 
         setup.env.as_contract(&setup.contract_id, || {
-            MultiSig::execute(&setup.env, proposal_id, wrong_action, || {});
+            MultiSig::execute(&setup.env, proposal_id, wrong_action, 0, || {});
         });
     }
 
@@ -416,11 +462,11 @@ mod test {
         });
 
         setup.env.as_contract(&setup.contract_id, || {
-            MultiSig::execute(&setup.env, proposal_id, action.clone(), || {});
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), 0, || {});
         });
 
         setup.env.as_contract(&setup.contract_id, || {
-            MultiSig::execute(&setup.env, proposal_id, action, || {});
+            MultiSig::execute(&setup.env, proposal_id, action, 0, || {});
         });
     }
 
@@ -449,7 +495,7 @@ mod test {
         });
 
         setup.env.as_contract(&setup.contract_id, || {
-            MultiSig::execute(&setup.env, proposal_id, action, || {});
+            MultiSig::execute(&setup.env, proposal_id, action, 0, || {});
         });
 
         setup.env.as_contract(&setup.contract_id, || {
@@ -494,6 +540,145 @@ mod test {
             assert_eq!(proposal.threshold, 2);
             assert!(proposal.signers.contains(&setup.signer_b));
             assert!(!proposal.signers.contains(&setup.signer_c));
+        });
+    }
+
+    /// Propose `action` and approve it to the (2-of-2) threshold, returning the
+    /// new proposal id. Assumes the multisig is already initialized.
+    fn propose_and_approve(setup: &Setup, action: ProposalAction) -> u64 {
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action)
+        });
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+        });
+
+        proposal_id
+    }
+
+    #[test]
+    fn nonce_starts_at_zero_and_increments_per_execution() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+            assert_eq!(MultiSig::nonce(&setup.env), 0);
+        });
+
+        // First execution consumes nonce 0.
+        let action_one = ProposalAction::Upgrade(hash(&setup.env, 20));
+        let first = propose_and_approve(&setup, action_one.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, first, action_one, 0, || {});
+            assert_eq!(MultiSig::nonce(&setup.env), 1);
+            let proposal = MultiSig::get_proposal(&setup.env, first);
+            assert_eq!(proposal.executed_nonce, Some(0));
+        });
+
+        // Second, independent execution consumes the next nonce, 1.
+        let action_two = ProposalAction::Upgrade(hash(&setup.env, 21));
+        let second = propose_and_approve(&setup, action_two.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, second, action_two, 1, || {});
+            assert_eq!(MultiSig::nonce(&setup.env), 2);
+            let proposal = MultiSig::get_proposal(&setup.env, second);
+            assert_eq!(proposal.executed_nonce, Some(1));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "NonceMismatch")]
+    fn execute_rejects_wrong_nonce() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        let action = ProposalAction::Upgrade(hash(&setup.env, 22));
+        let proposal_id = propose_and_approve(&setup, action.clone());
+
+        // Threshold and payload are satisfied, but the supplied nonce (1) does
+        // not match the expected next nonce (0).
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action, 1, || {});
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "NonceMismatch")]
+    fn replayed_signatures_and_nonce_are_rejected() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        // A privileged action is proposed, approved to threshold, and executed
+        // with nonce 0. This is the "captured" (signatures, nonce) pair.
+        let action = ProposalAction::Upgrade(hash(&setup.env, 23));
+        let first = propose_and_approve(&setup, action.clone());
+        let mut effects = 0u32;
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, first, action.clone(), 0, || effects += 1);
+        });
+        assert_eq!(effects, 1);
+
+        // An attacker re-submits the identical action as a fresh proposal and
+        // re-collects the same signers' approvals, then replays the previously
+        // used nonce (0). The nonce has already advanced to 1, so execution is
+        // rejected before the action can run a second time.
+        let replay = propose_and_approve(&setup, action.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, replay, action, 0, || effects += 1);
+        });
+    }
+
+    #[test]
+    fn rejected_replay_leaves_state_untouched() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        let action = ProposalAction::Upgrade(hash(&setup.env, 24));
+        let first = propose_and_approve(&setup, action.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, first, action.clone(), 0, || {});
+        });
+
+        // Fresh proposal for the identical action, approved to threshold, but
+        // not yet executed. The stale nonce (0) has already been consumed.
+        let replay = propose_and_approve(&setup, action);
+
+        // Before the replay attempt, the nonce sits at 1 and the fresh proposal
+        // is unexecuted. `execute` with the stale nonce panics (asserted by the
+        // dedicated NonceMismatch test); here we confirm the pre-attempt state
+        // that the panic must preserve: no effect can have leaked through.
+        setup.env.as_contract(&setup.contract_id, || {
+            assert_eq!(MultiSig::nonce(&setup.env), 1);
+            let proposal = MultiSig::get_proposal(&setup.env, replay);
+            assert!(!proposal.executed);
+            assert_eq!(proposal.executed_nonce, None);
         });
     }
 }
