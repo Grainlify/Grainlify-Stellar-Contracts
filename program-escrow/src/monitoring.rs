@@ -182,3 +182,25 @@ pub fn get_performance_stats(env: &Env, function_name: Symbol) -> PerformanceSta
         last_called: last,
     }
 }
+
+const LARGE_PAYOUT_THRESHOLD: &str = "large_payout_threshold";
+const DEFAULT_LARGE_PAYOUT_THRESHOLD_BPS: u32 = 1000;
+const LARGE_PAYOUT_THRESHOLD_DENOMINATOR: i128 = 10_000;
+
+pub fn set_large_payout_threshold_bps(env: &Env, threshold_bps: u32) {
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, LARGE_PAYOUT_THRESHOLD), &threshold_bps);
+}
+
+pub fn get_large_payout_threshold_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, LARGE_PAYOUT_THRESHOLD))
+        .unwrap_or(DEFAULT_LARGE_PAYOUT_THRESHOLD_BPS)
+}
+
+pub fn get_large_payout_threshold_amount(env: &Env, total_funds: i128) -> i128 {
+    let threshold_bps = get_large_payout_threshold_bps(env) as i128;
+    total_funds * threshold_bps / LARGE_PAYOUT_THRESHOLD_DENOMINATOR
+}

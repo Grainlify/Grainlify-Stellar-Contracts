@@ -22,6 +22,50 @@ mod mock_governance {
     }
 }
 
+// Enhanced mock that tracks proposal states (Pending=1, Rejected=3, Executed=4)
+// and only approves hashes with an Executed proposal — mirrors real governance logic.
+mod mock_governance_with_state {
+    use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Map, Symbol};
+
+    const PROPOSAL_STATES: Symbol = symbol_short!("PR_STATE");
+
+    #[contract]
+    pub struct MockGovernanceWithState;
+
+    #[contractimpl]
+    impl MockGovernanceWithState {
+        pub fn get_ver(_env: Env) -> u32 {
+            2
+        }
+
+        /// Only returns true if there is an Executed (4) proposal whose hash matches.
+        pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
+            let store: Map<u32, (BytesN<32>, u32)> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .unwrap_or(Map::new(&env));
+            for (_, (hash, status)) in store.iter() {
+                if hash == wasm_hash && status == 4 {
+                    return true;
+                }
+            }
+            false
+        }
+
+        /// Register a proposal. status codes: 1=Pending, 3=Rejected, 4=Executed
+        pub fn set_proposal(env: Env, proposal_id: u32, wasm_hash: BytesN<32>, status: u32) {
+            let mut store: Map<u32, (BytesN<32>, u32)> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .unwrap_or(Map::new(&env));
+            store.set(proposal_id, (wasm_hash, status));
+            env.storage().instance().set(&PROPOSAL_STATES, &store);
+        }
+    }
+}
+
 #[test]
 fn test_set_governance_contract() {
     let env = Env::default();
@@ -236,4 +280,152 @@ fn test_governance_prevents_unauthorized_config_changes() {
     let config = client.get_rate_limit_config();
     assert_eq!(config.window_size, 7200);
     assert_eq!(config.max_operations, 5);
+}
+
+// ── Access-control: proposal-state gating ──────────────────────────────────
+
+#[test]
+fn test_executed_proposal_triggers_upgrade_successfully() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+
+    let approved_hash = BytesN::from_array(&env, &[0xabu8; 32]);
+    gov_client.set_proposal(&0, &approved_hash, &4); // 4 = Executed
+
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_upgrade_approval(
+            &env,
+            &approved_hash,
+        ));
+    });
+}
+
+#[test]
+fn test_pending_proposal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+
+    let hash = BytesN::from_array(&env, &[0xbbu8; 32]);
+    gov_client.set_proposal(&1, &hash, &1); // 1 = Pending
+
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_upgrade_approval(&env, &hash));
+    });
+}
+
+#[test]
+fn test_rejected_proposal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+
+    let hash = BytesN::from_array(&env, &[0xccu8; 32]);
+    gov_client.set_proposal(&2, &hash, &3); // 3 = Rejected
+
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_upgrade_approval(&env, &hash));
+    });
+}
+
+#[test]
+fn test_already_executed_proposal_for_different_hash_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+
+    let executed_hash = BytesN::from_array(&env, &[0xdd; 32]);
+    let different_hash = BytesN::from_array(&env, &[0xee; 32]);
+    gov_client.set_proposal(&3, &executed_hash, &4); // 4 = Executed (for a different hash)
+
+    env.as_contract(&contract_id, || {
+        // The hash being queried does not match any executed proposal
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &different_hash,
+        ));
+    });
+}
+
+#[test]
+fn test_type_tag_confusion_prevents_non_governance_hash_acceptance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+
+    // Simulate a hash used for a completely different protocol purpose
+    // (e.g. a content-hash for a stored document, a non-governance identifier).
+    let non_governance_hash = BytesN::from_array(&env, &[0xff; 32]);
+
+    // Register it with a status that is NOT Executed (e.g. Rejected = 3),
+    // and also register a completely unrelated Executed proposal to show
+    // that type confusion would be required to accidentally match.
+    let unrelated_hash = BytesN::from_array(&env, &[0xaa; 32]);
+    gov_client.set_proposal(&4, &unrelated_hash, &4); // unrelated executed proposal
+    gov_client.set_proposal(&5, &non_governance_hash, &3); // non-governance hash, Rejected
+
+    env.as_contract(&contract_id, || {
+        // The non-governance hash should not be approved even though
+        // there are other executed proposals in storage
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &non_governance_hash,
+        ));
+        // Sanity-check that the unrelated executed proposal still works
+        assert!(governance_integration::check_upgrade_approval(
+            &env,
+            &unrelated_hash,
+        ));
+    });
 }
