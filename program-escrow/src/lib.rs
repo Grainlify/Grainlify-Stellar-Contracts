@@ -790,7 +790,7 @@ impl ProgramEscrowContract {
         recipient: &Address,
         amount: i128,
     ) {
-        let threshold = program_data.total_funds / 10; // 10% of total funds
+        let threshold = monitoring::get_large_payout_threshold_amount(env, program_data.total_funds);
         if amount >= threshold {
             env.events().publish(
                 (LARGE_PAYOUT,),
@@ -1494,6 +1494,25 @@ impl ProgramEscrowContract {
             })
     }
 
+    /// Set the large payout threshold, expressed in basis points of total funds.
+    /// Admin only.
+    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+        Self::check_governance_requirements(&env)?;
+        monitoring::set_large_payout_threshold_bps(&env, threshold_bps);
+        Ok(())
+    }
+
+    /// Get the current large payout threshold in basis points.
+    pub fn get_large_payout_threshold(env: Env) -> u32 {
+        monitoring::get_large_payout_threshold_bps(&env)
+    }
+
     /// Set the fund cap configuration (admin only).
     /// When enabled, `lock_program_funds` will reject locks that exceed either cap.
     /// Pass `None` for either field to leave that cap unset.
@@ -1780,7 +1799,7 @@ impl ProgramEscrowContract {
         let timestamp = env.ledger().timestamp();
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &program_data.token_address);
-        let threshold = program_data.total_funds / 10;
+        let threshold = monitoring::get_large_payout_threshold_amount(&env, program_data.total_funds);
         let program_id = program_data.program_id.clone();
 
         for i in 0..batch_len {

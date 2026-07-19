@@ -64,3 +64,48 @@ fn test_monitoring_analytics_and_health() {
     assert_eq!(snapshot.total_operations, 2);
     assert_eq!(snapshot.total_errors, 0);
 }
+
+#[test]
+fn test_default_large_payout_threshold_is_ten_percent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let threshold_bps = client.get_large_payout_threshold();
+    assert_eq!(threshold_bps, 1000);
+}
+
+#[test]
+fn test_admin_can_update_large_payout_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    assert_eq!(client.get_large_payout_threshold(), 1000);
+    client.try_set_large_payout_threshold(&2000).unwrap();
+    assert_eq!(client.get_large_payout_threshold(), 2000);
+}
+
+#[test]
+#[should_panic]
+fn test_non_admin_cannot_update_large_payout_threshold() {
+    let env = Env::default();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    client.try_set_large_payout_threshold(&2000).unwrap();
+}
