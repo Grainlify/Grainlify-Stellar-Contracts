@@ -45,7 +45,10 @@ fn next_seed(seed: &mut u64) -> u64 {
 
 fn assert_event_data_has_v2_tag(env: &Env, data: &Val) {
     if let Ok(data_map) = Map::<Symbol, Val>::try_from_val(env, data) {
-        if data_map.contains_key(Symbol::new(env, "duration")) || data_map.contains_key(Symbol::new(env, "caller")) || data_map.contains_key(Symbol::new(env, "lock")) {
+        if data_map.contains_key(Symbol::new(env, "duration"))
+            || data_map.contains_key(Symbol::new(env, "caller"))
+            || data_map.contains_key(Symbol::new(env, "lock"))
+        {
             return; // Skip metric/op/pause events
         }
         let version_val = data_map
@@ -71,7 +74,6 @@ fn get_batch_gas_proxy_metrics(
         if contract != client.address {
             continue;
         }
-
 
         let transfer_ops = get_u32_event_field(env, &data, "gas_proxy_transfer_ops");
         let history_appends = get_u32_event_field(env, &data, "gas_proxy_history_appends");
@@ -1713,7 +1715,12 @@ fn test_combined_recipient_and_amount_filter_manual() {
 
 fn setup_program_with_admin(
     env: &Env,
-) -> (ProgramEscrowContractClient<'static>, Address, token::StellarAssetClient<'static>, token::Client<'static>) {
+) -> (
+    ProgramEscrowContractClient<'static>,
+    Address,
+    token::StellarAssetClient<'static>,
+    token::Client<'static>,
+) {
     env.mock_all_auths();
 
     let contract_id = env.register_contract(None, ProgramEscrowContract);
