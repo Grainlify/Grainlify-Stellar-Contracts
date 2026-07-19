@@ -42,7 +42,10 @@ fn setup_whitelist_test(
     (client, admin, token_client, tokenadmin_client)
 }
 
-fn find_event_by_topic(env: &Env, topic: Symbol) -> Option<(soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
+fn find_event_by_topic(
+    env: &Env,
+    topic: Symbol,
+) -> Option<(soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> {
     let events = env.events().all();
     for i in 0..events.len() {
         let event = events.get(i).unwrap();
@@ -119,7 +122,8 @@ fn test_set_and_unset_whitelist_enforcement() {
     let event = find_event_by_topic(&env, symbol_short!("WlEnfChg"));
     assert!(event.is_some());
     let (_, data) = event.unwrap();
-    let decoded: WhitelistEnforcementChangedEvent = WhitelistEnforcementChangedEvent::try_from_val(&env, &data).unwrap();
+    let decoded: WhitelistEnforcementChangedEvent =
+        WhitelistEnforcementChangedEvent::try_from_val(&env, &data).unwrap();
     assert!(decoded.enabled);
 
     // Admin sets enforced to false
