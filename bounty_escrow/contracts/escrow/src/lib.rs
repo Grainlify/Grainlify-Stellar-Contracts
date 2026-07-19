@@ -6,6 +6,11 @@ mod error_recovery;
 
 #[cfg(test)]
 mod test_rbac;
+mod test_admin_authz;
+mod test_coverage_boost;
+mod test_coverage_boost_small;
+mod test_coverage_comprehensive;
+mod test_serialization;
 
 use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
