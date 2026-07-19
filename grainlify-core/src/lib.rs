@@ -847,6 +847,21 @@ impl GrainlifyContract {
         MultiSig::approve(&env, proposal_id, signer);
     }
 
+    /// Remove a signer from the multisig configuration.
+    ///
+    /// The removal is guarded by a threshold-viability check: if removing the
+    /// signer would leave fewer signers than the configured approval threshold
+    /// (making it impossible to ever reach quorum), the call is rejected with a
+    /// typed `RemovalWouldBreakThreshold` error.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the removal (must sign the transaction)
+    /// * `signer_to_remove` - The signer address to remove from the set
+    pub fn remove_signer(env: Env, caller: Address, signer_to_remove: Address) {
+        MultiSig::remove_signer(&env, caller, signer_to_remove);
+    }
+
     /// Returns the configured single-admin upgrade delay in seconds.
     pub fn get_upgrade_delay(env: Env) -> u64 {
         env.storage()

@@ -51,6 +51,9 @@ pub enum MultiSigError {
     ThresholdNotMet,
     InvalidThreshold,
     ActionMismatch,
+    /// Removing the signer would leave fewer signers than the configured
+    /// threshold, making the multisig permanently un-executable.
+    RemovalWouldBreakThreshold,
 }
 
 /// =======================
@@ -198,6 +201,56 @@ impl MultiSig {
 
     pub fn get_action(env: &Env, proposal_id: u64) -> ProposalAction {
         Self::get_proposal(env, proposal_id).action
+    }
+
+    /// Remove a signer from the multisig configuration.
+    ///
+    /// # Pre-condition: threshold viability guard
+    /// The removal is rejected with [`MultiSigError::RemovalWouldBreakThreshold`]
+    /// if `(current_signer_count - 1) < threshold`.  This prevents an admin
+    /// from accidentally (or maliciously) leaving the multisig in a state where
+    /// the required number of approvals can never be gathered, which would
+    /// permanently lock any funds or actions protected by the multisig.
+    ///
+    /// # Errors
+    /// - Panics with `NotSigner` if `signer_to_remove` is not in the current
+    ///   signer set.
+    /// - Panics with `RemovalWouldBreakThreshold` if the removal would leave
+    ///   fewer signers than the configured threshold.
+    pub fn remove_signer(env: &Env, caller: Address, signer_to_remove: Address) {
+        caller.require_auth();
+
+        let mut config = Self::get_config(env);
+
+        // Verify the address to be removed is actually a current signer.
+        if !config.signers.contains(&signer_to_remove) {
+            panic!("{:?}", MultiSigError::NotSigner);
+        }
+
+        // Guard: removing this signer must not make the threshold unreachable.
+        // After removal there will be (len - 1) signers; that count must still
+        // be >= threshold.
+        let remaining = config.signers.len() as u32 - 1;
+        if remaining < config.threshold {
+            panic!("{:?}", MultiSigError::RemovalWouldBreakThreshold);
+        }
+
+        // Rebuild the signer list without the removed address.
+        let mut new_signers = Vec::new(env);
+        for i in 0..config.signers.len() {
+            let s = config.signers.get(i).unwrap();
+            if s != signer_to_remove {
+                new_signers.push_back(s);
+            }
+        }
+
+        config.signers = new_signers;
+        env.storage().instance().set(&DataKey::Config, &config);
+
+        env.events().publish(
+            (symbol_short!("rm_sgnr"),),
+            signer_to_remove,
+        );
     }
 
     fn mark_executed(env: &Env, proposal_id: u64) {
@@ -705,6 +758,107 @@ mod test {
             assert_eq!(proposal.threshold, 2);
             assert!(proposal.signers.contains(&setup.signer_b));
             assert!(!proposal.signers.contains(&setup.signer_c));
+        });
+    }
+
+    // =====================================================================
+    // remove_signer: threshold-viability guard tests  (issue #183)
+    // =====================================================================
+
+    /// Normal removal: 3 signers, threshold=2, remove one → 2 signers remain
+    /// which is exactly the threshold → still viable, must succeed.
+    ///
+    /// This test also doubles as the *boundary* case (remaining == threshold).
+    #[test]
+    fn remove_signer_normal_above_threshold_succeeds() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 3 signers, threshold = 2 (well above minimum)
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2);
+
+            // Remove signer_c → 2 remain, threshold still = 2: viable.
+            MultiSig::remove_signer(
+                &setup.env,
+                setup.signer_a.clone(), // caller
+                setup.signer_c.clone(), // target
+            );
+
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(
+                config.signers.len(),
+                2,
+                "signer count should drop to 2 after removal"
+            );
+            assert!(
+                !config.signers.contains(&setup.signer_c),
+                "removed signer must not appear in the config"
+            );
+            assert!(
+                config.signers.contains(&setup.signer_a),
+                "remaining signers must still be present"
+            );
+            assert!(
+                config.signers.contains(&setup.signer_b),
+                "remaining signers must still be present"
+            );
+        });
+    }
+
+    /// Boundary case: removing exactly down to the threshold (remaining == threshold).
+    /// With 3 signers and threshold=2, removing one signer leaves exactly 2 —
+    /// matching the threshold.  This must be *allowed*.
+    #[test]
+    fn remove_signer_boundary_exactly_at_threshold_is_allowed() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 3 signers, threshold = 2
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2);
+
+            // Removing signer_c leaves exactly 2 = threshold → must succeed.
+            MultiSig::remove_signer(
+                &setup.env,
+                setup.signer_a.clone(),
+                setup.signer_c.clone(),
+            );
+
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(
+                config.signers.len() as u32,
+                config.threshold,
+                "after boundary removal, signer count must equal threshold exactly"
+            );
+        });
+    }
+
+    /// Rejected removal: 2 signers, threshold=2 → removing either signer
+    /// would leave only 1 signer < threshold=2.
+    /// The call must panic with `RemovalWouldBreakThreshold`.
+    #[test]
+    #[should_panic(expected = "RemovalWouldBreakThreshold")]
+    fn remove_signer_below_threshold_is_rejected() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 2 signers, threshold = 2 (unanimous 2-of-2)
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            // Removing signer_b would leave 1 signer < threshold=2 → must panic.
+            MultiSig::remove_signer(
+                &setup.env,
+                setup.signer_a.clone(),
+                setup.signer_b.clone(),
+            );
         });
     }
 }
