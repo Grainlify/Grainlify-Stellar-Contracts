@@ -59,6 +59,9 @@ pub enum MultiSigError {
     InvalidThreshold,
     ActionMismatch,
     NonceMismatch,
+    /// Removing the signer would leave fewer signers than the configured
+    /// threshold, making the multisig permanently un-executable.
+    RemovalWouldBreakThreshold,
 }
 
 /// =======================
@@ -241,6 +244,56 @@ impl MultiSig {
 
     pub fn get_action(env: &Env, proposal_id: u64) -> ProposalAction {
         Self::get_proposal(env, proposal_id).action
+    }
+
+    /// Remove a signer from the multisig configuration.
+    ///
+    /// # Pre-condition: threshold viability guard
+    /// The removal is rejected with [`MultiSigError::RemovalWouldBreakThreshold`]
+    /// if `(current_signer_count - 1) < threshold`.  This prevents an admin
+    /// from accidentally (or maliciously) leaving the multisig in a state where
+    /// the required number of approvals can never be gathered, which would
+    /// permanently lock any funds or actions protected by the multisig.
+    ///
+    /// # Errors
+    /// - Panics with `NotSigner` if `signer_to_remove` is not in the current
+    ///   signer set.
+    /// - Panics with `RemovalWouldBreakThreshold` if the removal would leave
+    ///   fewer signers than the configured threshold.
+    pub fn remove_signer(env: &Env, caller: Address, signer_to_remove: Address) {
+        caller.require_auth();
+
+        let mut config = Self::get_config(env);
+
+        // Verify the address to be removed is actually a current signer.
+        if !config.signers.contains(&signer_to_remove) {
+            panic!("{:?}", MultiSigError::NotSigner);
+        }
+
+        // Guard: removing this signer must not make the threshold unreachable.
+        // After removal there will be (len - 1) signers; that count must still
+        // be >= threshold.
+        let remaining = config.signers.len() as u32 - 1;
+        if remaining < config.threshold {
+            panic!("{:?}", MultiSigError::RemovalWouldBreakThreshold);
+        }
+
+        // Rebuild the signer list without the removed address.
+        let mut new_signers = Vec::new(env);
+        for i in 0..config.signers.len() {
+            let s = config.signers.get(i).unwrap();
+            if s != signer_to_remove {
+                new_signers.push_back(s);
+            }
+        }
+
+        config.signers = new_signers;
+        env.storage().instance().set(&DataKey::Config, &config);
+
+        env.events().publish(
+            (symbol_short!("rm_sgnr"),),
+            signer_to_remove,
+        );
     }
 
     fn mark_executed(env: &Env, proposal_id: u64, nonce: u64) {
@@ -503,6 +556,217 @@ mod test {
         });
     }
 
+    // =====================================================================
+    // Threshold edge-case tests (issue #184)
+    // =====================================================================
+
+    /// Helper: build a Vec<Address> from a slice of &Address.
+    fn addr_vec(env: &Env, addrs: &[&Address]) -> Vec<Address> {
+        let mut v = Vec::new(env);
+        for a in addrs {
+            v.push_back((*a).clone());
+        }
+        v
+    }
+
+    // --- 0-threshold is explicitly invalid -----------------------------------
+
+    /// Initialising with threshold=0 must be rejected with InvalidThreshold,
+    /// regardless of the signer count.
+    #[test]
+    #[should_panic(expected = "InvalidThreshold")]
+    fn zero_threshold_is_rejected() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                0, // threshold == 0 → must panic
+            );
+        });
+    }
+
+    /// threshold > signers.len() is also an invalid configuration.
+    #[test]
+    #[should_panic(expected = "InvalidThreshold")]
+    fn threshold_exceeding_signer_count_is_rejected() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 2 signers, threshold = 3 → impossible to ever reach
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                3,
+            );
+        });
+    }
+
+    // --- 1-of-N: any single signer suffices ----------------------------------
+
+    /// A 1-of-3 configuration must become executable as soon as ONE signer
+    /// approves — the other two approvals are unnecessary.
+    #[test]
+    fn one_of_n_single_approval_suffices() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 20));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 1); // 1-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // Before any approval: not executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // After exactly ONE approval: must be executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+            assert!(
+                MultiSig::can_execute(&setup.env, proposal_id),
+                "1-of-3: should be executable after a single approval"
+            );
+        });
+
+        // Execute succeeds and the action closure runs.
+        let did_run = setup.env.as_contract(&setup.contract_id, || {
+            let mut ran = false;
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), 0, || {
+                ran = true;
+            });
+            ran
+        });
+
+        assert!(did_run, "action closure must have been called");
+    }
+
+    // --- N-of-N: all signers must approve (unanimous) -----------------------
+
+    /// A 3-of-3 configuration must NOT be executable until every signer has
+    /// approved.  After the third approval it becomes executable.
+    #[test]
+    fn n_of_n_requires_all_signers() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 21));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 3); // 3-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // After 1st approval: not executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // After 2nd approval: still not executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // After 3rd (final) approval: now executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_c.clone());
+            assert!(
+                MultiSig::can_execute(&setup.env, proposal_id),
+                "3-of-3: should be executable only after all signers approve"
+            );
+        });
+
+        // Execute succeeds.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), 0, || {});
+            let proposal = MultiSig::get_proposal(&setup.env, proposal_id);
+            assert!(proposal.executed);
+        });
+    }
+
+    // --- Exactly-at-threshold: must pass ------------------------------------
+
+    /// With a 2-of-3 config, reaching exactly 2 approvals (= threshold) must
+    /// make the proposal executable.  This guards against an off-by-one where
+    /// the implementation uses `>` instead of `>=`.
+    #[test]
+    fn exactly_at_threshold_is_executable() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 22));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2); // 2-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // 1 approval → below threshold.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
+        });
+
+        // 2 approvals → exactly at threshold → must be executable.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+            assert!(
+                MultiSig::can_execute(&setup.env, proposal_id),
+                "exactly-at-threshold (2-of-3): must be executable"
+            );
+        });
+
+        // Execute succeeds without needing the third signer.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), 0, || {});
+        });
+    }
+
+    // --- One-short-of-threshold: must fail ----------------------------------
+
+    /// With a 3-of-3 config, having only 2 approvals (one short of the
+    /// threshold) must be rejected when execute is called.  This guards against
+    /// an off-by-one where `>=` is accidentally replaced with `>`.
+    #[test]
+    #[should_panic(expected = "ThresholdNotMet")]
+    fn one_short_of_threshold_is_not_executable() {
+        let setup = setup();
+        let action = ProposalAction::Upgrade(hash(&setup.env, 23));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 3); // 3-of-3
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        // Only 2 out of 3 required approvals.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+        });
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+        });
+
+        // Attempting to execute with one approval short must panic.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action, 0, || {});
+        });
+    }
+
     #[test]
     fn signer_and_threshold_snapshot_prevents_retroactive_validation() {
         let setup = setup();
@@ -679,6 +943,107 @@ mod test {
             let proposal = MultiSig::get_proposal(&setup.env, replay);
             assert!(!proposal.executed);
             assert_eq!(proposal.executed_nonce, None);
+        });
+    }
+
+    // =====================================================================
+    // remove_signer: threshold-viability guard tests  (issue #183)
+    // =====================================================================
+
+    /// Normal removal: 3 signers, threshold=2, remove one → 2 signers remain
+    /// which is exactly the threshold → still viable, must succeed.
+    ///
+    /// This test also doubles as the *boundary* case (remaining == threshold).
+    #[test]
+    fn remove_signer_normal_above_threshold_succeeds() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 3 signers, threshold = 2 (well above minimum)
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2);
+
+            // Remove signer_c → 2 remain, threshold still = 2: viable.
+            MultiSig::remove_signer(
+                &setup.env,
+                setup.signer_a.clone(), // caller
+                setup.signer_c.clone(), // target
+            );
+
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(
+                config.signers.len(),
+                2,
+                "signer count should drop to 2 after removal"
+            );
+            assert!(
+                !config.signers.contains(&setup.signer_c),
+                "removed signer must not appear in the config"
+            );
+            assert!(
+                config.signers.contains(&setup.signer_a),
+                "remaining signers must still be present"
+            );
+            assert!(
+                config.signers.contains(&setup.signer_b),
+                "remaining signers must still be present"
+            );
+        });
+    }
+
+    /// Boundary case: removing exactly down to the threshold (remaining == threshold).
+    /// With 3 signers and threshold=2, removing one signer leaves exactly 2 —
+    /// matching the threshold.  This must be *allowed*.
+    #[test]
+    fn remove_signer_boundary_exactly_at_threshold_is_allowed() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 3 signers, threshold = 2
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2);
+
+            // Removing signer_c leaves exactly 2 = threshold → must succeed.
+            MultiSig::remove_signer(
+                &setup.env,
+                setup.signer_a.clone(),
+                setup.signer_c.clone(),
+            );
+
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(
+                config.signers.len() as u32,
+                config.threshold,
+                "after boundary removal, signer count must equal threshold exactly"
+            );
+        });
+    }
+
+    /// Rejected removal: 2 signers, threshold=2 → removing either signer
+    /// would leave only 1 signer < threshold=2.
+    /// The call must panic with `RemovalWouldBreakThreshold`.
+    #[test]
+    #[should_panic(expected = "RemovalWouldBreakThreshold")]
+    fn remove_signer_below_threshold_is_rejected() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            // 2 signers, threshold = 2 (unanimous 2-of-2)
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            // Removing signer_b would leave 1 signer < threshold=2 → must panic.
+            MultiSig::remove_signer(
+                &setup.env,
+                setup.signer_a.clone(),
+                setup.signer_b.clone(),
+            );
         });
     }
 }
