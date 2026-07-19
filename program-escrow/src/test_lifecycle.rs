@@ -53,11 +53,7 @@ fn make_client(env: &Env) -> (ProgramEscrowContractClient<'static>, Address) {
 
 /// Create a real SAC token, mint `amount` to the contract address, and return
 /// the token client and token contract id.
-fn fund_contract(
-    env: &Env,
-    funder: &Address,
-    amount: i128,
-) -> (token::Client<'static>, Address) {
+fn fund_contract(env: &Env, funder: &Address, amount: i128) -> (token::Client<'static>, Address) {
     let tokenadmin = Address::generate(env);
     let token_contract = env.register_stellar_asset_contract_v2(tokenadmin.clone());
     let token_id = token_contract.address();
@@ -87,7 +83,7 @@ fn setup_active_program(
     let program_id = String::from_str(env, "hack-2026");
     client.init_program(&program_id, &admin, &token_id);
     if amount > 0 {
-    client.lock_program_funds(&admin, &amount);
+        client.lock_program_funds(&admin, &amount);
     }
     (client, admin, contract_id, token_client)
 }
