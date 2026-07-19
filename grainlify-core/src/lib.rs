@@ -1059,14 +1059,17 @@ impl GrainlifyContract {
     /// # Arguments
     /// * `env` - The contract environment
     /// * `proposal_id` - The ID of the upgrade proposal to execute
-    pub fn execute_upgrade(env: Env, proposal_id: u64) {
+    /// * `expected_nonce` - The current execution nonce (see [`Self::multisig_nonce`]).
+    ///   Execution is rejected with `NonceMismatch` if this does not match,
+    ///   providing replay protection.
+    pub fn execute_upgrade(env: Env, proposal_id: u64, expected_nonce: u64) {
         let action = MultiSig::get_action(&env, proposal_id);
         let wasm_hash = match action.clone() {
             ProposalAction::Upgrade(wasm_hash) => wasm_hash,
         };
         let upgrade_env = env.clone();
 
-        MultiSig::execute(&env, proposal_id, action, || {
+        MultiSig::execute(&env, proposal_id, action, expected_nonce, || {
             upgrade_env
                 .deployer()
                 .update_current_contract_wasm(wasm_hash.clone());
@@ -1083,6 +1086,18 @@ impl GrainlifyContract {
 
         // Observational metric only: recorded after the upgrade has been applied.
         monitoring::track_upgrade_executed(&env);
+    }
+
+    /// Returns the next multisig execution nonce.
+    ///
+    /// This value must be passed as `expected_nonce` to [`Self::execute_upgrade`].
+    /// It increments after every successful execution, so a previously used
+    /// nonce (and its collected approvals) can never be replayed.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    pub fn multisig_nonce(env: Env) -> u64 {
+        MultiSig::nonce(&env)
     }
 
     /// Upgrades the contract to new WASM code (single admin version).
@@ -2508,7 +2523,9 @@ mod test {
 
         // 3. Execute -> emits UpgradeExecuted
         let events_len_before = env.events().all().len();
-        client.execute_upgrade(&proposal_id);
+        assert_eq!(client.multisig_nonce(), 0);
+        client.execute_upgrade(&proposal_id, &0u64);
+        assert_eq!(client.multisig_nonce(), 1);
         let events = env.events().all();
         assert!(events.len() > events_len_before);
 
