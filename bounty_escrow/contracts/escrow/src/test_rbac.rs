@@ -77,9 +77,8 @@ fn test_admin_contract_permissions() {
 }
 
 #[test]
-#[should_panic]
 fn test_random_cannot_pause() {
-    // Create a fresh env WITHOUT mock_all_auths for authorization testing
+    // init with all auth mocked (setup only)
     let env = Env::default();
     let contract_id = env.register_contract(None, BountyEscrowContract);
     let client = BountyEscrowContractClient::new(&env, &contract_id);
@@ -90,37 +89,18 @@ fn test_random_cannot_pause() {
         .register_stellar_asset_contract_v2(token_admin.clone())
         .address();
 
-    // Use mock auth only for init
     env.mock_all_auths();
     client.init(&admin, &token_id);
 
-    // Now create a NEW env context where auth is NOT mocked
-    // In Soroban, we can't "un-mock" auth, but the key insight is:
-    // set_paused calls admin.require_auth() — with mock_all_auths, this always succeeds.
-    // Instead, we use try_set_paused to check the error.
-    // Actually, let's test that a random user trying to call an admin-only
-    // function via the client doesn't work by NOT mocking auth at all.
-
-    // The issue: mock_all_auths() has already been called.
-    // In Soroban SDK, once mock_all_auths() is called, it cannot be undone.
-    // So we test unauthorized access differently: we verify that the admin
-    // address is the one stored, not a random one.
-    let stored_admin = env.as_contract(&contract_id, || {
-        env.storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::Admin)
-            .unwrap()
-    });
-    assert_eq!(stored_admin, admin);
-
-    // The actual RBAC enforcement is verified through the require_auth() call
-    // in set_paused. Without mock_all_auths, any call to set_paused would panic.
-    // We can demonstrate this with a completely fresh, un-mocked environment:
-    let env2 = Env::default();
-    let contract_id2 = env2.register_contract(None, BountyEscrowContract);
-    let client2 = BountyEscrowContractClient::new(&env2, &contract_id2);
-    // This should panic because no auth is mocked and admin hasn't been set
-    client2.set_paused(&Some(true), &None, &None);
+    // Clear all mocked auth. `mock_auths(&[])` DOES override
+    // `mock_all_auths`, so a subsequent admin call with no authorized caller
+    // is rejected (require_auth aborts -> try_ returns Err).
+    env.mock_auths(&[]);
+    let res = client.try_set_paused(&Some(true), &None, &None);
+    assert!(
+        res.is_err(),
+        "random caller must be rejected by set_paused authorization"
+    );
 }
 
 // ─────────────────────────────────────────────────────────
@@ -171,9 +151,7 @@ fn test_depositor_permissions() {
 }
 
 #[test]
-#[should_panic]
 fn test_random_cannot_lock_funds_for_depositor() {
-    // Fresh env with NO mock_all_auths
     let env = Env::default();
     let contract_id = env.register_contract(None, BountyEscrowContract);
     let client = BountyEscrowContractClient::new(&env, &contract_id);
@@ -185,20 +163,17 @@ fn test_random_cannot_lock_funds_for_depositor() {
         .register_stellar_asset_contract_v2(token_admin.clone())
         .address();
 
-    // Init with mock auth, then stop
+    // init + mint with all auth mocked (setup only)
     env.mock_all_auths();
     client.init(&admin, &token_id);
-
-    // Mint tokens
     let sac_client = token::StellarAssetClient::new(&env, &token_id);
     sac_client.mint(&depositor, &1000i128);
 
-    // Create fresh env WITHOUT mock_all_auths for the actual test call
-    let env2 = Env::default();
-    let contract_id2 = env2.register_contract(None, BountyEscrowContract);
-    let client2 = BountyEscrowContractClient::new(&env2, &contract_id2);
-    let depositor2 = Address::generate(&env2);
-
-    // This should panic: no auth mocked, depositor.require_auth() will fail
-    client2.lock_funds(&depositor2, &1u64, &1000i128, &3600);
+    // Clear mocked auth so the depositor auth is no longer satisfied.
+    env.mock_auths(&[]);
+    let res = client.try_lock_funds(&depositor, &1u64, &1000i128, &3600u64);
+    assert!(
+        res.is_err(),
+        "an unauthenticated caller must be rejected by lock_funds"
+    );
 }

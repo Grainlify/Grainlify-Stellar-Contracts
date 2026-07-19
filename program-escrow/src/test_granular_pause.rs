@@ -33,7 +33,11 @@ use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String};
 fn setup(
     env: &Env,
     initial_balance: i128,
-) -> (ProgramEscrowContractClient<'static>, token::Client<'static>, Address) {
+) -> (
+    ProgramEscrowContractClient<'static>,
+    token::Client<'static>,
+    Address,
+) {
     env.mock_all_auths();
 
     // Register escrow contract
