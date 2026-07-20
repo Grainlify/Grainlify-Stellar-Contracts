@@ -82,15 +82,9 @@
 //! ## Upgrade Process
 //!
 //! ```rust
-//! # use soroban_sdk::{Env, Address, BytesN, testutils::{Address as _, Ledger}};
-//! # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-//! # let env = Env::default();
-//! # env.mock_all_auths();
-//! # let contract_id = env.register_contract(None, GrainlifyContract);
-//! # let client = GrainlifyContractClient::new(&env, &contract_id);
 //! // 1. Initialize contract (one-time)
-//! let admin = Address::generate(&env);
-//! client.init_admin(&admin);
+//! let admin = Address::from_string("GADMIN...");
+//! contract.init(&admin);
 //!
 //! // 2. Develop and test new version locally
 //! // ... make changes to contract code ...
@@ -103,20 +97,18 @@
 //! // Returns: hash (e.g., "abc123...")
 //!
 //! // 5. Schedule upgrade and wait for the timelock
-//! let wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
-//! client.set_upgrade_delay(&600);
-//! let scheduled = client.schedule_upgrade(&wasm_hash);
+//! let wasm_hash = BytesN::from_array(&env, &[0xab, 0xcd, ...]);
+//! let scheduled = contract.schedule_upgrade(&wasm_hash);
 //! // Wait until ledger timestamp >= scheduled.executable_at
-//! env.ledger().with_mut(|li| li.timestamp = scheduled.executable_at);
 //!
-//! // 6. Perform upgrade (in real scenario, wasm_hash would be a valid uploaded WASM)
-//! // client.upgrade(&wasm_hash);
+//! // 6. Perform upgrade
+//! contract.upgrade(&wasm_hash);
 //!
 //! // 7. (Optional) Update version number
-//! client.set_version(&2);
+//! contract.set_version(&2);
 //!
 //! // 8. Verify upgrade
-//! let version = client.get_version();
+//! let version = contract.get_version();
 //! assert_eq!(version, 2);
 //! ```
 //!
@@ -124,7 +116,7 @@
 //!
 //! When upgrading contracts that require state migration:
 //!
-//! ```ignore
+//! ```rust
 //! // In new WASM version, add migration function:
 //! pub fn migrate(env: Env) {
 //!     let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -692,19 +684,16 @@ pub struct UpgradeExecutedEvent {
 ///
 /// # Example
 /// ```rust
-/// # use soroban_sdk::{Env, Address, testutils::{Address as _}};
-/// # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-/// # let env = Env::default();
-/// # env.mock_all_auths();
-/// # let contract_id = env.register_contract(None, GrainlifyContract);
-/// # let client = GrainlifyContractClient::new(&env, &contract_id);
+/// use soroban_sdk::{Address, Env};
+///
+/// let env = Env::default();
 /// let admin = Address::generate(&env);
 ///
 /// // Initialize contract
-/// client.init_admin(&admin);
+/// contract.init(&env, &admin);
 ///
 /// // Subsequent init attempts will panic
-/// // client.init_admin(&another_admin); // ❌ Panics!
+/// // contract.init(&env, &another_admin); // ❌ Panics!
 /// ```
 ///
 /// # Gas Cost
@@ -721,7 +710,7 @@ pub struct UpgradeExecutedEvent {
 /// stellar contract invoke \
 ///   --id CONTRACT_ID \
 ///   --source ADMIN_SECRET_KEY \
-///   -- init_admin \
+///   -- init \
 ///   --admin GADMIN_ADDRESS
 /// ```
 
@@ -858,6 +847,21 @@ impl GrainlifyContract {
         MultiSig::approve(&env, proposal_id, signer);
     }
 
+    /// Remove a signer from the multisig configuration.
+    ///
+    /// The removal is guarded by a threshold-viability check: if removing the
+    /// signer would leave fewer signers than the configured approval threshold
+    /// (making it impossible to ever reach quorum), the call is rejected with a
+    /// typed `RemovalWouldBreakThreshold` error.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the removal (must sign the transaction)
+    /// * `signer_to_remove` - The signer address to remove from the set
+    pub fn remove_signer(env: Env, caller: Address, signer_to_remove: Address) {
+        MultiSig::remove_signer(&env, caller, signer_to_remove);
+    }
+
     /// Returns the configured single-admin upgrade delay in seconds.
     pub fn get_upgrade_delay(env: Env) -> u64 {
         env.storage()
@@ -972,27 +976,23 @@ impl GrainlifyContract {
     ///
     /// # Example
     /// ```rust
-    /// # use soroban_sdk::{Env, Address, BytesN, testutils::{Address as _, Ledger}};
-    /// # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-    /// # let env = Env::default();
-    /// # env.mock_all_auths();
-    /// # let contract_id = env.register_contract(None, GrainlifyContract);
-    /// # let client = GrainlifyContractClient::new(&env, &contract_id);
-    /// # let admin = Address::generate(&env);
-    /// # client.init_admin(&admin);
-    /// # client.set_upgrade_delay(&600);
+    /// use soroban_sdk::{BytesN, Env};
+    ///
+    /// let env = Env::default();
+    ///
     /// // Upload new WASM and get hash (done off-chain)
-    /// let wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
+    /// let wasm_hash = BytesN::from_array(
+    ///     &env,
+    ///     &[0xab, 0xcd, 0xef, ...] // 32 bytes
+    /// );
     ///
     /// // Schedule upgrade, wait for executable_at, then perform upgrade
-    /// let scheduled = client.schedule_upgrade(&wasm_hash);
+    /// let scheduled = contract.schedule_upgrade(&env, &wasm_hash);
     /// // Wait until ledger timestamp >= scheduled.executable_at
-    /// env.ledger().with_mut(|li| li.timestamp = scheduled.executable_at);
-    /// // In a real scenario, wasm_hash would be a valid uploaded WASM
-    /// // client.upgrade(&wasm_hash);
+    /// contract.upgrade(&env, &wasm_hash);
     ///
     /// // Update version number
-    /// client.set_version(&2);
+    /// contract.set_version(&env, &2);
     /// ```
     ///
     /// # Production Upgrade Process
@@ -1059,36 +1059,17 @@ impl GrainlifyContract {
     /// # Arguments
     /// * `env` - The contract environment
     /// * `proposal_id` - The ID of the upgrade proposal to execute
-    ///
-    /// # Example
-    /// ```rust
-    /// # use soroban_sdk::{Env, Address, BytesN, Vec, testutils::{Address as _}};
-    /// # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-    /// # let env = Env::default();
-    /// # env.mock_all_auths();
-    /// # let contract_id = env.register_contract(None, GrainlifyContract);
-    /// # let client = GrainlifyContractClient::new(&env, &contract_id);
-    /// # let signer1 = Address::generate(&env);
-    /// # let signer2 = Address::generate(&env);
-    /// # let mut signers = Vec::new(&env);
-    /// # signers.push_back(signer1.clone());
-    /// # signers.push_back(signer2.clone());
-    /// # client.init(&signers, &2);
-    /// # let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
-    /// # let proposal_id = client.propose_upgrade(&signer1, &wasm_hash);
-    /// # client.approve_upgrade(&proposal_id, &signer1);
-    /// # client.approve_upgrade(&proposal_id, &signer2);
-    /// // Execute the approved upgrade proposal
-    /// client.execute_upgrade(&proposal_id);
-    /// ```
-    pub fn execute_upgrade(env: Env, proposal_id: u64) {
+    /// * `expected_nonce` - The current execution nonce (see [`Self::multisig_nonce`]).
+    ///   Execution is rejected with `NonceMismatch` if this does not match,
+    ///   providing replay protection.
+    pub fn execute_upgrade(env: Env, proposal_id: u64, expected_nonce: u64) {
         let action = MultiSig::get_action(&env, proposal_id);
         let wasm_hash = match action.clone() {
             ProposalAction::Upgrade(wasm_hash) => wasm_hash,
         };
         let upgrade_env = env.clone();
 
-        MultiSig::execute(&env, proposal_id, action, || {
+        MultiSig::execute(&env, proposal_id, action, expected_nonce, || {
             upgrade_env
                 .deployer()
                 .update_current_contract_wasm(wasm_hash.clone());
@@ -1105,6 +1086,18 @@ impl GrainlifyContract {
 
         // Observational metric only: recorded after the upgrade has been applied.
         monitoring::track_upgrade_executed(&env);
+    }
+
+    /// Returns the next multisig execution nonce.
+    ///
+    /// This value must be passed as `expected_nonce` to [`Self::execute_upgrade`].
+    /// It increments after every successful execution, so a previously used
+    /// nonce (and its collected approvals) can never be replayed.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    pub fn multisig_nonce(env: Env) -> u64 {
+        MultiSig::nonce(&env)
     }
 
     /// Upgrades the contract to new WASM code (single admin version).
@@ -1183,15 +1176,7 @@ impl GrainlifyContract {
     ///
     /// # Example
     /// ```rust
-    /// # use soroban_sdk::{Env, Address, testutils::{Address as _}};
-    /// # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-    /// # let env = Env::default();
-    /// # env.mock_all_auths();
-    /// # let contract_id = env.register_contract(None, GrainlifyContract);
-    /// # let client = GrainlifyContractClient::new(&env, &contract_id);
-    /// # let admin = Address::generate(&env);
-    /// # client.init_admin(&admin);
-    /// let version = client.get_version();
+    /// let version = contract.get_version(&env);
     ///
     /// match version {
     ///     1 => println!("Running v1"),
@@ -1287,44 +1272,24 @@ impl GrainlifyContract {
     ///
     /// # Example
     /// ```rust
-    /// # use soroban_sdk::{Env, Address, BytesN, testutils::{Address as _, Ledger}};
-    /// # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-    /// # let env = Env::default();
-    /// # env.mock_all_auths();
-    /// # let contract_id = env.register_contract(None, GrainlifyContract);
-    /// # let client = GrainlifyContractClient::new(&env, &contract_id);
-    /// # let admin = Address::generate(&env);
-    /// # client.init_admin(&admin);
-    /// // After upgrading WASM (in a real scenario, wasm_hash would be valid)
-    /// let wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
-    /// client.set_upgrade_delay(&600);
-    /// let scheduled = client.schedule_upgrade(&wasm_hash);
-    /// env.ledger().with_mut(|li| li.timestamp = scheduled.executable_at);
-    /// // client.upgrade(&wasm_hash); // In real scenario with valid WASM
+    /// // After upgrading WASM
+    /// contract.upgrade(&env, &new_wasm_hash);
     ///
     /// // Update version to reflect the upgrade
-    /// client.set_version(&2);
+    /// contract.set_version(&env, &2);
     ///
     /// // Verify
-    /// assert_eq!(client.get_version(), 2);
+    /// assert_eq!(contract.get_version(&env), 2);
     /// ```
     ///
     /// # Best Practice
     /// Document version changes:
     /// ```rust
-    /// # use soroban_sdk::{Env, Address, testutils::{Address as _}};
-    /// # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-    /// # let env = Env::default();
-    /// # env.mock_all_auths();
-    /// # let contract_id = env.register_contract(None, GrainlifyContract);
-    /// # let client = GrainlifyContractClient::new(&env, &contract_id);
-    /// # let admin = Address::generate(&env);
-    /// # client.init_admin(&admin);
     /// // Version History:
     /// // 1 - Initial release
     /// // 2 - Added feature X, fixed bug Y
     /// // 3 - Performance improvements
-    /// client.set_version(&3);
+    /// contract.set_version(&env, &3);
     /// ```
     ///
     /// # Security Note
@@ -1426,24 +1391,12 @@ impl GrainlifyContract {
     ///
     /// # Example
     /// ```rust
-    /// # use soroban_sdk::{Env, Address, BytesN, testutils::{Address as _, Ledger}};
-    /// # use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
-    /// # let env = Env::default();
-    /// # env.mock_all_auths();
-    /// # let contract_id = env.register_contract(None, GrainlifyContract);
-    /// # let client = GrainlifyContractClient::new(&env, &contract_id);
-    /// # let admin = Address::generate(&env);
-    /// # client.init_admin(&admin);
-    /// // After upgrading WASM (in a real scenario, wasm_hash would be valid)
-    /// let wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
-    /// client.set_upgrade_delay(&600);
-    /// let scheduled = client.schedule_upgrade(&wasm_hash);
-    /// env.ledger().with_mut(|li| li.timestamp = scheduled.executable_at);
-    /// // client.upgrade(&wasm_hash); // In real scenario with valid WASM
+    /// // After upgrading WASM to v2
+    /// contract.upgrade(&env, &new_wasm_hash);
     ///
-    /// // Migrate state from v2 to v3
-    /// let migration_hash = BytesN::from_array(&env, &[0u8; 32]);
-    /// client.migrate(&3, &migration_hash);
+    /// // Migrate state from v1 to v2
+    /// let migration_hash = BytesN::from_array(&env, &[...]);
+    /// contract.migrate(&env, &2, &migration_hash);
     /// ```
     pub fn migrate(env: Env, target_version: u32, migration_hash: BytesN<32>) {
         let start = env.ledger().timestamp();
@@ -2570,7 +2523,9 @@ mod test {
 
         // 3. Execute -> emits UpgradeExecuted
         let events_len_before = env.events().all().len();
-        client.execute_upgrade(&proposal_id);
+        assert_eq!(client.multisig_nonce(), 0);
+        client.execute_upgrade(&proposal_id, &0u64);
+        assert_eq!(client.multisig_nonce(), 1);
         let events = env.events().all();
         assert!(events.len() > events_len_before);
 
