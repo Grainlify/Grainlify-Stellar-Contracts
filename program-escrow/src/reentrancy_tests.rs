@@ -522,3 +522,59 @@ fn test_reentrancy_guard_model_documentation() {
 
     assert!(true, "Documentation test - see comments for guarantees");
 }
+
+
+// ============================================================================
+// Token Callback Reentrancy Tests
+// ============================================================================
+
+#[test]
+#[should_panic(expected = "Reentrancy detected")]
+fn test_token_callback_reentrancy_single_payout() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let authorized_key = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let program_id = String::from_str(&env, "test-program");
+    let amount = 1000_0000000i128;
+
+    // Register our malicious token contract
+    let token_address = env.register_contract(None, crate::malicious_reentrant::MaliciousTokenContract);
+    let malicious_token = crate::malicious_reentrant::MaliciousTokenContractClient::new(&env, &token_address);
+    malicious_token.init(&contract_id, &1u32); // 1 = attack single_payout
+
+    client.init_program(&program_id, &authorized_key, &token_address);
+    client.lock_program_funds(&authorized_key, &amount);
+
+    // This should panic when it calls transfer() on our malicious token
+    client.single_payout(&recipient, &(amount / 2));
+}
+
+#[test]
+#[should_panic(expected = "Reentrancy detected")]
+fn test_token_callback_reentrancy_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let authorized_key = Address::generate(&env);
+    let program_id = String::from_str(&env, "test-program");
+    let amount = 1000_0000000i128;
+
+    // Register our malicious token contract
+    let token_address = env.register_contract(None, crate::malicious_reentrant::MaliciousTokenContract);
+    let malicious_token = crate::malicious_reentrant::MaliciousTokenContractClient::new(&env, &token_address);
+    malicious_token.init(&contract_id, &3u32); // 3 = attack refund
+
+    client.init_program(&program_id, &authorized_key, &token_address);
+    client.lock_program_funds(&authorized_key, &amount);
+
+    // This should panic when it calls transfer()
+    client.refund_unallocated_funds(&authorized_key);
+}
