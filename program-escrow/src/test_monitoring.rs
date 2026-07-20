@@ -3,8 +3,8 @@
 use crate::{ProgramEscrowContract, ProgramEscrowContractClient};
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Ledger},
-    Address, Env, String,
+    testutils::{Address as _, Events, Ledger},
+    token, Address, Env, Map, String, Symbol, TryFromVal, Val,
 };
 
 #[test]
@@ -108,4 +108,145 @@ fn test_non_admin_cannot_update_large_payout_threshold() {
     client.setadmin(&admin);
 
     client.try_set_large_payout_threshold(&2000).unwrap();
+}
+
+// --- Alert-threshold breach tests for monitoring.rs (issue #192) ---
+//
+// The only monitored breach metric implemented in monitoring.rs is the
+// "large payout" detector: `check_and_emit_large_payout` emits a `(LrgPay,)`
+// event when `amount >= threshold`, where
+// `threshold = total_funds * large_payout_threshold_bps / 10_000`
+// (default bps = 1000 => 10% of locked funds).
+//
+// There is NO rolling-window / rapid-successive-claims tracking in
+// monitoring.rs, so the rolling-window acceptance criterion is N/A (asserted
+// below as a documented skip, not a test).
+
+fn setup_with_funds(
+    env: &Env,
+    total_funds: i128,
+) -> (ProgramEscrowContractClient<'static>, Address, token::StellarAssetClient<'static>) {
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let tokenadmin = Address::generate(env);
+    let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+    let tokenadmin_client = soroban_sdk::token::StellarAssetClient::new(env, &token_id);
+
+    let program_id = String::from_str(env, "threshold-test");
+    client.init_program(&program_id, &admin, &token_id);
+    tokenadmin_client.mint(&admin, &total_funds);
+    client.lock_program_funds(&admin, &total_funds);
+
+    (client, admin, tokenadmin_client)
+}
+
+fn large_payout_event(env: &Env) -> Option<Val> {
+    let events = env.events().all();
+    for i in 0..events.len() {
+        let event = events.get(i).unwrap();
+        let topics = event.1;
+        if topics.len() > 0 {
+            if let Ok(sym) = Symbol::try_from_val(env, &topics.get(0).unwrap()) {
+                if sym == symbol_short!("LrgPay") {
+                    return Some(event.2);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn test_large_payout_no_event_just_below_threshold() {
+    let env = Env::default();
+    // 100_000 locked => default threshold (10%) = 10_000.
+    let (client, _admin, _token) = setup_with_funds(&env, 100_000);
+
+    let recipient = Address::generate(&env);
+    client.single_payout(&recipient, &9_999); // just below 10_000
+
+    assert!(
+        large_payout_event(&env).is_none(),
+        "LrgPay event must NOT fire below threshold"
+    );
+}
+
+#[test]
+fn test_large_payout_event_fires_exactly_at_threshold() {
+    let env = Env::default();
+    let total_funds: i128 = 100_000;
+    let (client, _admin, _token) = setup_with_funds(&env, total_funds);
+
+    let recipient = Address::generate(&env);
+    client.single_payout(&recipient, &10_000); // exactly at 10% threshold
+
+    let data = large_payout_event(&env).expect("LrgPay event must fire at threshold");
+    let map: soroban_sdk::Map<Symbol, Val> = soroban_sdk::Map::try_from_val(&env, &data).unwrap();
+    let amount = <i128 as soroban_sdk::TryFromVal<Env, Val>>::try_from_val(
+        &env,
+        &map.get(Symbol::new(&env, "amount")).unwrap(),
+    )
+    .unwrap();
+    let threshold = <i128 as soroban_sdk::TryFromVal<Env, Val>>::try_from_val(
+        &env,
+        &map.get(Symbol::new(&env, "threshold")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(amount, 10_000);
+    assert_eq!(threshold, 10_000); // 100_000 * 1000 / 10_000
+}
+
+#[test]
+fn test_large_payout_event_fires_above_threshold() {
+    let env = Env::default();
+    let (client, _admin, _token) = setup_with_funds(&env, 100_000);
+
+    let recipient = Address::generate(&env);
+    client.single_payout(&recipient, &10_001); // just above threshold
+
+    assert!(
+        large_payout_event(&env).is_some(),
+        "LrgPay event must fire above threshold"
+    );
+}
+
+#[test]
+fn test_large_payout_threshold_respects_custom_bps() {
+    let env = Env::default();
+    // Override threshold to 25% (2500 bps) => 25_000 on 100_000 funds.
+    let (client, admin, _token) = setup_with_funds(&env, 100_000);
+    client.setadmin(&admin);
+    client.try_set_large_payout_threshold(&2500).unwrap();
+
+    let recipient = Address::generate(&env);
+    client.single_payout(&recipient, &24_999); // below 25_000
+    assert!(
+        large_payout_event(&env).is_none(),
+        "no event below custom 25% threshold"
+    );
+
+    let recipient2 = Address::generate(&env);
+    client.single_payout(&recipient2, &25_000); // exactly at 25% threshold
+    let data = large_payout_event(&env).expect("event must fire at custom threshold");
+    let map: soroban_sdk::Map<Symbol, Val> = soroban_sdk::Map::try_from_val(&env, &data).unwrap();
+    let threshold = <i128 as soroban_sdk::TryFromVal<Env, Val>>::try_from_val(
+        &env,
+        &map.get(Symbol::new(&env, "threshold")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(threshold, 25_000);
+}
+
+// Rolling-window / rapid-successive-claims criterion (issue #192):
+// monitoring.rs has no rolling window or rate-of-claims tracking. This is a
+// documented gap, not a regression — the module only supports the large-payout
+// threshold check above. Left as `#[ignore]` so it surfaces as "skipped" rather
+// than silently passing.
+#[test]
+#[ignore]
+fn test_rolling_window_reset_behavior() {
+    panic!("monitoring.rs does not implement a rolling window / rapid-claims detector");
 }
