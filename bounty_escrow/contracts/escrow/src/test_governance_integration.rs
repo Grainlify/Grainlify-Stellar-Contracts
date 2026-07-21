@@ -33,6 +33,89 @@ mod mock_governance {
     }
 }
 
+mod mock_governance_with_proposal_state {
+    use crate::governance_integration::GovernanceError;
+    use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Map, Symbol};
+
+    const PROPOSAL_STATES: Symbol = symbol_short!("PR_STATE");
+    const STATUS_PENDING: u32 = 1;
+    const STATUS_APPROVED: u32 = 2;
+    const STATUS_REJECTED: u32 = 3;
+    const STATUS_EXECUTED: u32 = 4;
+
+    #[contract]
+    pub struct MockGovernanceWithProposalState;
+
+    #[contractimpl]
+    impl MockGovernanceWithProposalState {
+        pub fn get_ver(_env: Env) -> u32 {
+            2
+        }
+
+        pub fn get_version_numeric_encoded(_env: Env) -> u32 {
+            20_000
+        }
+
+        pub fn is_upg_ok(_env: Env, _wasm_hash: BytesN<32>) -> bool {
+            false
+        }
+
+        pub fn set_proposal_status(env: Env, proposal_id: u32, status: u32) {
+            let mut statuses: Map<u32, u32> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .unwrap_or(Map::new(&env));
+            statuses.set(proposal_id, status);
+            env.storage().instance().set(&PROPOSAL_STATES, &statuses);
+        }
+
+        pub fn get_proposal_status(env: Env, proposal_id: u32) -> u32 {
+            let statuses: Map<u32, u32> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .unwrap_or(Map::new(&env));
+            statuses.get(proposal_id).unwrap_or(0)
+        }
+
+        pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), GovernanceError> {
+            let mut statuses: Map<u32, u32> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .ok_or(GovernanceError::ProposalsNotFound)?;
+            let status = statuses
+                .get(proposal_id)
+                .ok_or(GovernanceError::ProposalNotFound)?;
+
+            if status != STATUS_APPROVED {
+                return Err(GovernanceError::ProposalNotApproved);
+            }
+
+            statuses.set(proposal_id, STATUS_EXECUTED);
+            env.storage().instance().set(&PROPOSAL_STATES, &statuses);
+            Ok(())
+        }
+
+        pub fn pending_status(_env: Env) -> u32 {
+            STATUS_PENDING
+        }
+
+        pub fn approved_status(_env: Env) -> u32 {
+            STATUS_APPROVED
+        }
+
+        pub fn rejected_status(_env: Env) -> u32 {
+            STATUS_REJECTED
+        }
+
+        pub fn executed_status(_env: Env) -> u32 {
+            STATUS_EXECUTED
+        }
+    }
+}
+
 fn create_token_contract<'a>(
     env: &Env,
     admin: &Address,
@@ -86,6 +169,92 @@ impl<'a> ValueTransferSetup<'a> {
         self.escrow
             .lock_funds(&self.depositor, &bounty_id, &amount, &deadline);
     }
+}
+
+fn configure_stateful_governance<'a>(
+    env: &'a Env,
+    escrow: &BountyEscrowContractClient<'a>,
+) -> mock_governance_with_proposal_state::MockGovernanceWithProposalStateClient<'a> {
+    let gov_contract_id = env.register_contract(
+        None,
+        mock_governance_with_proposal_state::MockGovernanceWithProposalState,
+    );
+    escrow.set_governance_contract(&gov_contract_id);
+    escrow.set_min_governance_version(&2);
+    mock_governance_with_proposal_state::MockGovernanceWithProposalStateClient::new(
+        env,
+        &gov_contract_id,
+    )
+}
+
+#[test]
+fn test_governance_proposal_execution_rejects_pending_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&1, &governance.pending_status());
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&1),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+    assert_eq!(
+        governance.get_proposal_status(&1),
+        governance.pending_status()
+    );
+}
+
+#[test]
+fn test_governance_proposal_execution_rejects_rejected_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&2, &governance.rejected_status());
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&2),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+    assert_eq!(
+        governance.get_proposal_status(&2),
+        governance.rejected_status()
+    );
+}
+
+#[test]
+fn test_governance_proposal_execution_rejects_already_executed_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&3, &governance.executed_status());
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&3),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+    assert_eq!(
+        governance.get_proposal_status(&3),
+        governance.executed_status()
+    );
+}
+
+#[test]
+fn test_governance_proposal_execution_consumes_approved_proposal_once() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&4, &governance.approved_status());
+
+    setup.escrow.execute_governance_proposal(&4);
+    assert_eq!(
+        governance.get_proposal_status(&4),
+        governance.executed_status()
+    );
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&4),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
 }
 
 #[test]
