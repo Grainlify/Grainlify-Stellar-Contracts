@@ -223,38 +223,3 @@ impl MaliciousReentrantContract {
         1000_0000000i128
     }
 }
-
-
-#[contract]
-pub struct MaliciousTokenContract;
-
-#[contractimpl]
-impl MaliciousTokenContract {
-    pub fn init(env: Env, target_contract: Address, target_function: u32) {
-        env.storage().instance().set(&soroban_sdk::symbol_short!("Target"), &target_contract);
-        env.storage().instance().set(&soroban_sdk::symbol_short!("Func"), &target_function);
-    }
-    
-    pub fn transfer(env: Env, _from: Address, to: Address, amount: i128) {
-        if let Some(target) = env.storage().instance().get::<_, Address>(&soroban_sdk::symbol_short!("Target")) {
-            let func: u32 = env.storage().instance().get(&soroban_sdk::symbol_short!("Func")).unwrap_or(0);
-            let count: u32 = env.storage().instance().get(&soroban_sdk::symbol_short!("Count")).unwrap_or(0);
-            
-            if count == 0 {
-                env.storage().instance().set(&soroban_sdk::symbol_short!("Count"), &(count + 1));
-                let client = crate::ProgramEscrowContractClient::new(&env, &target);
-                
-                match func {
-                    1 => { client.single_payout(&to, &amount); },
-                    2 => { client.trigger_program_releases(); },
-                    3 => { client.refund_unallocated_funds(&to); },
-                    _ => {}
-                }
-            }
-        }
-    }
-    
-    pub fn balance(_env: Env, _id: Address) -> i128 {
-        1000_0000000i128
-    }
-}
