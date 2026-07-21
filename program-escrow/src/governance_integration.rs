@@ -15,6 +15,10 @@ const MIN_GOV_VERSION: Symbol = soroban_sdk::symbol_short!("MIN_VER");
 pub trait GovernanceInterface {
     fn get_ver(env: Env) -> u32;
     fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool;
+    /// Returns true when a proposal identified by `proposal_id` has been
+    /// vetoed or cancelled before execution.  A vetoed proposal must never
+    /// be executed even if it previously reached `Approved` status.
+    fn is_vetoed(env: Env, proposal_id: u32) -> bool;
 }
 
 /// Set the governance contract address (admin only)
@@ -62,4 +66,18 @@ pub fn check_upgrade_approval(env: &Env, wasm_hash: &BytesN<32>) -> bool {
     }
 
     GovernanceClient::new(env, &gov_addr).is_upg_ok(wasm_hash)
+}
+
+/// Check whether a governance proposal has been vetoed or cancelled.
+///
+/// Returns `true` when the governance contract reports the proposal as
+/// vetoed/cancelled, meaning it **must not** be executed even if it
+/// previously reached `Approved` status.  Returns `false` when no
+/// governance contract is configured (open/permissionless mode).
+pub fn check_proposal_vetoed(env: &Env, proposal_id: u32) -> bool {
+    let Some(gov_addr) = get_governance_contract(env) else {
+        return false;
+    };
+
+    GovernanceClient::new(env, &gov_addr).is_vetoed(proposal_id)
 }
