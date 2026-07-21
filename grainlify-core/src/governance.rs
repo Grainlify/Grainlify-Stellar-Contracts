@@ -936,6 +936,43 @@ fn test_cancel_proposal_already_cancelled_fails() {
 }
 
 #[test]
+fn test_cancel_proposal_after_rejection_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    client.cast_vote(&proposer, &prop_id, &VoteType::Against);
+    client.cast_vote(&voter2, &prop_id, &VoteType::Against);
+    client.cast_vote(&voter3, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Rejected);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_after_sweep_expired_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    let current_time = 150;
+    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+    assert!(result.is_ok());
+
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Expired);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
 fn test_cross_contract_auth_scope_minimal() {
     let env = Env::default();
     let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
