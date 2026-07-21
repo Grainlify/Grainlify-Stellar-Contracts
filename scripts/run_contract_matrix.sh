@@ -195,19 +195,25 @@ ensure_identity() {
         addr="$(stellar keys address "$DEPLOYER_IDENTITY")"
         log "Funding local identity: $DEPLOYER_IDENTITY"
 
+        # `stellar network health` (checked by ensure_local_network above)
+        # only confirms the RPC endpoint is up — friendbot is a separate
+        # component in the same container and can still be refusing
+        # connections (connection reset, 502) for a while after that.
+        # Give it the same persistence as the network-health wait rather
+        # than a handful of quick retries.
         local funded="false"
-        for _ in $(seq 1 5); do
-            if curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null; then
+        for _ in $(seq 1 24); do
+            if curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null 2>&1; then
                 funded="true"
                 break
             fi
-            log "Local friendbot funding attempt failed; retrying..."
-            sleep 2
+            sleep 5
         done
 
         if [[ "$funded" != "true" ]]; then
-            log "Local friendbot funding did not succeed after retries; continuing because the account may already exist"
+            die "Local friendbot at $FRIENDBOT_URL never became reachable to fund $DEPLOYER_IDENTITY"
         fi
+        log "Local friendbot funded $DEPLOYER_IDENTITY"
 
         # Friendbot returning success doesn't guarantee the account is
         # immediately queryable via RPC — the very next step (contract
