@@ -310,4 +310,75 @@ fn test_metric_decay_and_alert_clearing() {
     assert_eq!(snap3.total_errors, 1);
 }
 
+fn setup_analytics_client(env: &Env) -> (ProgramEscrowContractClient<'_>, Address) {
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(env, &contract_id);
+    (client, contract_id)
+}
+
+fn set_lifetime_monitoring_counts(env: &Env, contract_id: &Address, ops: u64, errors: u64) {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(env, "op_count"), &ops);
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(env, "err_count"), &errors);
+    });
+}
+
+// Error-rate precision and boundary coverage for get_analytics (issue #267).
+#[test]
+fn test_get_analytics_error_rate_truncates_non_dividing_ratio() {
+    let env = Env::default();
+    let (client, contract_id) = setup_analytics_client(&env);
+
+    // 1/3 => 3333.33... bps; truncating division must floor to 3333, not round to 3334.
+    set_lifetime_monitoring_counts(&env, &contract_id, 3, 1);
+
+    let analytics = client.get_monitoring_analytics();
+    assert_eq!(analytics.operation_count, 3);
+    assert_eq!(analytics.error_count, 1);
+    assert_eq!(analytics.error_rate, 3333);
+}
+
+#[test]
+fn test_get_analytics_error_rate_zero_when_no_operations() {
+    let env = Env::default();
+    let (client, _contract_id) = setup_analytics_client(&env);
+
+    let analytics = client.get_monitoring_analytics();
+    assert_eq!(analytics.operation_count, 0);
+    assert_eq!(analytics.error_count, 0);
+    assert_eq!(analytics.error_rate, 0);
+}
+
+#[test]
+fn test_get_analytics_error_rate_full_failure_is_10000_bps() {
+    let env = Env::default();
+    let (client, contract_id) = setup_analytics_client(&env);
+
+    set_lifetime_monitoring_counts(&env, &contract_id, 5, 5);
+
+    let analytics = client.get_monitoring_analytics();
+    assert_eq!(analytics.operation_count, 5);
+    assert_eq!(analytics.error_count, 5);
+    assert_eq!(analytics.error_rate, 10_000);
+}
+
+#[test]
+fn test_get_analytics_error_rate_adversarial_errors_exceed_ops_no_panic() {
+    let env = Env::default();
+    let (client, contract_id) = setup_analytics_client(&env);
+
+    // Defensive: corrupted storage where errors > ops should not panic or overflow.
+    set_lifetime_monitoring_counts(&env, &contract_id, 3, 4);
+
+    let analytics = client.get_monitoring_analytics();
+    assert_eq!(analytics.operation_count, 3);
+    assert_eq!(analytics.error_count, 4);
+    assert_eq!(analytics.error_rate, 13_333);
+}
+
 
