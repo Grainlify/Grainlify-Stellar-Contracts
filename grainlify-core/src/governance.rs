@@ -9,6 +9,7 @@ pub enum ProposalStatus {
     Rejected,
     Executed,
     Expired,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +102,7 @@ pub enum Error {
     ProposalExpired = 14,
     ZeroVotingPower = 15,
     InvalidTotalVotingPower = 16,
+    Unauthorized = 17,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), soroban_sdk::contract)]
@@ -352,6 +354,37 @@ impl GovernanceContract {
             .ok_or(Error::ProposalsNotFound)?;
         let proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
         Ok(proposal.status)
+    }
+
+    /// Cancel a proposal before it is finalized
+    pub fn cancel_proposal(env: Env, caller: Address, proposal_id: u32) -> Result<(), Error> {
+        caller.require_auth();
+
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&PROPOSALS)
+            .ok_or(Error::ProposalsNotFound)?;
+        let mut proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+
+        if proposal.status != ProposalStatus::Active {
+            return Err(Error::ProposalNotActive);
+        }
+
+        if caller != proposal.proposer {
+            return Err(Error::Unauthorized);
+        }
+
+        proposal.status = ProposalStatus::Cancelled;
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&PROPOSALS, &proposals);
+
+        env.events().publish(
+            (symbol_short!("PropCanc"), proposal_id),
+            caller,
+        );
+
+        Ok(())
     }
 
     /// Sweep expired proposals (those that never reached a final state)
@@ -837,6 +870,60 @@ fn test_sweep_expired_proposal_already_finalized_fails() {
 
     // Try to sweep - should fail because proposal is not Active
     let result = client.try_sweep_expired_proposal(&prop_id, &200);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_success() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert!(result.is_ok());
+
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Cancelled);
+}
+
+#[test]
+fn test_cancel_proposal_unauthorized() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    let unauthorized = Address::generate(&env);
+
+    let result = client.try_cancel_proposal(&unauthorized, &prop_id);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Active);
+}
+
+#[test]
+fn test_cancel_proposal_after_passing_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    client.cast_vote(&proposer, &prop_id, &VoteType::For);
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Approved);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_already_cancelled_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    client.cancel_proposal(&proposer, &prop_id);
+    
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
     assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
 }
 }
