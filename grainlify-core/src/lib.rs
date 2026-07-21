@@ -81,7 +81,7 @@
 //!
 //! ## Upgrade Process
 //!
-//! ```rust
+//! ```rust,ignore
 //! // 1. Initialize contract (one-time)
 //! let admin = Address::from_string("GADMIN...");
 //! contract.init(&admin);
@@ -116,7 +116,7 @@
 //!
 //! When upgrading contracts that require state migration:
 //!
-//! ```rust
+//! ```rust,ignore
 //! // In new WASM version, add migration function:
 //! pub fn migrate(env: Env) {
 //!     let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -683,7 +683,7 @@ pub struct UpgradeExecutedEvent {
 /// - No authorization required for initialization (first-caller pattern)
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use soroban_sdk::{Address, Env};
 ///
 /// let env = Env::default();
@@ -975,7 +975,7 @@ impl GrainlifyContract {
     /// 8. (Optional) Call `set_version` to update version number
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// use soroban_sdk::{BytesN, Env};
     ///
     /// let env = Env::default();
@@ -1175,7 +1175,7 @@ impl GrainlifyContract {
     /// - Version-specific behavior
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let version = contract.get_version(&env);
     ///
     /// match version {
@@ -1271,7 +1271,7 @@ impl GrainlifyContract {
     /// - `3` = Third version
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// // After upgrading WASM
     /// contract.upgrade(&env, &new_wasm_hash);
     ///
@@ -1284,7 +1284,7 @@ impl GrainlifyContract {
     ///
     /// # Best Practice
     /// Document version changes:
-    /// ```rust
+    /// ```rust,ignore
     /// // Version History:
     /// // 1 - Initial release
     /// // 2 - Added feature X, fixed bug Y
@@ -1390,7 +1390,7 @@ impl GrainlifyContract {
     /// 6. Emits migration event
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// // After upgrading WASM to v2
     /// contract.upgrade(&env, &new_wasm_hash);
     ///
