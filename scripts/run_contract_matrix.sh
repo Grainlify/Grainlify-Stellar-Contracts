@@ -210,6 +210,8 @@ build_and_test_workspace() {
         cd "$SOROBAN_DIR"
         export CARGO_INCREMENTAL=0
         cargo update
+        # Workaround for upstream soroban-env-host v23 trait mismatch with ed25519-dalek v3.0.0
+        cargo update -p ed25519-dalek@3.0.0 --precise 2.2.0 || true
         cargo test --workspace
         cargo build --release --target wasm32-unknown-unknown
     )
