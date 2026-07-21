@@ -79,5 +79,5 @@ pub fn check_proposal_vetoed(env: &Env, proposal_id: u32) -> bool {
         return false;
     };
 
-    GovernanceClient::new(env, &gov_addr).is_vetoed(proposal_id)
+    GovernanceClient::new(env, &gov_addr).is_vetoed(&proposal_id)
 }
