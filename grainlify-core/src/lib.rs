@@ -1,159 +1,221 @@
-//! # Grainlify Contract Upgrade System
+//! # grainlify-core
 //!
-//! A minimal, secure contract upgrade pattern for Soroban smart contracts.
-//! This contract implements admin-controlled WASM upgrades with version tracking.
+//! The crate root for the Grainlify upgrade-governance system on Soroban/Stellar.
+//! It wires together two **independent, parallel** upgrade primitives —
+//! [`governance`] (democratic on-chain voting) and [`multisig`] (threshold
+//! key-holder approval) — and exposes them through a single deployable contract:
+//! [`GrainlifyContract`].
 //!
-//! ## Overview
+//! Neither module depends on the other. A deployment may use one, both, or
+//! neither upgrade path; the choice is made at runtime by calling the
+//! appropriate initialiser and entrypoints.
 //!
-//! The Grainlify contract provides a foundational upgrade mechanism that allows
-//! authorized administrators to update contract logic while maintaining state
-//! persistence. This is essential for bug fixes, feature additions, and security
-//! patches in production environments.
-//!
-//! ## Architecture
+//! ## Module Relationships
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │              Contract Upgrade Architecture                   │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                                                              │
-//! │  ┌──────────────┐                                           │
-//! │  │    Admin     │                                           │
-//! │  └──────┬───────┘                                           │
-//! │         │                                                    │
-//! │         │ 1. Compile new WASM                               │
-//! │         │ 2. Upload to Stellar                              │
-//! │         │ 3. Get WASM hash                                  │
-//! │         │                                                    │
-//! │         ▼                                                    │
-//! │  ┌──────────────────┐                                       │
-//! │  │  upgrade(hash)   │────────┐                              │
-//! │  └──────────────────┘        │                              │
-//! │         │                     │                              │
-//! │         │ require_auth()      │                              │
-//! │         │                     ▼                              │
-//! │         │              ┌─────────────┐                       │
-//! │         │              │   Verify    │                       │
-//! │         │              │   Admin     │                       │
-//! │         │              └──────┬──────┘                       │
-//! │         │                     │                              │
-//! │         │                     ▼                              │
-//! │         │              ┌─────────────┐                       │
-//! │         └─────────────>│   Update    │                       │
-//! │                        │   WASM      │                       │
-//! │                        └──────┬──────┘                       │
-//! │                               │                              │
-//! │                               ▼                              │
-//! │                        ┌─────────────┐                       │
-//! │                        │ New Version │                       │
-//! │                        │  (Optional) │                       │
-//! │                        └─────────────┘                       │
-//! │                                                              │
-//! │  Storage:                                                    │
-//! │  ┌────────────────────────────────────┐                     │
-//! │  │ Admin: Address                     │                     │
-//! │  │ Version: u32                       │                     │
-//! │  └────────────────────────────────────┘                     │
-//! └─────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │                        grainlify-core                                │
+//! │                      (GrainlifyContract)                             │
+//! │                                                                      │
+//! │   ┌──────────────────────────┐   ┌───────────────────────────────┐  │
+//! │   │     mod governance       │   │       mod multisig            │  │
+//! │   │  (GovernanceContract)    │   │        (MultiSig)             │  │
+//! │   │                          │   │                               │  │
+//! │   │  Democratic on-chain     │   │  Threshold key-holder         │  │
+//! │   │  voting for upgrade      │   │  approval for WASM upgrades.  │  │
+//! │   │  proposals.              │   │                               │  │
+//! │   │                          │   │  N-of-M signers must approve  │  │
+//! │   │  Any eligible voter may  │   │  before execute_upgrade()     │  │
+//! │   │  participate; quorum +   │   │  can run.  Replay-protected   │  │
+//! │   │  threshold decide the    │   │  via a monotonic nonce.       │  │
+//! │   │  outcome.                │   │                               │  │
+//! │   │                          │   │  Signer set and threshold     │  │
+//! │   │  is_upgrade_approved()   │   │  are snapshotted per-         │  │
+//! │   │  records approved WASM   │   │  proposal to prevent          │  │
+//! │   │  hashes for cross-       │   │  retroactive config changes.  │  │
+//! │   │  contract verification.  │   │                               │  │
+//! │   └──────────────────────────┘   └───────────────────────────────┘  │
+//! │            ▲                                                         │
+//! │            │ cross-contract call                                     │
+//! │   ┌────────┴──────────────────────────────────────────────────────┐  │
+//! │   │          bounty_escrow  /  program-escrow                     │  │
+//! │   │          governance_integration.rs                            │  │
+//! │   │                                                               │  │
+//! │   │  GovernanceInterface (contractclient trait):                  │  │
+//! │   │    get_ver()                   → version liveness check       │  │
+//! │   │    is_upg_ok(wasm_hash)        → upgrade approval gate        │  │
+//! │   │    get_version_numeric_encoded() → semver gate (bounty only)  │  │
+//! │   └───────────────────────────────────────────────────────────────┘  │
+//! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## Security Model
+//! ## governance module
 //!
-//! ### Trust Assumptions
-//! - **Admin**: Highly trusted entity with upgrade authority
-//! - **WASM Code**: New code must be audited before deployment
-//! - **State Preservation**: Upgrades preserve existing contract state
+//! `governance.rs` implements [`GovernanceContract`], a standalone democratic
+//! voting system for on-chain upgrade proposals.
 //!
-//! ### Security Features
-//! 1. **Single Admin**: Only one authorized address can upgrade
-//! 2. **Authorization Check**: Every upgrade requires admin signature
-//! 3. **Version Tracking**: Auditable upgrade history
-//! 4. **State Preservation**: Instance storage persists across upgrades
-//! 5. **Single-Admin Timelock**: Direct admin upgrades must be scheduled before execution
-//! 6. **Immutable After Init**: Admin cannot be changed after initialization
+//! ### Public interface
 //!
-//! ### Security Considerations
-//! - Admin key should be secured with hardware wallet or multi-sig
-//! - New WASM should be audited before upgrade
-//! - Use `schedule_upgrade` and wait for the configured timelock before calling `upgrade`
-//! - Version updates should follow semantic versioning
-//! - Test upgrades on testnet before mainnet deployment
+//! | Entrypoint | Description |
+//! |---|---|
+//! | `init_governance(admin, config)` | One-time governance initialisation. Stores [`GovernanceConfig`] and sets proposal counter to 0. |
+//! | `create_proposal(proposer, wasm_hash, description)` | Opens a new upgrade proposal for voting. Enforces `min_proposal_stake` if configured. |
+//! | `cast_vote(voter, proposal_id, vote_type)` | Casts a `For`, `Against`, or `Abstain` vote. Derives voting power from the configured scheme. |
+//! | `finalize_proposal(proposal_id)` | After the voting period, evaluates quorum + threshold and sets the proposal to `Approved` or `Rejected`. |
+//! | `execute_proposal(proposal_id)` | Marks an `Approved` proposal as `Executed` after its execution delay. Does **not** perform a WASM update — it records that governance blessed the hash. |
+//! | `is_upgrade_approved(wasm_hash)` | Returns `true` if an `Executed` proposal for this hash exists and its execution delay has elapsed. Used by escrow contracts as an upgrade gate. |
+//! | `get_proposal_status(proposal_id)` | Read-only status query. |
+//! | `sweep_expired_proposal(proposal_id, current_time)` | Flags an unfinalized, past-deadline proposal as `Expired` (flag-not-delete pattern). |
 //!
-//! ## Upgrade Process
+//! ### Voting schemes
 //!
-//! ```rust
-//! // 1. Initialize contract (one-time)
-//! let admin = Address::from_string("GADMIN...");
-//! contract.init(&admin);
+//! [`VotingScheme::OnePersonOneVote`] assigns power `1` to every authenticated
+//! voter.  [`VotingScheme::TokenWeighted`] reads each voter's current balance
+//! from the configured governance token; see `GOVERNANCE.md` for snapshot
+//! caveats.
 //!
-//! // 2. Develop and test new version locally
-//! // ... make changes to contract code ...
+//! ### Exported types
 //!
-//! // 3. Build new WASM
-//! // $ cargo build --release --target wasm32-unknown-unknown
+//! [`GovernanceConfig`], [`Proposal`], [`ProposalStatus`], [`Vote`],
+//! [`VoteType`], [`VotingScheme`], and [`Error as GovError`] are all
+//! re-exported from the crate root for use by external consumers.
 //!
-//! // 4. Upload WASM to Stellar and get hash
-//! // $ stellar contract install --wasm target/wasm32-unknown-unknown/release/contract.wasm
-//! // Returns: hash (e.g., "abc123...")
+//! ## multisig module
 //!
-//! // 5. Schedule upgrade and wait for the timelock
-//! let wasm_hash = BytesN::from_array(&env, &[0xab, 0xcd, ...]);
-//! let scheduled = contract.schedule_upgrade(&wasm_hash);
-//! // Wait until ledger timestamp >= scheduled.executable_at
+//! `multisig.rs` implements [`MultiSig`], a pure threshold-approval primitive
+//! for WASM upgrade proposals.  It is **entirely independent of the governance
+//! module**: it has no knowledge of voting periods, quorum, or governance
+//! config.
 //!
-//! // 6. Perform upgrade
-//! contract.upgrade(&wasm_hash);
+//! ### Public interface
 //!
-//! // 7. (Optional) Update version number
-//! contract.set_version(&2);
+//! | Method | Description |
+//! |---|---|
+//! | `MultiSig::init(env, signers, threshold)` | One-time initialisation. Stores the signer set and threshold; rejects `threshold == 0` or `threshold > signers.len()`. |
+//! | `MultiSig::propose(env, proposer, action)` | Creates an `Upgrade(wasm_hash)` proposal, snapshotting the current signer set and threshold into the proposal record. |
+//! | `MultiSig::approve(env, proposal_id, signer)` | Records one signer's approval. Rejects non-signers, duplicate approvals, and already-executed proposals. |
+//! | `MultiSig::can_execute(env, proposal_id)` | Returns `true` when the proposal's approval count meets its **snapshotted** threshold. |
+//! | `MultiSig::nonce(env)` | Returns the next expected execution nonce (replay protection). |
+//! | `MultiSig::execute(env, proposal_id, expected_action, expected_nonce, closure)` | Atomically verifies threshold, payload, and nonce, runs the provided closure (the WASM update), marks the proposal executed, and increments the nonce. |
+//! | `MultiSig::get_action(env, proposal_id)` | Returns the `ProposalAction` bound to a proposal. |
+//! | `MultiSig::remove_signer(env, caller, signer_to_remove)` | Removes a signer; rejected if `(signer_count - 1) < threshold` to prevent permanent lockout. |
 //!
-//! // 8. Verify upgrade
-//! let version = contract.get_version();
-//! assert_eq!(version, 2);
-//! ```
+//! ### Key properties
 //!
-//! ## State Migration
+//! - **Payload binding**: signers approve a specific `wasm_hash`; executing a
+//!   different hash panics with `ActionMismatch`.
+//! - **Snapshot isolation**: changing the global signer config after a proposal
+//!   is created cannot retroactively satisfy or invalidate that proposal.
+//! - **Replay protection**: `execute_upgrade` requires the current nonce; it is
+//!   consumed on success so the same `(approvals, nonce)` pair cannot be
+//!   replayed.
 //!
-//! When upgrading contracts that require state migration:
+//! ## Single-admin upgrade path
 //!
-//! ```rust
-//! // In new WASM version, add migration function:
-//! pub fn migrate(env: Env) {
-//!     let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-//!     admin.require_auth();
-//!     
-//!     // Perform state migration
-//!     // Example: Convert old data format to new format
-//!     let old_version = env.storage().instance().get(&DataKey::Version).unwrap_or(0);
-//!     
-//!     if old_version < 2 {
-//!         // Migrate from v1 to v2
-//!         migrate_v1_to_v2(&env);
-//!     }
-//!     
-//!     // Update version
-//!     env.storage().instance().set(&DataKey::Version, &2u32);
+//! In addition to the two decentralised upgrade paths, `GrainlifyContract`
+//! provides a **single-admin** upgrade route (`init_admin` / `schedule_upgrade`
+//! / `upgrade`). This path does **not** use `governance` or `multisig`; it
+//! requires one trusted admin address and a mandatory schedule/timelock before
+//! `upgrade` can execute.
+//!
+//! The three upgrade paths are mutually exclusive at initialisation:
+//! - `init(signers, threshold)` — activates the multisig path.
+//! - `init_governance(admin, config)` — activates the governance path.
+//! - `init_admin(admin)` — activates the single-admin + timelock path.
+//!
+//! ## Consumption by bounty_escrow and program-escrow
+//!
+//! Both escrow contracts integrate with `grainlify-core` **exclusively through
+//! the governance side**.  Neither escrow contract calls any multisig
+//! entrypoint.
+//!
+//! Each escrow crate ships a `governance_integration.rs` module that declares
+//! the following cross-contract interface:
+//!
+//! ```rust,ignore
+//! #[contractclient(name = "GovernanceClient")]
+//! trait GovernanceInterface {
+//!     fn get_ver(env: Env) -> u32;
+//!     fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool;
+//!     // bounty_escrow also calls:
+//!     fn get_version_numeric_encoded(env: Env) -> u32;
 //! }
 //! ```
 //!
-//! ## Best Practices
+//! | Method called | Provided by | Purpose |
+//! |---|---|---|
+//! | `get_ver()` | `GrainlifyContract::get_ver` | Version liveness check; ensures the governance contract is reachable and meets a minimum version before an upgrade gate is evaluated. |
+//! | `is_upg_ok(wasm_hash)` | `GrainlifyContract::is_upg_ok` → `GovernanceContract::is_upgrade_approved` | Returns `true` only when an executed, post-delay governance proposal for `wasm_hash` exists. Escrow contracts call this before permitting a WASM upgrade. |
+//! | `get_version_numeric_encoded()` | `GrainlifyContract::get_version_numeric_encoded` | Used by `bounty_escrow` to enforce a minimum semver gate (`major*10_000 + minor*100 + patch`). |
 //!
-//! 1. **Version Numbering**: Use semantic versioning (MAJOR.MINOR.PATCH)
-//! 2. **Testing**: Always test upgrades on testnet first
-//! 3. **Auditing**: Audit new code before mainnet deployment
-//! 4. **Documentation**: Document breaking changes between versions
-//! 5. **Rollback Plan**: Keep previous WASM hash for emergency rollback
-//! 6. **Admin Security**: Use multi-sig or timelock for production
-//! 7. **State Validation**: Verify state integrity after upgrade
+//! ### Integration contract: architecture boundary
 //!
-//! ## Common Pitfalls
+//! ```text
+//! bounty_escrow / program-escrow
+//!   └── governance_integration::check_upgrade_approval(env, wasm_hash)
+//!           │
+//!           │  cross-contract call via GovernanceClient
+//!           ▼
+//!       GrainlifyContract::is_upg_ok(wasm_hash)
+//!           │
+//!           ▼
+//!       GovernanceContract::is_upgrade_approved(wasm_hash)
+//!           └── scans proposals for Executed status + matching hash
+//! ```
 //!
-//! - ❌ Not testing upgrades on testnet
-//! - ❌ Losing admin private key
-//! - ❌ Breaking state compatibility between versions
-//! - ❌ Not documenting migration steps
-//! - ❌ Upgrading without proper testing
-//! - ❌ Not having a rollback plan
+//! The escrow contracts do **not** need to know whether `grainlify-core` was
+//! configured with governance, multisig, or single-admin.  They only ask "has
+//! governance approved this hash?" via `is_upg_ok`.  The `multisig` and
+//! single-admin paths are entirely internal to `grainlify-core`.
+//!
+//! ## Monitoring module (inline)
+//!
+//! `lib.rs` contains an inline `monitoring` module with persistent counters for
+//! observability.  All counters are **observational only**; no entrypoint reads
+//! them to gate authorization or control flow.
+//!
+//! | Counter | Storage key | Incremented by |
+//! |---|---|---|
+//! | `proposals_created` | `gov_prop` | `create_proposal` (on success) |
+//! | `votes_cast` | `gov_vote` | `cast_vote` (on success) |
+//! | `upgrades_executed` | `gov_upg` | `upgrade` and `execute_upgrade` (after WASM update) |
+//! | `migrations_run` | `gov_migr` | `migrate` (once per applied migration) |
+//!
+//! Counters are surfaced through `get_analytics()` and `get_state_snapshot()`,
+//! and each increment emits a `GovernanceMetric` event under topic
+//! `("metric", "gov")` for indexer consumption.
+//!
+//! ## Public re-exports
+//!
+//! The following types from `governance` are re-exported at the crate root:
+//!
+//! - [`GovError`] (`governance::Error`)
+//! - [`GovernanceConfig`]
+//! - [`Proposal`] (governance proposal, not multisig proposal)
+//! - [`ProposalStatus`]
+//! - [`Vote`]
+//! - [`VoteType`]
+//! - [`VotingScheme`]
+//!
+//! `multisig` types (`MultiSig`, `ProposalAction`) are used internally and are
+//! **not** re-exported.
+//!
+//! ## Security notes
+//!
+//! - Governance and multisig are **parallel, non-dependent** upgrade paths.
+//!   Multisig is not a prerequisite for governance execution, and governance
+//!   approval is not required by the multisig path.
+//! - The single-admin path enforces a configurable timelock (default 24 h,
+//!   minimum 5 min) between `schedule_upgrade` and `upgrade`.
+//! - All three paths emit a versioned `UpgradeExecuted` event (`upg_exec2`)
+//!   that indexers can use to track WASM changes regardless of which path was
+//!   used.
+//! - Accurate architecture docs here reduce the risk of a future integration
+//!   mistake at the governance/multisig boundary (e.g., assuming multisig
+//!   approval is required before calling `is_upg_ok`).
+//!
+//! For in-depth governance flow, voting-scheme caveats, event schemas, and
+//! timelock details, see `docs/grainlify-core/GOVERNANCE.md`.
 
 #![no_std]
 
