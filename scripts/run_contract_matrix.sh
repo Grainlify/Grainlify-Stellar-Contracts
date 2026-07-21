@@ -195,9 +195,25 @@ ensure_identity() {
         addr="$(stellar keys address "$DEPLOYER_IDENTITY")"
         log "Funding local identity: $DEPLOYER_IDENTITY"
 
-        if ! curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null; then
-            log "Local friendbot funding returned non-zero; continuing because the account may already exist"
+        local funded="false"
+        for _ in $(seq 1 5); do
+            if curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null; then
+                funded="true"
+                break
+            fi
+            log "Local friendbot funding attempt failed; retrying..."
+            sleep 2
+        done
+
+        if [[ "$funded" != "true" ]]; then
+            log "Local friendbot funding did not succeed after retries; continuing because the account may already exist"
         fi
+
+        # Friendbot returning success doesn't guarantee the account is
+        # immediately queryable via RPC — the very next step (contract
+        # install) depends on it existing, so give the ledger a moment to
+        # catch up rather than racing it.
+        sleep 3
     else
         log "Funding testnet identity: $DEPLOYER_IDENTITY"
         stellar keys fund "$DEPLOYER_IDENTITY" --network testnet >/dev/null || true
