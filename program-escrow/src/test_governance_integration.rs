@@ -83,6 +83,12 @@ mod mock_governance_with_state {
             store.set(proposal_id, (wasm_hash, status));
             env.storage().instance().set(&PROPOSAL_STATES, &store);
         }
+
+        /// This mock does not support vetoes — always returns false.
+        /// Veto behaviour is tested via mock_governance::MockGovernanceContract.
+        pub fn is_vetoed(_env: Env, _proposal_id: u32) -> bool {
+            false
+        }
     }
 }
 
