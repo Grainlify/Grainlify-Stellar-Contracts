@@ -75,10 +75,11 @@ impl<'a> AuthzSetup<'a> {
 fn assert_unauthorized<V: core::fmt::Debug, T: core::fmt::Debug, E: core::fmt::Debug>(
     res: Result<Result<V, T>, E>,
 ) {
+    let err = res.expect_err("expected admin-only call to be rejected (auth abort)");
+    let err_str = std::format!("{:?}", err);
     assert!(
-        res.is_err(),
-        "expected admin-only call to be rejected (auth abort), got: {:?}",
-        res
+        err_str.contains("Auth") || err_str.contains("Context"),
+        "expected auth abort error, got: {}", err_str
     );
 }
 
@@ -281,3 +282,28 @@ fn stored_admin_can_set_paused() {
         "stored admin should be authorized"
     );
 }
+
+ # [ t e s t ] 
+ f n   d e m o t e d _ c i r c u i t _ b r e a k e r _ a d m i n _ c a n n o t _ r e s e t _ c i r c u i t ( )   { 
+         l e t   s   =   A u t h z S e t u p : : n e w ( ) ; 
+         s . e n v . m o c k _ a l l _ a u t h s ( ) ; 
+         
+         / /   A d m i n   s e t s   i n i t i a l   c i r c u i t   b r e a k e r   a d m i n   t o   ` r a n d o m ` 
+         s . c l i e n t . s e t _ c i r c u i t _ b r e a k e r _ a d m i n ( & s . r a n d o m ) ; 
+         
+         / /   C h e c k   t h a t   ` r a n d o m `   c a n   r e s e t   t h e   c i r c u i t   w h i l e   t h e y   a r e   t h e   a d m i n 
+         l e t   r e s _ s u c c e s s   =   s . c l i e n t . t r y _ r e s e t _ c i r c u i t ( & s . r a n d o m ) ; 
+         a s s e r t ! ( r e s _ s u c c e s s . u n w r a p _ o r _ e l s e ( | e |   p a n i c ! ( " i n v o k e   e r r o r :   { : ? } " ,   e ) ) . i s _ o k ( ) ) ; 
+ 
+         / /   M a i n   a d m i n   d e m o t e s   ` r a n d o m `   b y   s e t t i n g   a   n e w   c i r c u i t   b r e a k e r   a d m i n 
+         l e t   n e w _ a d m i n   =   s o r o b a n _ s d k : : A d d r e s s : : g e n e r a t e ( & s . e n v ) ; 
+         s . c l i e n t . s e t _ c i r c u i t _ b r e a k e r _ a d m i n ( & n e w _ a d m i n ) ; 
+         
+         / /   C l e a r   a u t h s   s o   w e   t e s t   ` r a n d o m `   u n a u t h e n t i c a t e d   ( a s   a   n o n - a d m i n ) 
+         s . e n v . m o c k _ a u t h s ( & [ ] ) ; 
+         
+         / /   T h e   d e m o t e d   a d m i n   ` r a n d o m `   s h o u l d   n o w   b e   r e j e c t e d 
+         l e t   r e s _ f a i l   =   s . c l i e n t . t r y _ r e s e t _ c i r c u i t ( & s . r a n d o m ) ; 
+         a s s e r t _ u n a u t h o r i z e d ( r e s _ f a i l ) ; 
+ }  
+ 
