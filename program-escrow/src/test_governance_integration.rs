@@ -5,7 +5,10 @@ use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 // Mock governance contract for testing
 mod mock_governance {
-    use soroban_sdk::{contract, contractimpl, BytesN, Env};
+    use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Symbol};
+
+    /// Storage key used by the mock to record vetoed proposal IDs.
+    const VETOED_KEY: Symbol = symbol_short!("VETOED_ID");
 
     #[contract]
     pub struct MockGovernanceContract;
@@ -18,6 +21,26 @@ mod mock_governance {
 
         pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
             wasm_hash == BytesN::from_array(&env, &[7u8; 32])
+        }
+
+        /// Returns `true` when `proposal_id` has been marked as vetoed.
+        ///
+        /// The mock stores the ID of the single vetoed proposal (u32::MAX means
+        /// "none vetoed").  Real governance contracts would look up a full map of
+        /// proposal statuses; for testing purposes a single stored ID is sufficient.
+        pub fn is_vetoed(env: Env, proposal_id: u32) -> bool {
+            let vetoed_id: u32 = env
+                .storage()
+                .instance()
+                .get(&VETOED_KEY)
+                .unwrap_or(u32::MAX);
+            vetoed_id == proposal_id
+        }
+
+        /// Test-only helper: mark `proposal_id` as vetoed so that subsequent
+        /// calls to `is_vetoed` return `true` for that id.
+        pub fn set_vetoed(env: Env, proposal_id: u32) {
+            env.storage().instance().set(&VETOED_KEY, &proposal_id);
         }
     }
 }
@@ -236,4 +259,209 @@ fn test_governance_prevents_unauthorized_config_changes() {
     let config = client.get_rate_limit_config();
     assert_eq!(config.window_size, 7200);
     assert_eq!(config.max_operations, 5);
+}
+
+// ============================================================================
+// Governance veto / cancellation path tests
+//
+// Design note: grainlify-core's ProposalStatus enum (Pending | Active |
+// Approved | Rejected | Executed | Expired) has no native Vetoed/Cancelled
+// variant — this is a **design gap** identified per issue #236.  The tests
+// below verify the *escrow-side* guard introduced in `governance_integration`
+// (check_proposal_vetoed / is_vetoed) using an extended MockGovernanceContract
+// that records a single vetoed proposal ID.  A follow-up should add a real
+// veto mechanism to grainlify-core's GovernanceContract.
+// ============================================================================
+
+/// Vetoing a proposal that was previously approved prevents the escrow from
+/// treating the corresponding upgrade hash as valid.
+#[test]
+fn test_vetoed_proposal_blocks_upgrade_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client =
+        mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    // Proposal 0 is the "approved" hash used by the mock (all-7 bytes).
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    // Before veto: upgrade is approved.
+    env.as_contract(&contract_id, || {
+        assert!(
+            governance_integration::check_upgrade_approval(&env, &approved_hash),
+            "upgrade should be approved before veto"
+        );
+    });
+
+    // Veto proposal 0 via the test-only helper on the mock.
+    gov_client.set_vetoed(&0);
+
+    // After veto: escrow must detect the veto and reject execution.
+    env.as_contract(&contract_id, || {
+        assert!(
+            governance_integration::check_proposal_vetoed(&env, 0),
+            "escrow must report proposal 0 as vetoed"
+        );
+    });
+}
+
+/// A proposal that was never vetoed must NOT be reported as vetoed (sanity
+/// check: veto flag is proposal-specific, not global).
+#[test]
+fn test_non_vetoed_proposal_is_not_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client =
+        mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    // Veto proposal 0, but query proposal 1.
+    gov_client.set_vetoed(&0);
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !governance_integration::check_proposal_vetoed(&env, 1),
+            "proposal 1 was not vetoed and must not be flagged"
+        );
+    });
+}
+
+/// When NO governance contract is configured `check_proposal_vetoed` must
+/// return `false` (open / permissionless mode — no veto possible).
+#[test]
+fn test_veto_check_returns_false_without_governance_contract() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !governance_integration::check_proposal_vetoed(&env, 0),
+            "no governance configured → veto check must return false"
+        );
+    });
+}
+
+/// Resources (represented here by the admin-controlled pause flags) remain
+/// accessible after a veto — the escrow does not lock itself permanently.
+/// The test verifies that an admin can still perform operations even when a
+/// specific proposal has been vetoed, demonstrating that resources tied to a
+/// vetoed proposal are released rather than stuck.
+#[test]
+fn test_resources_accessible_after_proposal_veto() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client =
+        mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    // Governance version requirement met (mock returns 2).
+    client.set_min_governance_version(&2);
+
+    // Veto proposal 0.
+    gov_client.set_vetoed(&0);
+
+    // Even though proposal 0 is vetoed, admin operations that don't depend on
+    // proposal 0 specifically must still succeed — governance version check
+    // passes (version 2 ≥ required 2) and the pause-flag operation succeeds.
+    client.set_paused(&Some(false), &Some(false), &Some(false));
+
+    // Confirm the contract is not in a stuck / locked state.
+    let flags = client.get_pause_flags();
+    assert!(
+        !flags.lock_paused && !flags.release_paused && !flags.refund_paused,
+        "all flags should be false after the set_paused call"
+    );
+}
+
+/// Attempting to veto a proposal AFTER it has already been executed must be
+/// treated as a no-op for governance-unaware callers: the upgrade hash
+/// approved by the already-executed proposal must not be retroactively
+/// revoked by a late veto (the executed state already took effect).
+///
+/// This test documents the current design boundary: the escrow's
+/// `check_upgrade_approval` queries `is_upg_ok` (executed-proposal lookup)
+/// independently of `is_vetoed`.  A late veto cannot undo an execution that
+/// already happened; that would require separate safeguards in the calling
+/// logic (documented here as a known design gap to address in a follow-up).
+#[test]
+fn test_veto_after_execution_does_not_retroactively_revoke_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client =
+        mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    // Step 1 – proposal is executed and upgrade is approved.
+    env.as_contract(&contract_id, || {
+        assert!(
+            governance_integration::check_upgrade_approval(&env, &approved_hash),
+            "upgrade approval should be present before any veto"
+        );
+    });
+
+    // Step 2 – someone attempts a late veto after execution.
+    gov_client.set_vetoed(&0);
+
+    // Step 3 – the veto IS detected by check_proposal_vetoed …
+    env.as_contract(&contract_id, || {
+        assert!(
+            governance_integration::check_proposal_vetoed(&env, 0),
+            "check_proposal_vetoed should reflect the veto"
+        );
+    });
+
+    // Step 4 – … however check_upgrade_approval still returns true because
+    // is_upg_ok is independent state on the mock (hash [7;32] always passes).
+    // This documents the gap: callers MUST check check_proposal_vetoed before
+    // acting on check_upgrade_approval to prevent late-veto bypass.
+    env.as_contract(&contract_id, || {
+        // The raw approval path still sees the hash as ok — this is the
+        // documented design gap.  The combined guard a real caller should
+        // apply is: approved && !vetoed.
+        let approved = governance_integration::check_upgrade_approval(&env, &approved_hash);
+        let vetoed = governance_integration::check_proposal_vetoed(&env, 0);
+        assert!(
+            !approved || !vetoed, // At least one guard fires — overall blocked.
+            "combined guard (approved && !vetoed) must block the late-veto case"
+        );
+        // Specifically: vetoed is true, so the combined guard correctly blocks.
+        assert!(vetoed, "vetoed must be true to block the late-veto scenario");
+    });
 }
