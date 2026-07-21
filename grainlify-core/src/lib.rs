@@ -2624,4 +2624,139 @@ mod test {
         }
         assert!(found_upg_exec);
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Issue #303 — direct coverage for the version-encoding helpers:
+    //   get_version_semver_string / get_version_numeric_encoded / require_min_version
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_semver_string_unmapped_version_falls_back_to_unknown() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Unmapped raw versions must resolve to "unknown", NOT silently
+        // mismap to a neighboring known version.
+        client.set_version(&3);
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "unknown"));
+
+        client.set_version(&10200);
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "unknown"));
+
+        client.set_version(&9999);
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "unknown"));
+    }
+
+    #[test]
+    fn test_semver_string_known_versions_map_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let cases: [(u32, &str); 7] = [
+            (0, "0.0.0"),
+            (1, "1.0.0"),
+            (10000, "1.0.0"),
+            (2, "2.0.0"),
+            (20000, "2.0.0"),
+            (10100, "1.1.0"),
+            (10001, "1.0.1"),
+        ];
+        for (raw, expected) in cases.iter() {
+            client.set_version(raw);
+            assert_eq!(
+                client.get_version_semver_string(),
+                String::from_str(&env, expected),
+                "raw version {} should map to {}",
+                raw,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_numeric_encoded_simple_and_encoded_are_equivalent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // A simple major-only version (1) and its already-encoded form (10000)
+        // must normalize to the SAME encoded value.
+        client.set_version(&1);
+        let from_simple = client.get_version_numeric_encoded();
+        client.set_version(&10000);
+        let from_encoded = client.get_version_numeric_encoded();
+        assert_eq!(from_simple, 10000);
+        assert_eq!(from_encoded, 10000);
+        assert_eq!(from_simple, from_encoded);
+
+        // Same equivalence for major version 2.
+        client.set_version(&2);
+        assert_eq!(client.get_version_numeric_encoded(), 20000);
+        client.set_version(&20000);
+        assert_eq!(client.get_version_numeric_encoded(), 20000);
+    }
+
+    #[test]
+    fn test_numeric_encoded_no_overflow_for_extreme_versions() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Near-u32::MAX input takes the `raw >= 10_000` branch and is returned
+        // verbatim — no multiply, so no overflow/wrap and no panic.
+        client.set_version(&u32::MAX);
+        assert_eq!(client.get_version_numeric_encoded(), u32::MAX);
+
+        client.set_version(&(u32::MAX - 1));
+        assert_eq!(client.get_version_numeric_encoded(), u32::MAX - 1);
+
+        // Largest "simple" version still taking the saturating_mul branch
+        // (raw < 10_000): 9999 * 10_000 = 99_990_000, well within u32 range.
+        client.set_version(&9999);
+        assert_eq!(client.get_version_numeric_encoded(), 99_990_000);
+    }
+
+    #[test]
+    fn test_require_min_version_at_boundary_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // version 2 encodes to 20000. cur == min_numeric must NOT panic
+        // (the check is strictly `cur < min_numeric`).
+        client.set_version(&2);
+        client.require_min_version(&20000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Incompatible contract version")]
+    fn test_require_min_version_one_below_boundary_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // version 2 encodes to 20000; requiring 20001 → cur(20000) < min → panic.
+        client.set_version(&2);
+        client.require_min_version(&20001);
+    }
 }
