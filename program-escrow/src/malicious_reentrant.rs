@@ -183,4 +183,78 @@ impl MaliciousReentrantContract {
         // This should trigger the callback which will attempt reentrancy
         client.single_payout(&attacker, &amount);
     }
+
+    /// Standard token interface transfer method to perform callback attacks
+    pub fn transfer(env: Env, _from: Address, to: Address, amount: i128) {
+        let attack_mode = Self::get_attack_mode(env.clone());
+
+        // Only attack once to avoid infinite loops in tests
+        let attack_count = Self::get_attack_count(env.clone());
+        if attack_count > 0 {
+            return;
+        }
+
+        Self::increment_attack_count(&env);
+
+        match attack_mode {
+            1 => {
+                let target = Self::get_target(env.clone());
+                let client = crate::ProgramEscrowContractClient::new(&env, &target);
+                client.single_payout(&to, &amount);
+            }
+            2 => {
+                let target = Self::get_target(env.clone());
+                let client = crate::ProgramEscrowContractClient::new(&env, &target);
+                let recipients = soroban_sdk::vec![&env, to];
+                let amounts = soroban_sdk::vec![&env, amount];
+                client.batch_payout(&recipients, &amounts);
+            }
+            3 => {
+                let target = Self::get_target(env.clone());
+                let client = crate::ProgramEscrowContractClient::new(&env, &target);
+                client.trigger_program_releases();
+            }
+            _ => { }
+        }
+    }
+
+    /// Dummy balance method required by token interface
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        1000_0000000i128
+    }
+}
+
+
+#[contract]
+pub struct MaliciousTokenContract;
+
+#[contractimpl]
+impl MaliciousTokenContract {
+    pub fn init(env: Env, target_contract: Address, target_function: u32) {
+        env.storage().instance().set(&soroban_sdk::symbol_short!("Target"), &target_contract);
+        env.storage().instance().set(&soroban_sdk::symbol_short!("Func"), &target_function);
+    }
+    
+    pub fn transfer(env: Env, _from: Address, to: Address, amount: i128) {
+        if let Some(target) = env.storage().instance().get::<_, Address>(&soroban_sdk::symbol_short!("Target")) {
+            let func: u32 = env.storage().instance().get(&soroban_sdk::symbol_short!("Func")).unwrap_or(0);
+            let count: u32 = env.storage().instance().get(&soroban_sdk::symbol_short!("Count")).unwrap_or(0);
+            
+            if count == 0 {
+                env.storage().instance().set(&soroban_sdk::symbol_short!("Count"), &(count + 1));
+                let client = crate::ProgramEscrowContractClient::new(&env, &target);
+                
+                match func {
+                    1 => { client.single_payout(&to, &amount); },
+                    2 => { client.trigger_program_releases(); },
+                    3 => { client.refund_unallocated_funds(&to); },
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        1000_0000000i128
+    }
 }

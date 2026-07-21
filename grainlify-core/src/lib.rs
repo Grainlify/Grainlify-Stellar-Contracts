@@ -1263,6 +1263,11 @@ impl GrainlifyContract {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
+    /// Alias for get_version, exposed for off-chain tooling. Returns the current stored version.
+    pub fn version(env: Env) -> u32 {
+        Self::get_version(env)
+    }
+
     /// Short alias used by escrow governance integration cross-contract calls.
     pub fn get_ver(env: Env) -> u32 {
         Self::get_version(env)
@@ -1703,6 +1708,22 @@ mod test {
         signers.push_back(Address::generate(&env));
         signers.push_back(Address::generate(&env));
 
+        client.init(&signers, &2u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_init_twice_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+
+        client.init(&signers, &2u32);
         client.init(&signers, &2u32);
     }
 
