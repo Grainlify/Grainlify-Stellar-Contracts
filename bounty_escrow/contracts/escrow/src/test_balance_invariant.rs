@@ -419,3 +419,90 @@ fn test_invariant_multi_bounty_mixed_states() {
     // B(2000) + D(4000) = 6000
     assert_eq!(client.get_balance(), 6_000);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. Multi-step scripted sequence of 10+ mixed operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_invariant_multistep_scripted_sequence() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    let dep1 = Address::generate(&env);
+    let dep2 = Address::generate(&env);
+    let c1 = Address::generate(&env);
+    let c2 = Address::generate(&env);
+
+    let (token_client, token_sac) = create_token(&env, &admin);
+    let client = create_escrow_client(&env);
+    client.init(&admin, &token_client.address);
+
+    let init_balance = 20_000i128;
+    token_sac.mint(&dep1, &init_balance);
+    token_sac.mint(&dep2, &init_balance);
+
+    let b1 = 101u64;
+    let b2 = 102u64;
+    let b3 = 103u64;
+    let b4 = 104u64;
+    let far_deadline = 100_000u64;
+    let all_bounties = &[b1, b2, b3, b4];
+
+    // Step 1: lock_funds b1
+    client.lock_funds(&dep1, &b1, &5_000i128, &far_deadline);
+    assert_balance_invariant(&client, all_bounties, "step 1: lock b1");
+
+    // Step 2: lock_funds b2
+    client.lock_funds(&dep2, &b2, &8_000i128, &far_deadline);
+    assert_balance_invariant(&client, all_bounties, "step 2: lock b2");
+
+    // Step 3: lock_funds b3
+    client.lock_funds(&dep1, &b3, &3_000i128, &2_000u64); // short deadline
+    assert_balance_invariant(&client, all_bounties, "step 3: lock b3");
+
+    // Step 4: partial_release b1
+    client.partial_release(&b1, &c1, &2_000i128);
+    assert_balance_invariant(&client, all_bounties, "step 4: partial release b1");
+
+    // Step 5: approve_refund b2 (partial)
+    client.approve_refund(&b2, &4_000i128, &dep2, &RefundMode::Partial);
+    assert_balance_invariant(&client, all_bounties, "step 5: approve partial refund b2");
+
+    // Step 6: refund b2 (partial)
+    client.refund(&b2);
+    assert_balance_invariant(&client, all_bounties, "step 6: execute partial refund b2");
+
+    // Step 7: open dispute on b1 (authorize claim)
+    client.authorize_claim(&b1, &c1);
+    assert_balance_invariant(&client, all_bounties, "step 7: authorize claim b1");
+
+    // Step 8: claim b1 (resolves dispute in favor of contributor)
+    client.claim(&b1);
+    assert_balance_invariant(&client, all_bounties, "step 8: claim b1");
+
+    // Step 9: lock_funds b4
+    client.lock_funds(&dep2, &b4, &4_000i128, &far_deadline);
+    assert_balance_invariant(&client, all_bounties, "step 9: lock b4");
+
+    // Step 10: release_funds b4
+    client.release_funds(&b4, &c2);
+    assert_balance_invariant(&client, all_bounties, "step 10: release b4");
+
+    // Step 11: advance time past b3 deadline and refund
+    env.ledger().set_timestamp(2_001);
+    client.refund(&b3);
+    assert_balance_invariant(&client, all_bounties, "step 11: deadline refund b3");
+
+    // Step 12: approve and refund remainder of b2
+    let rem_b2 = client.get_escrow_info(&b2).remaining_amount;
+    client.approve_refund(&b2, &rem_b2, &dep2, &RefundMode::Full);
+    client.refund(&b2);
+    assert_balance_invariant(&client, all_bounties, "step 12: full refund b2");
+
+    // Final checks
+    let contract_bal = client.get_balance();
+    assert_eq!(contract_bal, 0, "contract should be fully drained");
+}
