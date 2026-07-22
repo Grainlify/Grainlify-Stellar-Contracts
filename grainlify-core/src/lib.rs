@@ -858,6 +858,35 @@ impl GrainlifyContract {
         governance::GovernanceContract::is_upgrade_approved(env, wasm_hash)
     }
 
+    /// Returns `true` when the governance proposal identified by `proposal_id`
+    /// has been vetoed or cancelled and must not be executed.
+    ///
+    /// The current governance module (`governance.rs`) does not yet have a
+    /// native Vetoed/Cancelled [`ProposalStatus`] variant (tracked in issue
+    /// #236).  This stub satisfies the cross-contract interface declared in
+    /// `governance_integration.rs` (`GovernanceInterface::is_vetoed`) so that
+    /// escrow contracts can call it via `GovernanceClient` without a compile
+    /// error or a panic at the cross-contract dispatch layer.
+    ///
+    /// Until a real veto mechanism is implemented on-chain, this method always
+    /// returns `false` (no proposals are ever vetoed), which is the safe
+    /// default: it allows approved proposals to proceed rather than silently
+    /// blocking all upgrades.  A follow-up task should:
+    ///
+    /// 1. Add a `Vetoed` / `Cancelled` variant to `governance::ProposalStatus`.
+    /// 2. Add a permissioned `veto_proposal(admin, proposal_id)` entrypoint.
+    /// 3. Update this stub to query the real veto flag from persistent storage.
+    ///
+    /// # Arguments
+    /// * `_proposal_id` - The governance proposal ID to check.
+    ///
+    /// # Returns
+    /// `false` (stub — veto mechanism not yet implemented).
+    pub fn is_vetoed(_env: Env, _proposal_id: u32) -> bool {
+        // TODO(#236): query real veto storage once veto mechanism is implemented.
+        false
+    }
+
     /// Initializes the contract with a single admin address.
     ///
     /// # Arguments
