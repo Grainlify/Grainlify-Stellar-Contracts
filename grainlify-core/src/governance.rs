@@ -502,7 +502,8 @@ fn enforce_min_proposal_stake(
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
+    use soroban_sdk::TryFromVal;
 
     fn setup_test(
         env: &Env,
@@ -892,6 +893,24 @@ fn test_cancel_proposal_success() {
 
     let status = client.get_proposal_status(&prop_id);
     assert_eq!(status, ProposalStatus::Cancelled);
+
+    let contract_id = client.address.clone();
+    let events = env.events().all();
+    let mut found_prop_canc = false;
+    for event in events.iter() {
+        if event.0 == contract_id
+            && event.1.len() >= 2
+            && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap())
+                == Ok(symbol_short!("PropCanc"))
+        {
+            let event_proposal_id: u32 =
+                soroban_sdk::TryFromVal::try_from_val(&env, &event.1.get(1).unwrap())
+                    .unwrap();
+            assert_eq!(event_proposal_id, prop_id);
+            found_prop_canc = true;
+        }
+    }
+    assert!(found_prop_canc, "PropCanc event should have been emitted");
 }
 
 #[test]
@@ -901,11 +920,13 @@ fn test_cancel_proposal_unauthorized() {
     let prop_id = create_test_proposal(&env, &client, &proposer);
     let unauthorized = Address::generate(&env);
 
+    let events_before = env.events().all().len();
     let result = client.try_cancel_proposal(&unauthorized, &prop_id);
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 
     let status = client.get_proposal_status(&prop_id);
     assert_eq!(status, ProposalStatus::Active);
+    assert_eq!(env.events().all().len(), events_before);
 }
 
 #[test]
@@ -933,6 +954,21 @@ fn test_cancel_proposal_already_cancelled_fails() {
     
     let result = client.try_cancel_proposal(&proposer, &prop_id);
     assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_wrong_proposal_id_returns_unauthorized() {
+    let env = Env::default();
+    let (client, _, proposer1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let proposer2 = Address::generate(&env);
+    let _prop1 = create_test_proposal(&env, &client, &proposer1);
+    let prop2 = create_test_proposal(&env, &client, &proposer2);
+
+    let result = client.try_cancel_proposal(&proposer1, &prop2);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+
+    let status = client.get_proposal_status(&prop2);
+    assert_eq!(status, ProposalStatus::Active);
 }
 
 #[test]
