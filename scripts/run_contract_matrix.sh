@@ -195,9 +195,31 @@ ensure_identity() {
         addr="$(stellar keys address "$DEPLOYER_IDENTITY")"
         log "Funding local identity: $DEPLOYER_IDENTITY"
 
-        if ! curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null; then
-            log "Local friendbot funding returned non-zero; continuing because the account may already exist"
+        # `stellar network health` (checked by ensure_local_network above)
+        # only confirms the RPC endpoint is up — friendbot is a separate
+        # component in the same container and can still be refusing
+        # connections (connection reset, 502) for a while after that.
+        # Give it the same persistence as the network-health wait rather
+        # than a handful of quick retries.
+        local funded="false"
+        for _ in $(seq 1 24); do
+            if curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null 2>&1; then
+                funded="true"
+                break
+            fi
+            sleep 5
+        done
+
+        if [[ "$funded" != "true" ]]; then
+            die "Local friendbot at $FRIENDBOT_URL never became reachable to fund $DEPLOYER_IDENTITY"
         fi
+        log "Local friendbot funded $DEPLOYER_IDENTITY"
+
+        # Friendbot returning success doesn't guarantee the account is
+        # immediately queryable via RPC — the very next step (contract
+        # install) depends on it existing, so give the ledger a moment to
+        # catch up rather than racing it.
+        sleep 3
     else
         log "Funding testnet identity: $DEPLOYER_IDENTITY"
         stellar keys fund "$DEPLOYER_IDENTITY" --network testnet >/dev/null || true

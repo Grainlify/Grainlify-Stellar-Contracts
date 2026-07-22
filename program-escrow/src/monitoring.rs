@@ -1,3 +1,14 @@
+//! Monitoring and Analytics Module
+//!
+//! Note on Health Check Semantics:
+//! The `health_check` function evaluates health using a rolling time window.
+//! An alert state triggered by a high error rate will clear (`is_healthy` flips to `true`)
+//! purely from the passage of time once the `WINDOW_DURATION` has elapsed, even if there
+//! are no new successful operations. This is a time-based clear, not a recovery-based clear.
+//! Off-chain monitoring relying on `health_check` should be aware that a healthy status
+//! might simply mean the error window decayed, and not necessarily that the underlying
+//! issue was fixed.
+
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol};
 
 // Storage keys

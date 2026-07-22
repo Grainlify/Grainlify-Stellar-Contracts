@@ -375,7 +375,7 @@ impl MultiSig {
                 (caller.clone(), signer, config.threshold),
             );
         }
-        
+
         // If only threshold was changed, emit a threshold update event
         if add.is_empty() && remove.is_empty() && new_threshold.is_some() {
             env.events().publish(
@@ -443,6 +443,7 @@ mod test {
     use super::*;
     use crate::GrainlifyContract;
     use soroban_sdk::{testutils::Address as _, testutils::Events, Env};
+    use std::panic;
 
     struct Setup {
         env: Env,
@@ -576,6 +577,73 @@ mod test {
 
         setup.env.as_contract(&setup.contract_id, || {
             MultiSig::execute(&setup.env, proposal_id, wrong_action, 0, || {});
+        });
+    }
+
+    /// Verify that a mismatched expected_action panics with ActionMismatch
+    /// and leaves the proposal unexecuted so it can still be executed with the
+    /// correct action afterwards.
+    #[test]
+    fn action_mismatch_leaves_proposal_unexecuted() {
+        let setup = setup();
+        let stored_action = ProposalAction::Upgrade(hash(&setup.env, 9));
+        let wrong_action = ProposalAction::Upgrade(hash(&setup.env, 10));
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), stored_action.clone())
+        });
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
+        });
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
+        });
+
+        // Attempt to execute with a mismatched action.  The call must panic
+        // with ActionMismatch; catch it so we can inspect post-attempt state.
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            setup.env.as_contract(&setup.contract_id, || {
+                MultiSig::execute(&setup.env, proposal_id, wrong_action, 0, || {});
+            });
+        }));
+
+        assert!(result.is_err(), "execute with wrong action must panic");
+
+        // The proposal must NOT be marked executed after the rejected call.
+        setup.env.as_contract(&setup.contract_id, || {
+            let proposal = MultiSig::get_proposal(&setup.env, proposal_id);
+            assert!(!proposal.executed, "proposal must remain unexecuted");
+            assert_eq!(proposal.executed_nonce, None);
+            assert!(
+                MultiSig::can_execute(&setup.env, proposal_id),
+                "proposal should still be executable after rejected mismatch"
+            );
+        });
+
+        // Executing with the correct matching action must succeed.
+        let did_run = setup.env.as_contract(&setup.contract_id, || {
+            let mut ran = false;
+            MultiSig::execute(&setup.env, proposal_id, stored_action, 0, || {
+                ran = true;
+            });
+            ran
+        });
+
+        assert!(did_run, "correct action must execute the closure");
+
+        setup.env.as_contract(&setup.contract_id, || {
+            let proposal = MultiSig::get_proposal(&setup.env, proposal_id);
+            assert!(proposal.executed);
+            assert_eq!(proposal.executed_nonce, Some(0));
+            assert!(!MultiSig::can_execute(&setup.env, proposal_id));
         });
     }
 
@@ -912,6 +980,72 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "NonceMismatch")]
+    fn execute_with_stale_nonce_is_rejected() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        // 1. Execute one proposal successfully (consuming nonce N=0)
+        let action_one = ProposalAction::Upgrade(hash(&setup.env, 100));
+        let first = propose_and_approve(&setup, action_one.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, first, action_one, 0, || {});
+        });
+
+        // 2. Attempt to execute a second, distinct proposal passing the stale expected_nonce = 0
+        let action_two = ProposalAction::Upgrade(hash(&setup.env, 101));
+        let second = propose_and_approve(&setup, action_two.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, second, action_two, 0, || {});
+        });
+    }
+
+    #[test]
+    fn execute_increments_nonce_and_fresh_nonce_succeeds() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        // First proposal
+        let action_one = ProposalAction::Upgrade(hash(&setup.env, 102));
+        let first = propose_and_approve(&setup, action_one.clone());
+        
+        setup.env.as_contract(&setup.contract_id, || {
+            let initial_nonce = MultiSig::nonce(&setup.env);
+            MultiSig::execute(&setup.env, first, action_one, initial_nonce, || {});
+            
+            // Confirm nonce correctly reads back as N + 1 immediately after execution
+            assert_eq!(MultiSig::nonce(&setup.env), initial_nonce + 1);
+        });
+
+        // Second proposal executes successfully once the caller re-reads and passes the correct current nonce
+        let action_two = ProposalAction::Upgrade(hash(&setup.env, 103));
+        let second = propose_and_approve(&setup, action_two.clone());
+        
+        setup.env.as_contract(&setup.contract_id, || {
+            let fresh_nonce = MultiSig::nonce(&setup.env);
+            MultiSig::execute(&setup.env, second, action_two, fresh_nonce, || {});
+            
+            // Verify it was executed successfully
+            let proposal = MultiSig::get_proposal(&setup.env, second);
+            assert!(proposal.executed);
+        });
+    }
+
+    #[test]
     fn nonce_starts_at_zero_and_increments_per_execution() {
         let setup = setup();
 
@@ -1097,11 +1231,7 @@ mod test {
             MultiSig::init(&setup.env, three_signers, 2);
 
             // Removing signer_c leaves exactly 2 = threshold → must succeed.
-            MultiSig::remove_signer(
-                &setup.env,
-                setup.signer_a.clone(),
-                setup.signer_c.clone(),
-            );
+            MultiSig::remove_signer(&setup.env, setup.signer_a.clone(), setup.signer_c.clone());
 
             let config = MultiSig::get_config(&setup.env);
             assert_eq!(
@@ -1128,11 +1258,7 @@ mod test {
             );
 
             // Removing signer_b would leave 1 signer < threshold=2 → must panic.
-            MultiSig::remove_signer(
-                &setup.env,
-                setup.signer_a.clone(),
-                setup.signer_b.clone(),
-            );
+            MultiSig::remove_signer(&setup.env, setup.signer_a.clone(), setup.signer_b.clone());
         });
     }
 
@@ -1140,7 +1266,7 @@ mod test {
     fn test_add_signer_emits_event() {
         let setup = setup();
         let new_signer = Address::generate(&setup.env);
-        
+
         setup.env.as_contract(&setup.contract_id, || {
             MultiSig::init(
                 &setup.env,
@@ -1149,23 +1275,23 @@ mod test {
             );
 
             MultiSig::add_signer(&setup.env, setup.signer_a.clone(), new_signer.clone());
-            
+
             let config = MultiSig::get_config(&setup.env);
             assert!(config.signers.contains(&new_signer));
             assert_eq!(config.signers.len(), 3);
             assert_eq!(config.threshold, 2);
         });
-        
+
         let events = setup.env.events().all();
         // The last event should be the SignerRot add event
         assert!(events.len() > 0);
     }
-    
+
     #[test]
     fn test_rotate_signers_simultaneous_threshold_change() {
         let setup = setup();
         let new_signer = Address::generate(&setup.env);
-        
+
         setup.env.as_contract(&setup.contract_id, || {
             MultiSig::init(
                 &setup.env,
@@ -1175,29 +1301,29 @@ mod test {
 
             let mut add_vec = Vec::new(&setup.env);
             add_vec.push_back(new_signer.clone());
-            
+
             let mut rm_vec = Vec::new(&setup.env);
             rm_vec.push_back(setup.signer_b.clone());
 
             // Remove signer_b, add new_signer, and change threshold to 1 simultaneously
             MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, Some(1));
-            
+
             let config = MultiSig::get_config(&setup.env);
             assert!(config.signers.contains(&new_signer));
             assert!(!config.signers.contains(&setup.signer_b));
             assert_eq!(config.signers.len(), 2);
             assert_eq!(config.threshold, 1);
         });
-        
+
         let events = setup.env.events().all();
         assert!(events.len() > 0);
     }
-    
+
     #[test]
     #[should_panic(expected = "RemovalWouldBreakThreshold")]
     fn test_rotate_signers_rejected_no_events() {
         let setup = setup();
-        
+
         setup.env.as_contract(&setup.contract_id, || {
             MultiSig::init(
                 &setup.env,
