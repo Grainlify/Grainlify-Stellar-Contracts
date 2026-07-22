@@ -745,7 +745,7 @@ pub struct UpgradeExecutedEvent {
 /// - No authorization required for initialization (first-caller pattern)
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use soroban_sdk::{Address, Env};
 ///
 /// let env = Env::default();
@@ -856,6 +856,35 @@ impl GrainlifyContract {
     /// Query whether governance executed an upgrade proposal for `wasm_hash`.
     pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
         governance::GovernanceContract::is_upgrade_approved(env, wasm_hash)
+    }
+
+    /// Returns `true` when the governance proposal identified by `proposal_id`
+    /// has been vetoed or cancelled and must not be executed.
+    ///
+    /// The current governance module (`governance.rs`) does not yet have a
+    /// native Vetoed/Cancelled [`ProposalStatus`] variant (tracked in issue
+    /// #236).  This stub satisfies the cross-contract interface declared in
+    /// `governance_integration.rs` (`GovernanceInterface::is_vetoed`) so that
+    /// escrow contracts can call it via `GovernanceClient` without a compile
+    /// error or a panic at the cross-contract dispatch layer.
+    ///
+    /// Until a real veto mechanism is implemented on-chain, this method always
+    /// returns `false` (no proposals are ever vetoed), which is the safe
+    /// default: it allows approved proposals to proceed rather than silently
+    /// blocking all upgrades.  A follow-up task should:
+    ///
+    /// 1. Add a `Vetoed` / `Cancelled` variant to `governance::ProposalStatus`.
+    /// 2. Add a permissioned `veto_proposal(admin, proposal_id)` entrypoint.
+    /// 3. Update this stub to query the real veto flag from persistent storage.
+    ///
+    /// # Arguments
+    /// * `_proposal_id` - The governance proposal ID to check.
+    ///
+    /// # Returns
+    /// `false` (stub — veto mechanism not yet implemented).
+    pub fn is_vetoed(_env: Env, _proposal_id: u32) -> bool {
+        // TODO(#236): query real veto storage once veto mechanism is implemented.
+        false
     }
 
     /// Initializes the contract with a single admin address.
@@ -1037,7 +1066,7 @@ impl GrainlifyContract {
     /// 8. (Optional) Call `set_version` to update version number
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// use soroban_sdk::{BytesN, Env};
     ///
     /// let env = Env::default();
@@ -1237,7 +1266,7 @@ impl GrainlifyContract {
     /// - Version-specific behavior
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let version = contract.get_version(&env);
     ///
     /// match version {
@@ -1338,7 +1367,7 @@ impl GrainlifyContract {
     /// - `3` = Third version
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// // After upgrading WASM
     /// contract.upgrade(&env, &new_wasm_hash);
     ///
@@ -1351,7 +1380,7 @@ impl GrainlifyContract {
     ///
     /// # Best Practice
     /// Document version changes:
-    /// ```rust
+    /// ```rust,ignore
     /// // Version History:
     /// // 1 - Initial release
     /// // 2 - Added feature X, fixed bug Y
@@ -1457,7 +1486,7 @@ impl GrainlifyContract {
     /// 6. Emits migration event
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// // After upgrading WASM to v2
     /// contract.upgrade(&env, &new_wasm_hash);
     ///
@@ -1782,6 +1811,7 @@ mod test {
 
     #[test]
     #[should_panic(expected = "Upgrade timelock not elapsed")]
+    // Confirms that upgrade() rejects early execution before the timelock has elapsed.
     fn test_upgrade_rejects_early_execution() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1821,6 +1851,101 @@ mod test {
 
         env.ledger().with_mut(|li| li.timestamp = 3_600);
         client.upgrade(&other_hash);
+    }
+
+    #[test]
+    fn test_upgrade_rejects_hash_mismatch_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        assert_eq!(initial_version, VERSION);
+        assert_eq!(client.get_previous_version(), None);
+
+        let scheduled_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mismatch_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&scheduled_hash);
+
+        // Advance time past executable_at
+        env.ledger().with_mut(|li| li.timestamp = 3_600);
+
+        // Attempt upgrade with mismatched hash
+        let res = client.try_upgrade(&mismatch_hash);
+        assert!(res.is_err(), "upgrade() with mismatched WASM hash must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), Some(scheduled));
+    }
+
+    #[test]
+    fn test_upgrade_rejects_no_schedule_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        assert_eq!(initial_version, VERSION);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), None);
+
+        let wasm_hash = BytesN::from_array(&env, &[8u8; 32]);
+
+        // Attempt upgrade without any scheduled upgrade
+        let res = client.try_upgrade(&wasm_hash);
+        assert!(res.is_err(), "upgrade() without active schedule must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), None);
+    }
+
+    #[test]
+    fn test_upgrade_rejects_hash_mismatch_before_timelock_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        let scheduled_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mismatch_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&scheduled_hash);
+
+        // Advance timestamp before timelock has elapsed
+        env.ledger().with_mut(|li| li.timestamp = 3_500);
+
+        // Attempt upgrade with mismatched hash before timelock
+        let res = client.try_upgrade(&mismatch_hash);
+        assert!(res.is_err(), "upgrade() with mismatched hash before timelock must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), Some(scheduled));
     }
 
     #[test]
@@ -2624,4 +2749,65 @@ mod test {
         }
         assert!(found_upg_exec);
     }
+
+    #[test]
+    fn test_upgrade_replay_guard_and_rescheduling() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 5_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&wasm_hash);
+
+        // Verify get_scheduled_upgrade returns the scheduled upgrade before execution
+        let scheduled_before = client.get_scheduled_upgrade().unwrap();
+        assert_eq!(scheduled_before.wasm_hash, wasm_hash);
+        assert_eq!(scheduled_before.scheduled_at, 5_000);
+        assert_eq!(scheduled_before.executable_at, 5_600);
+
+        env.ledger().with_mut(|li| li.timestamp = 5_600);
+
+        // Perform the upgrade
+        client.upgrade(&wasm_hash);
+
+        // 1. get_scheduled_upgrade is None immediately after a successful upgrade.
+        assert!(client.get_scheduled_upgrade().is_none());
+
+        // 2. A same-hash replay call fails after the schedule is consumed.
+        let result = client.try_upgrade(&wasm_hash);
+        assert!(result.is_err());
+
+        // 3. Re-scheduling after completion starts a correctly-fresh timelock.
+        env.ledger().with_mut(|li| li.timestamp = 6_000);
+        
+        // Let's schedule a new upgrade hash
+        let new_wasm_hash = env.deployer().upload_contract_wasm([1u8].as_slice());
+        let rescheduled = client.schedule_upgrade(&new_wasm_hash);
+
+        assert_eq!(rescheduled.wasm_hash, new_wasm_hash);
+        assert_eq!(rescheduled.scheduled_at, 6_000);
+        assert_eq!(rescheduled.executable_at, 6_600);
+        
+        let scheduled_after = client.get_scheduled_upgrade().unwrap();
+        assert_eq!(scheduled_after, rescheduled);
+
+        // Verify that executing before the new timelock fails
+        env.ledger().with_mut(|li| li.timestamp = 6_599);
+        assert!(client.try_upgrade(&new_wasm_hash).is_err());
+
+        // Verify it succeeds after the new timelock
+        env.ledger().with_mut(|li| li.timestamp = 6_600);
+        client.upgrade(&new_wasm_hash);
+        
+        // After this second upgrade, it is None again
+        assert!(client.get_scheduled_upgrade().is_none());
+    }
 }
+

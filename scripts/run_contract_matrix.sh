@@ -195,9 +195,31 @@ ensure_identity() {
         addr="$(stellar keys address "$DEPLOYER_IDENTITY")"
         log "Funding local identity: $DEPLOYER_IDENTITY"
 
-        if ! curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null; then
-            log "Local friendbot funding returned non-zero; continuing because the account may already exist"
+        # `stellar network health` (checked by ensure_local_network above)
+        # only confirms the RPC endpoint is up — friendbot is a separate
+        # component in the same container and can still be refusing
+        # connections (connection reset, 502) for a while after that.
+        # Give it the same persistence as the network-health wait rather
+        # than a handful of quick retries.
+        local funded="false"
+        for _ in $(seq 1 24); do
+            if curl -fsS "${FRIENDBOT_URL}?addr=${addr}" >/dev/null 2>&1; then
+                funded="true"
+                break
+            fi
+            sleep 5
+        done
+
+        if [[ "$funded" != "true" ]]; then
+            die "Local friendbot at $FRIENDBOT_URL never became reachable to fund $DEPLOYER_IDENTITY"
         fi
+        log "Local friendbot funded $DEPLOYER_IDENTITY"
+
+        # Friendbot returning success doesn't guarantee the account is
+        # immediately queryable via RPC — the very next step (contract
+        # install) depends on it existing, so give the ledger a moment to
+        # catch up rather than racing it.
+        sleep 3
     else
         log "Funding testnet identity: $DEPLOYER_IDENTITY"
         stellar keys fund "$DEPLOYER_IDENTITY" --network testnet >/dev/null || true
@@ -209,7 +231,14 @@ build_and_test_workspace() {
     (
         cd "$SOROBAN_DIR"
         export CARGO_INCREMENTAL=0
-        cargo update
+        # Only update soroban-sdk and its direct/transitive deps — NOT the entire
+        # dep graph. A full `cargo update` resolves ed25519-dalek to v3.x which
+        # causes a trait-mismatch with soroban-env-host v23. By targeting only
+        # soroban-sdk we preserve the rest of the lockfile (including the
+        # ed25519-dalek 2.2.0 pin) while still picking up the requested SDK version.
+        cargo update soroban-sdk
+        # Safety net: if ed25519-dalek somehow bumped to 3.x, downgrade it.
+        cargo update -p ed25519-dalek --precise 2.2.0 2>/dev/null || true
         cargo test --workspace
         cargo build --release --target wasm32-unknown-unknown
     )
