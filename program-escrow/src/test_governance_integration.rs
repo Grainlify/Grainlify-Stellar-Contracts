@@ -634,9 +634,11 @@ fn test_veto_after_execution_does_not_retroactively_revoke_approval() {
     env.as_contract(&contract_id, || {
         let approved = governance_integration::check_upgrade_approval(&env, &approved_hash);
         let vetoed = governance_integration::check_proposal_vetoed(&env, 0);
-        // At least one guard fires — overall the action is blocked.
+        // The combined gate `approved && !vetoed` must evaluate to false,
+        // meaning the action is blocked. Either approval is absent OR a veto
+        // is present — here the veto fires even though approval remains set.
         assert!(
-            !approved || !vetoed,
+            !approved || vetoed,
             "combined guard (approved && !vetoed) must block the late-veto case"
         );
         assert!(vetoed, "vetoed must be true to block the late-veto scenario");

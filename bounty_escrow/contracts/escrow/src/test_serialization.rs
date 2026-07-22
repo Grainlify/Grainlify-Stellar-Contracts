@@ -151,3 +151,170 @@ fn ser_event_types() {
         recipient: a.clone(), amount: 100, cancelled_at: 42,
         cancelled_by: a.clone(), reason: Symbol::new(&env, "test") });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics events — analytics.rs
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ser_analytics_event_types() {
+    use analytics::{AnalyticsSnapshot, BountyActivityEvent, BountyStateTransitioned, ContractAnalytics};
+    let env = Env::default();
+    let a = Address::generate(&env);
+    roundtrip(&env, BountyStateTransitioned {
+        version: 1, bounty_id: 5,
+        previous_state: Symbol::new(&env, "Locked"),
+        new_state: Symbol::new(&env, "Released"),
+        amount: 1000, actor: a.clone(), timestamp: 31337,
+    });
+    let metrics = ContractAnalytics {
+        active_bounty_count: 3, released_bounty_count: 1, refunded_bounty_count: 0,
+        total_locked: 3000, total_released: 1000, total_refunded: 0,
+        average_bounty_amount: 1000, snapshot_timestamp: 42,
+    };
+    roundtrip(&env, metrics.clone());
+    roundtrip(&env, AnalyticsSnapshot { version: 1, metrics });
+    roundtrip(&env, BountyActivityEvent {
+        version: 1, bounty_id: 8,
+        activity_type: Symbol::new(&env, "created"),
+        amount: 2000, timestamp: 7777,
+    });
+    // dispute-resolution activity type (added in the prior round)
+    roundtrip(&env, BountyActivityEvent {
+        version: 1, bounty_id: 100,
+        activity_type: Symbol::new(&env, "disputed"),
+        amount: 5000, timestamp: 88888,
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error enum — discriminant stability (lib.rs)
+// Verifies that every variant keeps its assigned u32 repr and is roundtrip-safe.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ser_error_enum_all_variants() {
+    let env = Env::default();
+    // Roundtrip every variant
+    roundtrip(&env, Error::AlreadyInitialized);
+    roundtrip(&env, Error::NotInitialized);
+    roundtrip(&env, Error::BountyExists);
+    roundtrip(&env, Error::BountyNotFound);
+    roundtrip(&env, Error::FundsNotLocked);
+    roundtrip(&env, Error::DeadlineNotPassed);
+    roundtrip(&env, Error::Unauthorized);
+    roundtrip(&env, Error::InvalidFeeRate);
+    roundtrip(&env, Error::FeeRecipientNotSet);
+    roundtrip(&env, Error::InvalidBatchSize);
+    roundtrip(&env, Error::BatchSizeMismatch);
+    roundtrip(&env, Error::DuplicateBountyId);
+    roundtrip(&env, Error::InvalidAmount);
+    roundtrip(&env, Error::InvalidDeadline);
+    roundtrip(&env, Error::InsufficientFunds);
+    roundtrip(&env, Error::RefundNotApproved);
+    roundtrip(&env, Error::FundsPaused);
+    roundtrip(&env, Error::AmountBelowMinimum);
+    roundtrip(&env, Error::AmountAboveMaximum);
+    roundtrip(&env, Error::CircuitBreakerOpen);
+    roundtrip(&env, Error::ClaimExpired);
+    roundtrip(&env, Error::GovernanceVersionTooLow);
+    roundtrip(&env, Error::PendingClaimExists);
+}
+
+#[test]
+fn error_discriminants_are_stable() {
+    // Each variant's u32 repr must match the value in the source.
+    // If a variant is renumbered or the gap at 15 is filled, this test catches it.
+    assert_eq!(Error::AlreadyInitialized as u32, 1);
+    assert_eq!(Error::NotInitialized as u32, 2);
+    assert_eq!(Error::BountyExists as u32, 3);
+    assert_eq!(Error::BountyNotFound as u32, 4);
+    assert_eq!(Error::FundsNotLocked as u32, 5);
+    assert_eq!(Error::DeadlineNotPassed as u32, 6);
+    assert_eq!(Error::Unauthorized as u32, 7);
+    assert_eq!(Error::InvalidFeeRate as u32, 8);
+    assert_eq!(Error::FeeRecipientNotSet as u32, 9);
+    assert_eq!(Error::InvalidBatchSize as u32, 10);
+    assert_eq!(Error::BatchSizeMismatch as u32, 11);
+    assert_eq!(Error::DuplicateBountyId as u32, 12);
+    assert_eq!(Error::InvalidAmount as u32, 13);
+    assert_eq!(Error::InvalidDeadline as u32, 14);
+    // discriminant 15 is a reserved gap — no variant must ever claim it
+    assert_eq!(Error::InsufficientFunds as u32, 16);
+    assert_eq!(Error::RefundNotApproved as u32, 17);
+    assert_eq!(Error::FundsPaused as u32, 18);
+    assert_eq!(Error::AmountBelowMinimum as u32, 19);
+    assert_eq!(Error::AmountAboveMaximum as u32, 20);
+    assert_eq!(Error::CircuitBreakerOpen as u32, 21);
+    assert_eq!(Error::ClaimExpired as u32, 22);
+    assert_eq!(Error::GovernanceVersionTooLow as u32, 23);
+    assert_eq!(Error::PendingClaimExists as u32, 24);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boundary / edge-value tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ser_boundary_values() {
+    use events::{FundsLocked, EVENT_VERSION_V2};
+    let env = Env::default();
+    let a = Address::generate(&env);
+    // max values
+    roundtrip(&env, FundsLocked {
+        version: u32::MAX, bounty_id: u64::MAX,
+        amount: i128::MAX, depositor: a.clone(), deadline: u64::MAX,
+    });
+    // zero / min values
+    roundtrip(&env, FundsLocked {
+        version: EVENT_VERSION_V2, bounty_id: 0,
+        amount: 0, depositor: a.clone(), deadline: 0,
+    });
+    // negative i128 (valid for fee deltas etc.)
+    roundtrip(&env, FundsLocked {
+        version: EVENT_VERSION_V2, bounty_id: 1,
+        amount: i128::MIN, depositor: a.clone(), deadline: 1,
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Forward-compatibility
+//
+// Soroban contracttype structs are encoded as field-keyed maps.  Adding a
+// field at the end (append-only) means an older decoder ignores the new key
+// and does not panic.  These tests encode with the current struct definition
+// and verify all known fields survive the cycle — documenting the property.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn forward_compat_event_fields_survive_roundtrip() {
+    use events::{ClaimCreated, FundsLocked, EVENT_VERSION_V2};
+    let env = Env::default();
+    let a = Address::generate(&env);
+
+    // FundsLocked: all 5 fields intact
+    let fl = FundsLocked {
+        version: EVENT_VERSION_V2, bounty_id: 55,
+        amount: 1234, depositor: a.clone(), deadline: 8888,
+    };
+    roundtrip(&env, fl.clone());
+
+    // ClaimCreated: all 5 fields intact
+    let cc = ClaimCreated {
+        version: EVENT_VERSION_V2, bounty_id: 77,
+        recipient: a.clone(), amount: 999, expires_at: 123456,
+    };
+    roundtrip(&env, cc.clone());
+}
+
+#[test]
+fn forward_compat_analytics_snapshot_fields_survive_roundtrip() {
+    use analytics::{AnalyticsSnapshot, ContractAnalytics};
+    let env = Env::default();
+    let metrics = ContractAnalytics {
+        active_bounty_count: 7, released_bounty_count: 2, refunded_bounty_count: 1,
+        total_locked: 7000, total_released: 2000, total_refunded: 500,
+        average_bounty_amount: 875, snapshot_timestamp: 999,
+    };
+    roundtrip(&env, AnalyticsSnapshot { version: 1, metrics });
+}

@@ -73,6 +73,12 @@ Additional fields are considered additive and should be ignored by forward-compa
       - [Payload Example](#payload-example-6)
     - [7.3 `PerformanceMetric`](#73-performancemetric)
       - [Payload Example](#payload-example-7)
+    - [7.4 `SignerRot` (signer added)](#74-signerrot-signer-added)
+      - [Payload Example](#payload-example-8)
+    - [7.5 `SignerRot` (signer removed)](#75-signerrot-signer-removed)
+      - [Payload Example](#payload-example-9)
+    - [7.6 `SignerRot` (threshold-only change)](#76-signerrot-threshold-only-change)
+      - [Payload Example](#payload-example-10)
   - [8. Event Topic Reference](#8-event-topic-reference)
   - [9. Payload Field Reference](#9-payload-field-reference)
   - [10. v1 → v2 Migration Guide](#10-v1--v2-migration-guide)
@@ -1101,6 +1107,117 @@ pub struct PerformanceMetric {
 
 ---
 
+### 7.4 `SignerRot` (signer added)
+
+**Emitted by:** `MultiSig::add_signer()` and `MultiSig::rotate_signers()` (once per added address)
+**Topics:** `(symbol_short!("SignerRot"), symbol_short!("add"))`
+**Data:** Raw tuple `(Address, Address, u32)` — not a named struct
+**Lifecycle phase:** Multisig signer addition
+
+```rust
+// Inside add_signer() and rotate_signers():
+env.events().publish(
+    (symbol_short!("SignerRot"), symbol_short!("add")),
+    (caller, new_signer, config.threshold),
+);
+```
+
+#### Payload Example
+
+```json
+["GCALLER…", "GNEWSIGNER…", 2]
+```
+
+| Tuple index | Rust type | Description |
+|-------------|-----------|-------------|
+| `0`         | `Address` | Address of the caller who initiated the addition (`caller`) |
+| `1`         | `Address` | The newly added signer address (`new_signer`) |
+| `2`         | `u32`     | The current threshold **after** the mutation takes effect |
+
+> **Zero-events-on-revert guarantee:** If `add_signer` or `rotate_signers` panics (e.g. the
+> new signer is already present, or the post-mutation threshold check fails in
+> `rotate_signers`), the Soroban host rolls back the entire transaction. No `SignerRot`
+> event is emitted for failed or partially-applied mutations. Indexers do **not** need to
+> special-case partial payloads or compensate for missing events on revert.
+
+---
+
+### 7.5 `SignerRot` (signer removed)
+
+**Emitted by:** `MultiSig::remove_signer()` and `MultiSig::rotate_signers()` (once per removed address)
+**Topics:** `(symbol_short!("SignerRot"), symbol_short!("remove"))`
+**Data:** Raw tuple `(Address, Address, u32)` — not a named struct
+**Lifecycle phase:** Multisig signer removal
+
+```rust
+// Inside remove_signer() and rotate_signers():
+env.events().publish(
+    (symbol_short!("SignerRot"), symbol_short!("remove")),
+    (caller, signer_to_remove, config.threshold),
+);
+```
+
+#### Payload Example
+
+```json
+["GCALLER…", "GREMOVEDSIGNER…", 2]
+```
+
+| Tuple index | Rust type | Description |
+|-------------|-----------|-------------|
+| `0`         | `Address` | Address of the caller who initiated the removal (`caller`) |
+| `1`         | `Address` | The removed signer address (`signer_to_remove`) |
+| `2`         | `u32`     | The current threshold **after** the mutation takes effect |
+
+> **Zero-events-on-revert guarantee:** If `remove_signer` panics (e.g. the target address
+> is not a signer, or the removal would leave fewer signers than the threshold via
+> `RemovalWouldBreakThreshold`), or if `rotate_signers` panics due to a similar guard
+> failure, the entire transaction is rolled back and **no** `SignerRot` event is emitted.
+> Indexers do **not** need to handle partial or compensating events on revert.
+
+---
+
+### 7.6 `SignerRot` (threshold-only change)
+
+**Emitted by:** `MultiSig::rotate_signers()` — only when `add` and `remove` are both empty and `new_threshold` is `Some`
+**Topics:** `(symbol_short!("SignerRot"), symbol_short!("thresh"))`
+**Data:** Raw tuple `(Address, Address, u32)` — not a named struct
+**Lifecycle phase:** Multisig threshold adjustment without signer membership change
+
+```rust
+// Inside rotate_signers(), threshold-only branch:
+if add.is_empty() && remove.is_empty() && new_threshold.is_some() {
+    env.events().publish(
+        (symbol_short!("SignerRot"), symbol_short!("thresh")),
+        (caller.clone(), caller.clone(), config.threshold),
+    );
+}
+```
+
+#### Payload Example
+
+```json
+["GCALLER…", "GCALLER…", 3]
+```
+
+| Tuple index | Rust type | Description |
+|-------------|-----------|-------------|
+| `0`         | `Address` | Address of the caller (`caller`) — duplicated as a positional placeholder matching the shared `(caller, signer, threshold)` layout |
+| `1`         | `Address` | Same as tuple index `0`; no individual signer is added or removed, so the caller address fills both positions |
+| `2`         | `u32`     | The **new** threshold after the update |
+
+> **Disambiguation note:** This event is emitted exclusively when the `add` and `remove`
+> vecs are empty and `new_threshold` is `Some`. When signers are also added or removed in
+> the same `rotate_signers` call, those individual `"add"` / `"remove"` events carry the
+> post-mutation threshold in tuple index `2`; no separate `"thresh"` event is emitted for
+> that case.
+
+> **Zero-events-on-revert guarantee:** If `rotate_signers` panics during the threshold
+> guard check (e.g. the new threshold is `0` or exceeds the signer count), the transaction
+> rolls back completely and **no** `SignerRot` event of any sub-type is emitted.
+
+---
+
 ## 8. Event Topic Reference
 
 Complete lookup table of every `env.events().publish(topics, …)` call in this codebase:
@@ -1129,6 +1246,9 @@ Complete lookup table of every `env.events().publish(topics, …)` call in this 
 | `grainlify-core` | `(symbol_short!("migration"),)`                         | `"migration"`             | `MigrationEvent`          |
 | `grainlify-core` | `(symbol_short!("metric"), symbol_short!("op"))`        | `"metric"` + `"op"`       | `OperationMetric`         |
 | `grainlify-core` | `(symbol_short!("metric"), symbol_short!("perf"))`      | `"metric"` + `"perf"`     | `PerformanceMetric`       |
+| `grainlify-core` | `(symbol_short!("SignerRot"), symbol_short!("add"))`    | `"SignerRot"` + `"add"`   | Tuple `(Address,Address,u32)` |
+| `grainlify-core` | `(symbol_short!("SignerRot"), symbol_short!("remove"))` | `"SignerRot"` + `"remove"`| Tuple `(Address,Address,u32)` |
+| `grainlify-core` | `(symbol_short!("SignerRot"), symbol_short!("thresh"))` | `"SignerRot"` + `"thresh"`| Tuple `(Address,Address,u32)` |
 
 ---
 
@@ -1173,6 +1293,8 @@ All fields appearing across all three contracts:
 | `caller`                | `Address`          | `Address`   | grainlify |
 | `function`              | `Symbol`           | `Symbol`    | grainlify |
 | `duration`              | `u64`              | `U64`       | grainlify |
+| `signer` / `new_signer` / `signer_to_remove` | `Address` | `Address` | grainlify (SignerRot tuple index 1) |
+| `threshold` (inline)    | `u32`              | `U32`       | grainlify (SignerRot tuple index 2) |
 
 > **Integer precision:** `i128` values must be handled as `BigInt` in JavaScript/TypeScript.
 > USDC on Stellar uses 7 decimal places (1 USDC = 10,000,000 stroops).
@@ -1273,6 +1395,9 @@ Events are exercised by tests embedded in each source file. Key scenarios per co
 | `test_migration_emits_success_event` | grainlify | Event count increases after `migrate()` |
 | `test_migration_requires_admin_authorization` | grainlify | Auth check fires before event |
 | `test_migration_only_runs_once_per_version` | grainlify | `MigrationEvent` timestamp unchanged on second call |
+| `test_add_signer_emits_event` | grainlify (multisig) | `SignerRot "add"` — event emitted, signer count increments, threshold unchanged |
+| `test_rotate_signers_simultaneous_threshold_change` | grainlify (multisig) | `SignerRot "add"` + `"remove"` — both emitted; new threshold recorded in tuple index 2 |
+| `test_rotate_signers_rejected_no_events` | grainlify (multisig) | No event — `RemovalWouldBreakThreshold` panic rolls back before any publish call |
 
 Run all tests:
 
@@ -1313,6 +1438,11 @@ cargo tarpaulin --out Html --output-dir coverage/
 | `MigrationEvent` | `emit_migration_event()` → `migrate()` | `contracts/grainlify-core/src/lib.rs` – success and failure paths in `migrate` |
 | `OperationMetric` | `monitoring::track_operation()` | `contracts/grainlify-core/src/lib.rs` – monitoring module, called from `init_admin`, `upgrade`, `set_version`, `migrate` |
 | `PerformanceMetric` | `monitoring::emit_performance()` | `contracts/grainlify-core/src/lib.rs` – monitoring module, called from same admin fns |
+| `SignerRot "add"` | `MultiSig::add_signer()` | `grainlify-core/src/multisig.rs` – end of `add_signer`, after config write |
+| `SignerRot "add"` (batch) | `MultiSig::rotate_signers()` | `grainlify-core/src/multisig.rs` – `rotate_signers` add-loop, after all mutations |
+| `SignerRot "remove"` | `MultiSig::remove_signer()` | `grainlify-core/src/multisig.rs` – end of `remove_signer`, after config write |
+| `SignerRot "remove"` (batch) | `MultiSig::rotate_signers()` | `grainlify-core/src/multisig.rs` – `rotate_signers` remove-loop, after all mutations |
+| `SignerRot "thresh"` | `MultiSig::rotate_signers()` | `grainlify-core/src/multisig.rs` – `rotate_signers` threshold-only branch (add and remove both empty) |
 
 ---
 
@@ -1320,6 +1450,7 @@ cargo tarpaulin --out Html --output-dir coverage/
 
 | Date       | Doc version | Branch / Author                        | Notes |
 |------------|-------------|----------------------------------------|-------|
+| 2026-07-22 | 3.1.0       | `docs/event-schema-signer-rotation`    | Added §7.4–7.6 documenting `SignerRot "add"`, `"remove"`, and `"thresh"` events from `grainlify-core/src/multisig.rs`. Payload cross-checked line-by-line against `add_signer`, `remove_signer`, and `rotate_signers` publish call sites. Zero-events-on-revert guarantee explicitly noted in each subsection. Added `SignerRot` rows to §8 topic reference, §9 field reference, §13 test coverage, and §14 source references. Added versioning note to EVENT_VERSIONING.md. |
 | 2026-06-21 | 3.0.0       | `refactor/version-all-bounty-events`   | Added `version: u32` (= `EVENT_VERSION_V2`) to all 8 previously-unversioned `bounty_escrow` events: `FeeCollected`, `BatchFundsLocked`, `BatchFundsReleased`, `ApprovalAdded`, `FeeConfigUpdated`, `ClaimCreated`, `ClaimExecuted`, `ClaimCancelled`. Added emit functions for Claim events. Updated topic reference, migration guide, and test coverage notes. Removed "permanently v1" caveat. |
 | 2026-03-03 | 2.0.0       | `docs/event-schema-audit`              | Full source-grounded audit against `bounty_escrow/src/events.rs`, `program_escrow/src/lib.rs`, and `grainlify-core/src/lib.rs`. Replaced previously inferred schema with exact `#[contracttype]` struct definitions, correct topic tuples, v1/v2 versioning per-event, complete topic reference table, reentrancy/pause security notes, tarpaulin command, and forward-compatible TypeScript parser. |
 | (prior)    | 1.0.0       | —                                      | Initial placeholder schema |
