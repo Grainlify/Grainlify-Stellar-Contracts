@@ -517,3 +517,77 @@ fn test_schedule_dispute_skips_only_target_schedule_release() {
     assert_eq!(data.remaining_balance, 90_000);
     assert_eq!(data.payout_history.len(), 1);
 }
+
+// ─── Test 17: resolve schedule dispute re-enables release ────────────────────
+
+/// Resolving an open schedule-scoped dispute re-enables release/payment for that schedule.
+#[test]
+fn test_resolve_schedule_dispute_allows_release() {
+    let env = Env::default();
+    env.ledger().set_timestamp(0);
+    let (client, _admin, _cid) = setup(&env, 100_000);
+
+    let recipient = Address::generate(&env);
+    let disputed_schedule = client.create_program_release_schedule(&50_000, &100, &recipient);
+
+    let reason = String::from_str(&env, "Schedule milestone challenged");
+    client.open_schedule_dispute(&disputed_schedule.schedule_id, &reason);
+    assert!(client.is_schedule_disputed(&disputed_schedule.schedule_id));
+
+    env.ledger().set_timestamp(150);
+    // Release should fail or skip
+    let released_count = client.trigger_program_releases();
+    assert_eq!(released_count, 0);
+
+    let blocked = client.try_release_prog_schedule_automatic(&disputed_schedule.schedule_id);
+    assert!(blocked.is_err());
+
+    // Resolve the dispute
+    client.resolve_schedule_dispute(&disputed_schedule.schedule_id);
+    assert!(!client.is_schedule_disputed(&disputed_schedule.schedule_id));
+
+    // Now it should be releasable
+    client.release_prog_schedule_automatic(&disputed_schedule.schedule_id);
+
+    let data = client.get_program_info();
+    assert_eq!(data.remaining_balance, 50_000);
+}
+
+// ─── Test 18: resolve schedule dispute panics if none open ───────────────────
+
+#[test]
+#[should_panic(expected = "No schedule dispute to resolve")]
+fn test_resolve_schedule_when_no_dispute_panics() {
+    let env = Env::default();
+    let (client, _admin, _cid) = setup(&env, 10_000);
+    client.resolve_schedule_dispute(&1);
+}
+
+// ─── Test 19: resolve schedule dispute isolates scope ────────────────────────
+
+/// Resolving one schedule's dispute does not affect a dispute open on a different schedule.
+#[test]
+fn test_resolve_schedule_dispute_scope_isolation() {
+    let env = Env::default();
+    let (client, _admin, _cid) = setup(&env, 150_000);
+
+    let recipient = Address::generate(&env);
+    let sched1 = client.create_program_release_schedule(&50_000, &100, &recipient);
+    let sched2 = client.create_program_release_schedule(&50_000, &100, &recipient);
+
+    let reason1 = String::from_str(&env, "Dispute 1");
+    let reason2 = String::from_str(&env, "Dispute 2");
+
+    client.open_schedule_dispute(&sched1.schedule_id, &reason1);
+    client.open_schedule_dispute(&sched2.schedule_id, &reason2);
+
+    assert!(client.is_schedule_disputed(&sched1.schedule_id));
+    assert!(client.is_schedule_disputed(&sched2.schedule_id));
+
+    // Resolve sched1
+    client.resolve_schedule_dispute(&sched1.schedule_id);
+
+    // sched1 is resolved, sched2 remains disputed
+    assert!(!client.is_schedule_disputed(&sched1.schedule_id));
+    assert!(client.is_schedule_disputed(&sched2.schedule_id));
+}
