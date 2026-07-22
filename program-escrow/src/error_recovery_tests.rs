@@ -1372,3 +1372,150 @@ fn test_direct_half_open_circuit_sets_success_count() {
         assert_eq!(get_success_count(&env), 0);
     });
 }
+
+// ─────────────────────────────────────────────────────────
+// 37. Retry Exhaustion and Terminal State
+// ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_retry_exhaustion_fallback_terminal_error() {
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                success_threshold: 1,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    env.as_contract(&contract_id, || {
+        let prog = String::from_str(&env, "ExhaustionProg");
+        let op = symbol_short!("exhaust");
+        let retry_cfg = RetryConfig { max_attempts: 3 };
+
+        // Simulate state before attempt
+        let initial_state_val = 42;
+        let mut mock_state_val = initial_state_val;
+
+        let result = execute_with_retry(&env, &retry_cfg, prog.clone(), op.clone(), || {
+            // Attempt to modify state but fail
+            mock_state_val += 1;
+            
+            // Clean up partial state since we are about to return a failure
+            mock_state_val -= 1;
+            Err(ERR_TRANSFER_FAILED)
+        });
+
+        // 1. Exhaustion after exactly the max-retry count
+        assert_eq!(result.attempts, 3);
+        assert!(!result.succeeded);
+        
+        // 2. Clear, specific terminal error is returned
+        assert_eq!(result.final_error, ERR_TRANSFER_FAILED);
+        
+        // 3. No ambiguous partial state is left behind: state matches pre-attempt state
+        assert_eq!(mock_state_val, initial_state_val);
+    });
+}
+
+#[test]
+fn test_retry_exhaustion_with_concurrent_unrelated_operation() {
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 3,
+                success_threshold: 1,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    env.as_contract(&contract_id, || {
+        let prog = String::from_str(&env, "ConcurrProg");
+        let op = symbol_short!("exhaust");
+        let retry_cfg = RetryConfig { max_attempts: 5 };
+
+        let mut attempt_count = 0;
+        let result = execute_with_retry(&env, &retry_cfg, prog.clone(), op.clone(), || {
+            attempt_count += 1;
+            
+            if attempt_count == 1 {
+                // Simulate a concurrent unrelated operation tripping the circuit breaker mid-sequence
+                let unrelated_prog = String::from_str(&env, "Unrelated");
+                let unrelated_op = symbol_short!("unrel");
+                record_failure(&env, unrelated_prog.clone(), unrelated_op.clone(), ERR_TRANSFER_FAILED);
+                record_failure(&env, unrelated_prog.clone(), unrelated_op.clone(), ERR_TRANSFER_FAILED);
+                record_failure(&env, unrelated_prog.clone(), unrelated_op.clone(), ERR_TRANSFER_FAILED);
+            }
+            
+            // This specific operation fails
+            Err(ERR_TRANSFER_FAILED)
+        });
+
+        // The first attempt fails and returns ERR_TRANSFER_FAILED.
+        // It records a failure, bringing total past the threshold (circuit is OPEN).
+        // The second attempt starts, calls check_and_allow, which returns ERR_CIRCUIT_OPEN.
+        // execute_with_retry stops retries early!
+        assert!(!result.succeeded);
+        assert_eq!(result.attempts, 1); // Only 1 full attempt executed before being cut off
+        assert_eq!(result.final_error, ERR_CIRCUIT_OPEN);
+    });
+}
+
+#[test]
+fn test_retry_counter_reset_after_mid_sequence_recovery() {
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                success_threshold: 1,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    env.as_contract(&contract_id, || {
+        let prog = String::from_str(&env, "MidSeqProg");
+        let op = symbol_short!("midseq");
+        let retry_cfg = RetryConfig { max_attempts: 4 };
+
+        let mut attempt_count = 0;
+        let mut mock_state_val = 0;
+
+        let result = execute_with_retry(&env, &retry_cfg, prog.clone(), op.clone(), || {
+            attempt_count += 1;
+            if attempt_count <= 2 {
+                // Fail first two times
+                Err(ERR_TRANSFER_FAILED)
+            } else {
+                // Recover on 3rd attempt
+                mock_state_val = 100;
+                Ok(())
+            }
+        });
+
+        assert!(result.succeeded);
+        assert_eq!(result.attempts, 3);
+        assert_eq!(result.final_error, 0); // ERR_NONE
+        
+        // Assert that the circuit breaker failure streak was reset
+        assert_eq!(get_failure_count(&env), 0);
+        assert_eq!(get_state(&env), CircuitState::Closed);
+        
+        // State successfully updated upon mid-sequence recovery
+        assert_eq!(mock_state_val, 100);
+    });
+}

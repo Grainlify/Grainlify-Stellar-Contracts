@@ -450,38 +450,52 @@ fn test_invariant_multistep_scripted_sequence() {
     let b4 = 104u64;
     let far_deadline = 100_000u64;
     let all_bounties = &[b1, b2, b3, b4];
+    // The invariant only holds over bounties that actually exist yet — an
+    // id with no escrow record isn't "zero remaining", it's BountyNotFound.
+    // So each assertion below is scoped to whichever bounties have been
+    // locked by that point in the script, growing to all_bounties once b4
+    // is locked in step 9.
+    let after_b1 = &[b1];
+    let after_b2 = &[b1, b2];
+    let after_b3 = &[b1, b2, b3];
 
     // Step 1: lock_funds b1
     client.lock_funds(&dep1, &b1, &5_000i128, &far_deadline);
-    assert_balance_invariant(&client, all_bounties, "step 1: lock b1");
+    assert_balance_invariant(&client, after_b1, "step 1: lock b1");
 
     // Step 2: lock_funds b2
     client.lock_funds(&dep2, &b2, &8_000i128, &far_deadline);
-    assert_balance_invariant(&client, all_bounties, "step 2: lock b2");
+    assert_balance_invariant(&client, after_b2, "step 2: lock b2");
+
+    // dep1's next lock_funds call is gated by the anti-abuse module's 60s
+    // per-depositor cooldown (its first lock at step 1 was also at t=1000).
+    // Advancing past it here also clears dep2's cooldown ahead of step 9,
+    // since dep2's first lock (step 2) happened at the same t=1000.
+    env.ledger().set_timestamp(1_061);
 
     // Step 3: lock_funds b3
     client.lock_funds(&dep1, &b3, &3_000i128, &2_000u64); // short deadline
-    assert_balance_invariant(&client, all_bounties, "step 3: lock b3");
+    assert_balance_invariant(&client, after_b3, "step 3: lock b3");
 
     // Step 4: partial_release b1
     client.partial_release(&b1, &c1, &2_000i128);
-    assert_balance_invariant(&client, all_bounties, "step 4: partial release b1");
+    assert_balance_invariant(&client, after_b3, "step 4: partial release b1");
 
     // Step 5: approve_refund b2 (partial)
     client.approve_refund(&b2, &4_000i128, &dep2, &RefundMode::Partial);
-    assert_balance_invariant(&client, all_bounties, "step 5: approve partial refund b2");
+    assert_balance_invariant(&client, after_b3, "step 5: approve partial refund b2");
 
     // Step 6: refund b2 (partial)
     client.refund(&b2);
-    assert_balance_invariant(&client, all_bounties, "step 6: execute partial refund b2");
+    assert_balance_invariant(&client, after_b3, "step 6: execute partial refund b2");
 
     // Step 7: open dispute on b1 (authorize claim)
     client.authorize_claim(&b1, &c1);
-    assert_balance_invariant(&client, all_bounties, "step 7: authorize claim b1");
+    assert_balance_invariant(&client, after_b3, "step 7: authorize claim b1");
 
     // Step 8: claim b1 (resolves dispute in favor of contributor)
     client.claim(&b1);
-    assert_balance_invariant(&client, all_bounties, "step 8: claim b1");
+    assert_balance_invariant(&client, after_b3, "step 8: claim b1");
 
     // Step 9: lock_funds b4
     client.lock_funds(&dep2, &b4, &4_000i128, &far_deadline);
