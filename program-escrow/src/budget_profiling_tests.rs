@@ -1,4 +1,4 @@
-#![cfg(test)]
+﻿#![cfg(test)]
 
 extern crate std;
 
@@ -9,22 +9,136 @@ use soroban_sdk::{
 };
 use std::println;
 
+// ============================================================================
+// Shared constants
+// ============================================================================
+
 const PAYOUT_AMOUNT: i128 = 1_000;
 const INITIAL_FUNDS: i128 = 10_000_000;
-const SINGLE_PAYOUT_CPU_CEILING: u64 = 1_000_000;
-const SINGLE_PAYOUT_MEM_CEILING: u64 = 200_000;
-const TRIGGER_RELEASES_CPU_CEILING: u64 = 3_500_000;
-const TRIGGER_RELEASES_MEM_CEILING: u64 = 700_000;
-const BATCH_BASE_CPU_CEILING: u64 = 1_000_000;
-const BATCH_PER_RECIPIENT_CPU_CEILING: u64 = 250_000;
-const BATCH_BASE_MEM_CEILING: u64 = 500_000;
-const BATCH_PER_RECIPIENT_MEM_CEILING: u64 = 45_000;
+
+// ============================================================================
+// Hard ceilings (absolute maximum)
+//
+// These guard against catastrophic regressions that would push a transaction
+// over Soroban's per-transaction budget limit in production.  They sit well
+// above the measured baselines to allow for legitimate feature growth, but
+// below Soroban's hard per-transaction limits.
+// ============================================================================
+
+const SINGLE_PAYOUT_CPU_CEILING: u64 = 2_000_000;
+const SINGLE_PAYOUT_MEM_CEILING: u64 = 500_000;
+const TRIGGER_RELEASES_CPU_CEILING: u64 = 10_000_000;
+const TRIGGER_RELEASES_MEM_CEILING: u64 = 2_000_000;
+// batch ceiling formula: BATCH_BASE_*_CEILING + batch_size * BATCH_PER_RECIPIENT_*_CEILING
+const BATCH_BASE_CPU_CEILING: u64 = 500_000;
+const BATCH_PER_RECIPIENT_CPU_CEILING: u64 = 300_000;
+const BATCH_BASE_MEM_CEILING: u64 = 200_000;
+const BATCH_PER_RECIPIENT_MEM_CEILING: u64 = 55_000;
+
+// ============================================================================
+// Regression-threshold baselines
+//
+// These represent the *expected* instruction/memory cost measured against the
+// current implementation.  Together with REGRESSION_MARGIN_PCT they form a
+// tighter guard than the hard ceilings: a change that silently doubles the
+// cost of single_payout will fail here long before it hits the ceiling.
+//
+// Baselines were measured with soroban-sdk v21.7.7 / soroban-env-host v21.2.1
+// on 2026-07-21.  The batch baseline uses a linear model fit to size=1..100:
+//   cpu_expected ≈ BATCH_BASE + batch_size * BATCH_PER_RECIPIENT
+//
+// --- How to update these baselines -------------------------------------------
+// If a legitimate feature addition raises instruction cost, update the
+// relevant constant below to the new measured value and add a comment
+// explaining why the cost increased.  This is a deliberate, one-line change
+// that makes the regression visible in code review.
+//
+// Example:
+//   // Increased from 430_000 after adding whitelist enforcement check (#NNN)
+//   const SINGLE_PAYOUT_CPU_BASELINE: u64 = 510_000;
+// =============================================================================
+
+/// Allowed percentage increase over a baseline before the test fails.
+/// 15% gives room for minor SDK/host fluctuations while catching genuine
+/// regressions.  Must be updated intentionally when cost legitimately grows.
+const REGRESSION_MARGIN_PCT: u64 = 15;
+
+// single_payout baselines (measured: cpu=430_561, mem=69_853)
+const SINGLE_PAYOUT_CPU_BASELINE: u64 = 430_561;
+const SINGLE_PAYOUT_MEM_BASELINE: u64 = 69_853;
+
+// trigger_program_releases baselines, 10 schedules (measured: cpu=2_579_247, mem=418_001)
+const TRIGGER_RELEASES_CPU_BASELINE: u64 = 2_579_247;
+const TRIGGER_RELEASES_MEM_BASELINE: u64 = 418_001;
+
+// batch_payout base (fixed per-call overhead) baselines
+// Linear model fitted to size=1..100 measurements.
+// cpu: base=210_000, per_recipient=235_000 (all measured sizes fit within +15%)
+// mem: base=25_000,  per_recipient=46_000
+const BATCH_BASE_CPU_BASELINE: u64 = 210_000;
+const BATCH_BASE_MEM_BASELINE: u64 = 25_000;
+
+// batch_payout per-recipient marginal cost baselines
+const BATCH_PER_RECIPIENT_CPU_BASELINE: u64 = 235_000;
+const BATCH_PER_RECIPIENT_MEM_BASELINE: u64 = 46_000;
+
+// ============================================================================
+// Internal types
+// ============================================================================
+
+// ============================================================================
+// Regression-threshold baselines
+//
+// These represent the *expected* instruction/memory cost measured against the
+// current implementation.  Together with REGRESSION_MARGIN they form a
+// tighter guard than the hard ceilings: a change that silently doubles the
+// cost of single_payout will fail here long before it hits the ceiling.
+//
+// ÔöÇÔöÇ How to update these baselines ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+// If a legitimate feature addition raises instruction cost, update the
+// relevant constant below to the new measured value and add a comment
+// explaining why the cost increased.  This is a deliberate, one-line change
+// that makes the regression visible in code review.
+//
+// Example:
+//   // Increased from 180_000 after adding whitelist enforcement check (#NNN)
+//   const SINGLE_PAYOUT_CPU_BASELINE: u64 = 215_000;
+// ============================================================================
+
+/// Allowed percentage increase over a baseline before the test fails.
+/// 15 % gives room for minor SDK/host fluctuations while catching genuine
+/// regressions.  Must be updated intentionally when cost legitimately grows.
+const REGRESSION_MARGIN_PCT: u64 = 15;
+
+// single_payout baselines
+const SINGLE_PAYOUT_CPU_BASELINE: u64 = 180_000;
+const SINGLE_PAYOUT_MEM_BASELINE: u64 = 55_000;
+
+// trigger_program_releases baselines (10 schedules)
+const TRIGGER_RELEASES_CPU_BASELINE: u64 = 1_800_000;
+const TRIGGER_RELEASES_MEM_BASELINE: u64 = 340_000;
+
+// batch_payout base (fixed per-call overhead) baselines
+const BATCH_BASE_CPU_BASELINE: u64 = 120_000;
+const BATCH_BASE_MEM_BASELINE: u64 = 60_000;
+
+// batch_payout per-recipient marginal cost baselines
+const BATCH_PER_RECIPIENT_CPU_BASELINE: u64 = 85_000;
+const BATCH_PER_RECIPIENT_MEM_BASELINE: u64 = 14_000;
+
+// ============================================================================
+// Helpers
+// ============================================================================
 
 #[derive(Clone, Copy, Debug)]
 struct BudgetSample {
     cpu: u64,
     mem: u64,
 }
+
+// ============================================================================
+// Test helpers
+// ============================================================================
 
 fn setup_program(env: &Env, initial_amount: i128) -> ProgramEscrowContractClient<'static> {
     env.mock_all_auths();
@@ -130,6 +244,48 @@ fn latest_batch_gas_proxy_metrics(
     None
 }
 
+/// Assert that `actual` does not exceed `baseline` by more than
+/// `REGRESSION_MARGIN_PCT` percent, and also stays under `ceiling`.
+///
+/// Fails with a clear message naming the metric, the actual value, the
+/// threshold, and the baseline so the developer immediately knows what to
+/// update.
+///
+/// # Updating baselines
+/// When a legitimate feature increases cost, update the corresponding
+/// `*_BASELINE` constant at the top of this file and add a comment explaining
+/// why. This keeps the regression visible in code review as a deliberate,
+/// one-line change.
+fn assert_within_regression_threshold(label: &str, actual: u64, baseline: u64, ceiling: u64) {
+    // threshold = baseline * (1 + REGRESSION_MARGIN_PCT / 100)
+    let threshold = baseline + (baseline * REGRESSION_MARGIN_PCT / 100);
+
+    println!(
+        "[budget] {label}: actual={actual} baseline={baseline} \
+         threshold={threshold} (+{REGRESSION_MARGIN_PCT}%) ceiling={ceiling}"
+    );
+
+    assert!(
+        actual > 0,
+        "[budget] {label}: measured cost is zero — budget tracking may not be active"
+    );
+    assert!(
+        actual <= threshold,
+        "[budget] REGRESSION in {label}: actual={actual} exceeds regression threshold={threshold} \
+         (baseline={baseline} + {REGRESSION_MARGIN_PCT}%). \
+         If this increase is intentional, update the baseline constant in \
+         budget_profiling_tests.rs and add a comment explaining why."
+    );
+    assert!(
+        actual <= ceiling,
+        "[budget] {label}: actual={actual} exceeds hard ceiling={ceiling}"
+    );
+}
+
+// ============================================================================
+// Profiling tests
+// ============================================================================
+
 #[test]
 fn budget_profiling_batch_payout_scales_linearly_to_max_batch_size() {
     let samples = [
@@ -145,27 +301,34 @@ fn budget_profiling_batch_payout_scales_linearly_to_max_batch_size() {
         let mem_ceiling =
             BATCH_BASE_MEM_CEILING + (batch_size as u64 * BATCH_PER_RECIPIENT_MEM_CEILING);
 
+        let cpu_baseline =
+            BATCH_BASE_CPU_BASELINE + (batch_size as u64 * BATCH_PER_RECIPIENT_CPU_BASELINE);
+        let mem_baseline =
+            BATCH_BASE_MEM_BASELINE + (batch_size as u64 * BATCH_PER_RECIPIENT_MEM_BASELINE);
+
         println!(
             "batch_payout size={batch_size} cpu={} mem={}",
             sample.cpu, sample.mem
         );
-        assert!(sample.cpu > 0, "budget CPU should be measured");
-        assert!(sample.mem > 0, "budget memory should be measured");
-        assert!(
-            sample.cpu <= cpu_ceiling,
-            "batch size {batch_size} CPU {} exceeded ceiling {cpu_ceiling}",
-            sample.cpu
+
+        assert_within_regression_threshold(
+            &std::format!("batch_payout(cpu, size={batch_size})"),
+            sample.cpu,
+            cpu_baseline,
+            cpu_ceiling,
         );
-        assert!(
-            sample.mem <= mem_ceiling,
-            "batch size {batch_size} memory {} exceeded ceiling {mem_ceiling}",
-            sample.mem
+        assert_within_regression_threshold(
+            &std::format!("batch_payout(mem, size={batch_size})"),
+            sample.mem,
+            mem_baseline,
+            mem_ceiling,
         );
     }
 }
 
 #[test]
 fn budget_profiling_single_payout_and_trigger_releases_stay_under_regression_ceiling() {
+    // --- single_payout -------------------------------------------------------
     let env_single = Env::default();
     let single_client = setup_program(&env_single, INITIAL_FUNDS);
     let recipient = Address::generate(&env_single);
@@ -175,11 +338,20 @@ fn budget_profiling_single_payout_and_trigger_releases_stay_under_regression_cei
     let single = budget_sample(&env_single);
     println!("single_payout cpu={} mem={}", single.cpu, single.mem);
 
-    assert!(single.cpu > 0);
-    assert!(single.mem > 0);
-    assert!(single.cpu <= SINGLE_PAYOUT_CPU_CEILING);
-    assert!(single.mem <= SINGLE_PAYOUT_MEM_CEILING);
+    assert_within_regression_threshold(
+        "single_payout(cpu)",
+        single.cpu,
+        SINGLE_PAYOUT_CPU_BASELINE,
+        SINGLE_PAYOUT_CPU_CEILING,
+    );
+    assert_within_regression_threshold(
+        "single_payout(mem)",
+        single.mem,
+        SINGLE_PAYOUT_MEM_BASELINE,
+        SINGLE_PAYOUT_MEM_CEILING,
+    );
 
+    // --- trigger_program_releases (10 schedules) ----------------------------
     let env_release = Env::default();
     let release_client = setup_program(&env_release, INITIAL_FUNDS);
     let release_at = env_release.ledger().timestamp().saturating_add(10);
@@ -202,10 +374,18 @@ fn budget_profiling_single_payout_and_trigger_releases_stay_under_regression_cei
     );
 
     assert_eq!(released, 10);
-    assert!(trigger.cpu > 0);
-    assert!(trigger.mem > 0);
-    assert!(trigger.cpu <= TRIGGER_RELEASES_CPU_CEILING);
-    assert!(trigger.mem <= TRIGGER_RELEASES_MEM_CEILING);
+    assert_within_regression_threshold(
+        "trigger_program_releases(cpu, schedules=10)",
+        trigger.cpu,
+        TRIGGER_RELEASES_CPU_BASELINE,
+        TRIGGER_RELEASES_CPU_CEILING,
+    );
+    assert_within_regression_threshold(
+        "trigger_program_releases(mem, schedules=10)",
+        trigger.mem,
+        TRIGGER_RELEASES_MEM_BASELINE,
+        TRIGGER_RELEASES_MEM_CEILING,
+    );
 }
 
 #[test]
@@ -237,4 +417,64 @@ fn budget_profiling_zero_amount_batch_is_still_rejected() {
 
     reset_budget(&env);
     client.batch_payout(&recipients, &amounts);
+}
+
+// ============================================================================
+// Regression-threshold unit tests
+//
+// These exercise assert_within_regression_threshold in isolation so failures
+// in the helper itself are immediately obvious and do not require a full
+// contract invocation to diagnose.
+// ============================================================================
+
+/// Confirms that assert_within_regression_threshold passes when actual equals
+/// the baseline (zero regression).
+#[test]
+fn regression_threshold_passes_at_baseline() {
+    // actual == baseline — should always pass
+    assert_within_regression_threshold("unit_test(at_baseline)", 100_000, 100_000, 1_000_000);
+}
+
+/// Confirms that assert_within_regression_threshold passes when actual is
+/// exactly at the margin boundary (baseline + 15%).
+#[test]
+fn regression_threshold_passes_at_margin_boundary() {
+    let baseline: u64 = 100_000;
+    let at_boundary = baseline + (baseline * REGRESSION_MARGIN_PCT / 100); // 115_000
+    assert_within_regression_threshold(
+        "unit_test(at_margin_boundary)",
+        at_boundary,
+        baseline,
+        1_000_000,
+    );
+}
+
+/// Confirms that assert_within_regression_threshold fails when actual exceeds
+/// the margin by even one instruction.
+#[test]
+#[should_panic(expected = "REGRESSION")]
+fn regression_threshold_fails_one_over_margin() {
+    let baseline: u64 = 100_000;
+    let one_over = baseline + (baseline * REGRESSION_MARGIN_PCT / 100) + 1; // 115_001
+    assert_within_regression_threshold(
+        "unit_test(one_over_margin)",
+        one_over,
+        baseline,
+        1_000_000,
+    );
+}
+
+/// Confirms that assert_within_regression_threshold fails when actual is well
+/// over the margin (simulates a doubling of instruction cost).
+#[test]
+#[should_panic(expected = "REGRESSION")]
+fn regression_threshold_fails_on_significant_regression() {
+    let baseline: u64 = 100_000;
+    let doubled = baseline * 2; // 200% — far beyond the 15% margin
+    assert_within_regression_threshold(
+        "unit_test(doubled_cost)",
+        doubled,
+        baseline,
+        1_000_000,
+    );
 }

@@ -858,6 +858,35 @@ impl GrainlifyContract {
         governance::GovernanceContract::is_upgrade_approved(env, wasm_hash)
     }
 
+    /// Returns `true` when the governance proposal identified by `proposal_id`
+    /// has been vetoed or cancelled and must not be executed.
+    ///
+    /// The current governance module (`governance.rs`) does not yet have a
+    /// native Vetoed/Cancelled [`ProposalStatus`] variant (tracked in issue
+    /// #236).  This stub satisfies the cross-contract interface declared in
+    /// `governance_integration.rs` (`GovernanceInterface::is_vetoed`) so that
+    /// escrow contracts can call it via `GovernanceClient` without a compile
+    /// error or a panic at the cross-contract dispatch layer.
+    ///
+    /// Until a real veto mechanism is implemented on-chain, this method always
+    /// returns `false` (no proposals are ever vetoed), which is the safe
+    /// default: it allows approved proposals to proceed rather than silently
+    /// blocking all upgrades.  A follow-up task should:
+    ///
+    /// 1. Add a `Vetoed` / `Cancelled` variant to `governance::ProposalStatus`.
+    /// 2. Add a permissioned `veto_proposal(admin, proposal_id)` entrypoint.
+    /// 3. Update this stub to query the real veto flag from persistent storage.
+    ///
+    /// # Arguments
+    /// * `_proposal_id` - The governance proposal ID to check.
+    ///
+    /// # Returns
+    /// `false` (stub — veto mechanism not yet implemented).
+    pub fn is_vetoed(_env: Env, _proposal_id: u32) -> bool {
+        // TODO(#236): query real veto storage once veto mechanism is implemented.
+        false
+    }
+
     /// Initializes the contract with a single admin address.
     ///
     /// # Arguments
@@ -1821,6 +1850,101 @@ mod test {
 
         env.ledger().with_mut(|li| li.timestamp = 3_600);
         client.upgrade(&other_hash);
+    }
+
+    #[test]
+    fn test_upgrade_rejects_hash_mismatch_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        assert_eq!(initial_version, VERSION);
+        assert_eq!(client.get_previous_version(), None);
+
+        let scheduled_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mismatch_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&scheduled_hash);
+
+        // Advance time past executable_at
+        env.ledger().with_mut(|li| li.timestamp = 3_600);
+
+        // Attempt upgrade with mismatched hash
+        let res = client.try_upgrade(&mismatch_hash);
+        assert!(res.is_err(), "upgrade() with mismatched WASM hash must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), Some(scheduled));
+    }
+
+    #[test]
+    fn test_upgrade_rejects_no_schedule_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        assert_eq!(initial_version, VERSION);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), None);
+
+        let wasm_hash = BytesN::from_array(&env, &[8u8; 32]);
+
+        // Attempt upgrade without any scheduled upgrade
+        let res = client.try_upgrade(&wasm_hash);
+        assert!(res.is_err(), "upgrade() without active schedule must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), None);
+    }
+
+    #[test]
+    fn test_upgrade_rejects_hash_mismatch_before_timelock_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        let scheduled_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mismatch_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&scheduled_hash);
+
+        // Advance timestamp before timelock has elapsed
+        env.ledger().with_mut(|li| li.timestamp = 3_500);
+
+        // Attempt upgrade with mismatched hash before timelock
+        let res = client.try_upgrade(&mismatch_hash);
+        assert!(res.is_err(), "upgrade() with mismatched hash before timelock must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), Some(scheduled));
     }
 
     #[test]

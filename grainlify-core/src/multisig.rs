@@ -912,6 +912,72 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "NonceMismatch")]
+    fn execute_with_stale_nonce_is_rejected() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        // 1. Execute one proposal successfully (consuming nonce N=0)
+        let action_one = ProposalAction::Upgrade(hash(&setup.env, 100));
+        let first = propose_and_approve(&setup, action_one.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, first, action_one, 0, || {});
+        });
+
+        // 2. Attempt to execute a second, distinct proposal passing the stale expected_nonce = 0
+        let action_two = ProposalAction::Upgrade(hash(&setup.env, 101));
+        let second = propose_and_approve(&setup, action_two.clone());
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, second, action_two, 0, || {});
+        });
+    }
+
+    #[test]
+    fn execute_increments_nonce_and_fresh_nonce_succeeds() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        // First proposal
+        let action_one = ProposalAction::Upgrade(hash(&setup.env, 102));
+        let first = propose_and_approve(&setup, action_one.clone());
+        
+        setup.env.as_contract(&setup.contract_id, || {
+            let initial_nonce = MultiSig::nonce(&setup.env);
+            MultiSig::execute(&setup.env, first, action_one, initial_nonce, || {});
+            
+            // Confirm nonce correctly reads back as N + 1 immediately after execution
+            assert_eq!(MultiSig::nonce(&setup.env), initial_nonce + 1);
+        });
+
+        // Second proposal executes successfully once the caller re-reads and passes the correct current nonce
+        let action_two = ProposalAction::Upgrade(hash(&setup.env, 103));
+        let second = propose_and_approve(&setup, action_two.clone());
+        
+        setup.env.as_contract(&setup.contract_id, || {
+            let fresh_nonce = MultiSig::nonce(&setup.env);
+            MultiSig::execute(&setup.env, second, action_two, fresh_nonce, || {});
+            
+            // Verify it was executed successfully
+            let proposal = MultiSig::get_proposal(&setup.env, second);
+            assert!(proposal.executed);
+        });
+    }
+
+    #[test]
     fn nonce_starts_at_zero_and_increments_per_execution() {
         let setup = setup();
 
