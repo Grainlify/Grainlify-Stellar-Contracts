@@ -75,10 +75,12 @@ impl<'a> AuthzSetup<'a> {
 fn assert_unauthorized<V: core::fmt::Debug, T: core::fmt::Debug, E: core::fmt::Debug>(
     res: Result<Result<V, T>, E>,
 ) {
+    extern crate alloc;
+    let err = res.expect_err("expected admin-only call to be rejected (auth abort)");
+    let err_str = alloc::format!("{:?}", err);
     assert!(
-        res.is_err(),
-        "expected admin-only call to be rejected (auth abort), got: {:?}",
-        res
+        err_str.contains("Auth") || err_str.contains("Context") || err_str.contains("Abort") || err_str.contains("Unauthorized"),
+        "expected auth abort error, got: {}", err_str
     );
 }
 
@@ -280,4 +282,28 @@ fn stored_admin_can_set_paused() {
         res.unwrap_or_else(|e| panic!("invoke error: {:?}", e)).is_ok(),
         "stored admin should be authorized"
     );
+}
+
+#[test]
+fn demoted_circuit_breaker_admin_cannot_reset_circuit() {
+    let s = AuthzSetup::new();
+    s.env.mock_all_auths();
+    
+    // Admin sets initial circuit breaker admin to `random`
+    s.client.set_circuit_breaker_admin(&s.random);
+    
+    // Check that `random` can reset the circuit while they are the admin
+    let res_success = s.client.try_reset_circuit(&s.random);
+    assert!(res_success.unwrap_or_else(|e| panic!("invoke error: {:?}", e)).is_ok());
+
+    // Main admin demotes `random` by setting a new circuit breaker admin
+    let new_admin = soroban_sdk::Address::generate(&s.env);
+    s.client.set_circuit_breaker_admin(&new_admin);
+    
+    // Clear auths so we test `random` unauthenticated (as a non-admin)
+    s.env.mock_auths(&[]);
+    
+    // The demoted admin `random` should now be rejected
+    let res_fail = s.client.try_reset_circuit(&s.random);
+    assert_unauthorized(res_fail);
 }
