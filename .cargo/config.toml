@@ -1,7 +1,5 @@
 [build]
-rustflags = ["-C", "codegen-units=1", "-C", "linker=rust-lld"]
 incremental = false
-target-dir = "C:\\Users\\HP\\cargo_target"
 
 [env]
 RUST_MIN_STACK = "8388608"
