@@ -2749,4 +2749,65 @@ mod test {
         }
         assert!(found_upg_exec);
     }
+
+    #[test]
+    fn test_upgrade_replay_guard_and_rescheduling() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 5_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&wasm_hash);
+
+        // Verify get_scheduled_upgrade returns the scheduled upgrade before execution
+        let scheduled_before = client.get_scheduled_upgrade().unwrap();
+        assert_eq!(scheduled_before.wasm_hash, wasm_hash);
+        assert_eq!(scheduled_before.scheduled_at, 5_000);
+        assert_eq!(scheduled_before.executable_at, 5_600);
+
+        env.ledger().with_mut(|li| li.timestamp = 5_600);
+
+        // Perform the upgrade
+        client.upgrade(&wasm_hash);
+
+        // 1. get_scheduled_upgrade is None immediately after a successful upgrade.
+        assert!(client.get_scheduled_upgrade().is_none());
+
+        // 2. A same-hash replay call fails after the schedule is consumed.
+        let result = client.try_upgrade(&wasm_hash);
+        assert!(result.is_err());
+
+        // 3. Re-scheduling after completion starts a correctly-fresh timelock.
+        env.ledger().with_mut(|li| li.timestamp = 6_000);
+        
+        // Let's schedule a new upgrade hash
+        let new_wasm_hash = env.deployer().upload_contract_wasm([1u8].as_slice());
+        let rescheduled = client.schedule_upgrade(&new_wasm_hash);
+
+        assert_eq!(rescheduled.wasm_hash, new_wasm_hash);
+        assert_eq!(rescheduled.scheduled_at, 6_000);
+        assert_eq!(rescheduled.executable_at, 6_600);
+        
+        let scheduled_after = client.get_scheduled_upgrade().unwrap();
+        assert_eq!(scheduled_after, rescheduled);
+
+        // Verify that executing before the new timelock fails
+        env.ledger().with_mut(|li| li.timestamp = 6_599);
+        assert!(client.try_upgrade(&new_wasm_hash).is_err());
+
+        // Verify it succeeds after the new timelock
+        env.ledger().with_mut(|li| li.timestamp = 6_600);
+        client.upgrade(&new_wasm_hash);
+        
+        // After this second upgrade, it is None again
+        assert!(client.get_scheduled_upgrade().is_none());
+    }
 }
+
