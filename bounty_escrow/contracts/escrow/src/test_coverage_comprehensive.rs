@@ -123,7 +123,10 @@ fn exercise_all_getters() {
     let _sc = s.client.count_by_status_full_scan(&EscrowStatus::Locked);
     let _vs = s.client.get_volume_by_status(&EscrowStatus::Locked);
     let _vf = s.client.volume_by_status_full_scan(&EscrowStatus::Locked);
-    let _hv = s.client.get_high_value_bounties(&500i128, &5u32);
+    let hv = s.client.get_high_value_bounties(&500i128, &5u32);
+    assert_eq!(hv.len(), 2);
+    assert_eq!(hv.get(0).unwrap(), 1u64);
+    assert_eq!(hv.get(1).unwrap(), 2u64);
     let _ds = s.client.get_depositor_stats(&s.depositor);
     let _ei = s.client.get_escrow_info(&1u64);
     let _rh = s.client.get_refund_history(&1u64);
