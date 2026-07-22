@@ -79,7 +79,7 @@ Without one of these controls, a voter may temporarily acquire tokens, vote, and
 - **Immutable Logic:** Proposals cannot be modified once created.
 - **Action-Bound Multisig Execution:** Multisig upgrade proposals store the exact `ProposalAction::Upgrade(wasm_hash)` that signers approve. The `execute_upgrade` entrypoint replays that stored action in one call and marks the proposal executed only after the WASM update call is made.
 - **Signer/Threshold Snapshots:** Each multisig proposal snapshots the signer set and threshold at creation time. Later configuration changes cannot retroactively make a pending proposal executable or authorize a signer that was not part of the original proposal.
-- **Replay Protection:** Executed proposals reject further approvals and cannot be executed a second time.
+- **Replay Protection:** Executed proposals reject further approvals and cannot be executed a second time. In addition, execution is gated by a contract-wide monotonic **execution nonce**: `execute_upgrade` requires the caller to supply the current nonce, which is consumed and incremented on success. A previously used `(approvals, nonce)` pair therefore cannot be replayed — even against a freshly re-proposed, identically-approved action — because the nonce has already advanced.
 
 ## Multisig Upgrade Execution
 
@@ -87,9 +87,9 @@ The multisig upgrade path is intentionally payload-bound:
 
 1. `propose_upgrade(proposer, wasm_hash)` creates a multisig proposal whose action is `Upgrade(wasm_hash)`.
 2. `approve_upgrade(proposal_id, signer)` records approvals against the proposal's original signer snapshot.
-3. `execute_upgrade(proposal_id)` verifies the proposal is not executed, confirms the stored action is the expected upgrade payload, checks the proposal snapshot threshold, performs `update_current_contract_wasm(wasm_hash)`, and then stores `executed = true`.
+3. `execute_upgrade(proposal_id, expected_nonce)` verifies the proposal is not executed, confirms the stored action is the expected upgrade payload, checks the proposal snapshot threshold, verifies `expected_nonce` equals the current execution nonce, performs `update_current_contract_wasm(wasm_hash)`, then stores `executed = true` (recording the consumed nonce) and increments the execution nonce.
 
-This removes the previous decoupling between approval and effect. A proposal can no longer be marked executed without the approved action being run, and callers cannot execute a different WASM hash than the one signers approved.
+This removes the previous decoupling between approval and effect. A proposal can no longer be marked executed without the approved action being run, and callers cannot execute a different WASM hash than the one signers approved. Callers read the expected nonce with `multisig_nonce()` before submitting; because the nonce is consumed on execution, a leaked set of approvals cannot be replayed to repeat a privileged upgrade.
 
 ## Single-Admin Upgrade Timelock
 
@@ -214,6 +214,63 @@ Emitted when a migration run finishes (emitted both on success and failure to pr
   - `migration_hash: BytesN<32>` — Verification hash for the migration payload.
   - `success: bool` — Whether the migration completed successfully.
   - `error_message: Option<String>` — Error description if the migration failed.
+
+## Cross-Contract Consumption by Escrow Contracts
+
+Both `bounty_escrow` and `program-escrow` integrate with `grainlify-core`
+**exclusively through the governance side** of `GrainlifyContract`. Neither
+escrow contract calls any multisig entrypoint.
+
+Each escrow crate ships a `governance_integration.rs` module that declares a
+cross-contract interface using Soroban's `#[contractclient]` macro:
+
+```rust
+#[contractclient(name = "GovernanceClient")]
+trait GovernanceInterface {
+    fn get_ver(env: Env) -> u32;
+    fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool;
+    // bounty_escrow also calls:
+    fn get_version_numeric_encoded(env: Env) -> u32;
+}
+```
+
+### Methods called and their mapping
+
+| Method | `GrainlifyContract` entrypoint | Purpose |
+|---|---|---|
+| `get_ver()` | `get_ver()` → `get_version()` | Version liveness check. Ensures the governance contract is reachable and meets a configurable `min_governance_version` before an upgrade gate is evaluated. |
+| `is_upg_ok(wasm_hash)` | `is_upg_ok(wasm_hash)` → `GovernanceContract::is_upgrade_approved` | Returns `true` only when an `Executed`, post-delay governance proposal for `wasm_hash` exists. Escrow contracts call this to gate any self-upgrade. |
+| `get_version_numeric_encoded()` | `get_version_numeric_encoded()` | Used by `bounty_escrow` to enforce a minimum semantic-version gate (`major * 10_000 + minor * 100 + patch`). Not called by `program-escrow`. |
+
+### Integration call path
+
+```text
+bounty_escrow / program-escrow
+  └── governance_integration::check_upgrade_approval(env, wasm_hash)
+          │
+          │  cross-contract call via GovernanceClient
+          ▼
+      GrainlifyContract::is_upg_ok(wasm_hash)
+          │
+          ▼
+      GovernanceContract::is_upgrade_approved(wasm_hash)
+          └── scans proposals for Executed status + matching hash + elapsed delay
+```
+
+### Architecture boundary
+
+The escrow contracts do **not** need to know whether `grainlify-core` was
+configured with governance, multisig, or single-admin upgrade paths. They only
+ask "has governance approved this hash?" via `is_upg_ok`. The multisig and
+single-admin paths are entirely internal to `grainlify-core`.
+
+This boundary means:
+
+- Escrow contracts are unaffected by changes to multisig signer config.
+- `grainlify-core` can be upgraded via any path without breaking escrow
+  governance checks, as long as `is_upg_ok` and `get_ver` remain available.
+- A misconfigured escrow that calls multisig entrypoints directly would bypass
+  the democratic governance record and should be treated as a security defect.
 
 ## TODO / Future Enhancements
 

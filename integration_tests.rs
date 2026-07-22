@@ -11,13 +11,13 @@
 //! - Performance tests for batch operations
 
 use soroban_sdk::{
-    testutils::{Address as _, Events},
-    token, vec, Address, BytesN, Env, String,
+    testutils::{Address as _, Ledger},
+    token, Address, BytesN, Env, String, symbol_short,
 };
 
-// Import contract types - adjust paths based on actual structure
-// These would need to be adjusted based on actual contract module structure
-use soroban_sdk::contract;
+use grainlify_core::{GrainlifyContract, GrainlifyContractClient, governance};
+use bounty_escrow::{BountyEscrowContract, BountyEscrowContractClient};
+use program_escrow::{ProgramEscrowContract, ProgramEscrowContractClient};
 
 // Helper to create token contract
 fn create_token_contract<'a>(
@@ -31,267 +31,157 @@ fn create_token_contract<'a>(
     (token, token_client, token_admin_client)
 }
 
-// ============================================================================
-// Integration Tests: Escrow + Program Escrow Interactions
-// ============================================================================
-
 #[test]
-fn test_cross_contract_workflow_lock_release_payout() {
+fn test_end_to_end_cross_contract_governance_trigger() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1000);
 
-    // Setup: Create token
+    // 1. Set up Token
     let token_admin = Address::generate(&env);
     let (token, token_client, token_admin_client) = create_token_contract(&env, &token_admin);
 
-    // Setup: Create addresses
-    let depositor = Address::generate(&env);
-    let contributor = Address::generate(&env);
     let admin = Address::generate(&env);
     let backend = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let voter = Address::generate(&env);
+    let program_id = String::from_str(&env, "program-1");
 
-    // Mint tokens to depositor
-    let amount = 10_000_0000000i128; // 10,000 tokens
+    let amount = 10_000_000_000_000i128;
     token_admin_client.mint(&depositor, &amount);
+    token_admin_client.mint(&voter, &amount);
 
-    // Test: Lock funds in escrow
-    // Note: This would require actual contract registration
-    // For now, this is a template showing the workflow
+    // 2. Deploy & Init Grainlify Core (Governance)
+    let gov_id = env.register_contract(None, GrainlifyContract);
+    let gov_client = GrainlifyContractClient::new(&env, &gov_id);
+    gov_client.init_admin(&admin);
+
+    let voting_period = 100;
+    let execution_delay = 50;
+    let gov_config = governance::GovernanceConfig {
+        voting_period,
+        execution_delay,
+        quorum_percentage: 5000, // 50%
+        approval_threshold: 5000, // 50%
+        min_proposal_stake: 10,
+        voting_scheme: governance::VotingScheme::TokenWeighted,
+        governance_token: token.clone(),
+        token_total_voting_power: amount,
+        one_person_total_voters: 0,
+        snapshot_ledger: None,
+    };
+    gov_client.init_governance(&admin, &gov_config);
+
+    // 3. Deploy & Init Bounty Escrow
+    let bounty_escrow_id = env.register_contract(None, BountyEscrowContract);
+    let bounty_client = BountyEscrowContractClient::new(&env, &bounty_escrow_id);
+    bounty_client.init(&admin, &token);
+    bounty_client.set_governance_contract(&gov_id);
     
-    // 1. Lock funds in bounty escrow
-    // let escrow_client = BountyEscrowContractClient::new(&env, &escrow_contract_id);
-    // escrow_client.init(&admin, &token);
-    // escrow_client.lock_funds(&depositor, &1, &amount, &deadline);
+    // We require governance version 2 to unlock certain escrow admin actions
+    bounty_client.set_min_governance_version(&2);
 
-    // 2. Release funds to contributor
-    // escrow_client.release_funds(&1, &contributor);
-
-    // 3. Verify contributor received funds
-    // let balance = token_client.balance(&contributor);
-    // assert_eq!(balance, amount);
-
-    // This test demonstrates the workflow structure
-    // Actual implementation would require contract client registration
-    assert!(true); // Placeholder assertion
-}
-
-#[test]
-fn test_multi_contract_batch_operations() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test batch operations across multiple contracts
-    // This would test:
-    // 1. Batch lock in escrow contract
-    // 2. Batch payout in program-escrow contract
-    // 3. Verify all operations completed atomically
-
-    assert!(true); // Placeholder
-}
-
-#[test]
-fn test_error_propagation_across_contracts() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test that errors in one contract properly propagate
-    // when called from another contract
+    // 4. Deploy & Init Program Escrow
+    let program_escrow_id = env.register_contract(None, ProgramEscrowContract);
+    let program_client = ProgramEscrowContractClient::new(&env, &program_escrow_id);
+    program_client.setadmin(&admin);
+    program_client.initialize_program(&program_id, &backend, &token);
+    program_client.set_governance_contract(&gov_id);
     
-    // Example: If escrow contract fails, program-escrow should handle it
-    assert!(true); // Placeholder
-}
+    // Program escrow also requires version 2
+    program_client.set_min_governance_version(&2);
 
-// ============================================================================
-// Integration Tests: Upgrade Scenarios with State Migration
-// ============================================================================
+    // =========================================================================
+    // SCENARIO 1: Dependent actions fail before governance upgrade
+    // =========================================================================
 
-#[test]
-fn test_upgrade_with_state_migration() {
-    let env = Env::default();
-    env.mock_all_auths();
+    // Action A: Bounty Escrow Interaction
+    let bounty_id = 1u64;
+    let deadline = 5000u64;
+    bounty_client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    
+    // Release should fail (version too low)
+    let res_bounty = bounty_client.try_release_funds(&bounty_id, &contributor);
+    assert!(res_bounty.is_err());
 
-    // This test would require the grainlify-core contract
-    // Test the full upgrade + migration workflow:
-    // 1. Initialize contract at version 1
-    // 2. Create some state
-    // 3. Upgrade WASM
-    // 4. Run migration
-    // 5. Verify state migrated correctly
-    // 6. Verify version updated
+    // Action B: Program Escrow Interaction
+    // Update rate limit config should fail (version too low)
+    let res_program = program_client.try_update_rate_limit_config(&3600, &10, &60);
+    assert!(res_program.is_err());
 
-    assert!(true); // Placeholder
-}
 
-#[test]
-fn test_migration_idempotency_after_upgrade() {
-    let env = Env::default();
-    env.mock_all_auths();
+    // =========================================================================
+    // SCENARIO 2: A governance proposal fails to pass (dependent action should never fire)
+    // =========================================================================
 
-    // Test that migration can be called multiple times safely
-    // after an upgrade without causing issues
+    let bad_wasm_hash = BytesN::from_array(&env, &[1; 32]);
+    let proposal_id_bad = gov_client.create_proposal(
+        &voter,
+        &bad_wasm_hash,
+        &symbol_short!("bad_upg"),
+    );
 
-    assert!(true); // Placeholder
-}
+    // Fast-forward past the voting period without casting enough votes
+    env.ledger().with_mut(|li| li.timestamp += voting_period + 1);
+    
+    // Finalize the failed proposal
+    let status_bad = gov_client.finalize_proposal(&proposal_id_bad);
+    assert_eq!(status_bad, governance::ProposalStatus::Rejected);
 
-#[test]
-fn test_rollback_scenario() {
-    let env = Env::default();
-    env.mock_all_auths();
+    // Dependent actions still fail since governance didn't pass / upgrade didn't happen
+    let res_bounty_bad = bounty_client.try_release_funds(&bounty_id, &contributor);
+    assert!(res_bounty_bad.is_err());
 
-    // Test rollback to previous version:
-    // 1. Upgrade to v2
-    // 2. Migrate state
-    // 3. Rollback to v1 (if implemented)
-    // 4. Verify state compatibility
 
-    assert!(true); // Placeholder
-}
+    // =========================================================================
+    // SCENARIO 3: Governance proposal passes and successfully triggers the dependent escrow action
+    // =========================================================================
 
-// ============================================================================
-// Integration Tests: Event Emission and Indexing
-// ============================================================================
+    // In a real flow, a successful governance proposal approves an upgrade hash.
+    // The admin then applies that upgrade (or updates config). Here we update the 
+    // governance contract's version to 2 to unlock the escrows.
+    
+    // Create a good proposal
+    let good_wasm_hash = BytesN::from_array(&env, &[2; 32]);
+    let proposal_id_good = gov_client.create_proposal(
+        &voter,
+        &good_wasm_hash,
+        &symbol_short!("good_upg"),
+    );
 
-#[test]
-fn test_event_emission_across_contracts() {
-    let env = Env::default();
-    env.mock_all_auths();
+    // Voter casts vote for the proposal
+    gov_client.cast_vote(&voter, &proposal_id_good, &governance::VoteType::For);
 
-    // Test that events are properly emitted from all contracts
-    // and can be indexed together
+    // Fast-forward past voting period
+    env.ledger().with_mut(|li| li.timestamp += voting_period + 1);
 
-    // 1. Perform operations across contracts
-    // 2. Collect all events
-    // 3. Verify event structure and data
-    // 4. Verify events are properly indexed
+    // Finalize the successful proposal
+    let status_good = gov_client.finalize_proposal(&proposal_id_good);
+    assert_eq!(status_good, governance::ProposalStatus::Approved);
 
-    assert!(true); // Placeholder
-}
+    // Fast-forward past execution delay
+    env.ledger().with_mut(|li| li.timestamp += execution_delay + 1);
 
-#[test]
-fn test_migration_event_emission() {
-    let env = Env::default();
-    env.mock_all_auths();
+    // Execute the proposal
+    gov_client.execute_proposal(&proposal_id_good);
 
-    // Test that migration events are properly emitted
-    // and contain correct data
+    // Verify upgrade approval
+    assert!(gov_client.is_upg_ok(&good_wasm_hash));
+    
+    // The governance proposal passed! The admin now applies the upgrade 
+    // by bumping the governance version, triggering dependent actions to succeed.
+    gov_client.set_version(&2);
+    assert_eq!(gov_client.get_version(), 2);
 
-    assert!(true); // Placeholder
-}
-
-// ============================================================================
-// Integration Tests: Performance and Gas Optimization
-// ============================================================================
-
-#[test]
-fn test_batch_operations_gas_efficiency() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test that batch operations are more gas-efficient
-    // than individual operations
-
-    // Compare gas costs:
-    // 1. Individual lock operations
-    // 2. Batch lock operation
-    // 3. Verify batch is more efficient
-
-    assert!(true); // Placeholder
-}
-
-#[test]
-fn test_large_batch_operations() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test batch operations with maximum batch size
-    // Verify all operations complete successfully
-
-    assert!(true); // Placeholder
-}
-
-// ============================================================================
-// Integration Tests: End-to-End Workflows
-// ============================================================================
-
-#[test]
-fn test_complete_bounty_workflow() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Complete workflow:
-    // 1. Initialize contracts
-    // 2. Lock funds for bounty
-    // 3. Contributor completes work
-    // 4. Admin releases funds
-    // 5. Verify funds transferred
-    // 6. Verify events emitted
-
-    assert!(true); // Placeholder
-}
-
-#[test]
-fn test_complete_program_workflow() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Complete program escrow workflow:
-    // 1. Initialize program
-    // 2. Lock prize pool funds
-    // 3. Hackathon completes
-    // 4. Batch payout to winners
-    // 5. Verify all payouts completed
-    // 6. Verify remaining balance
-
-    assert!(true); // Placeholder
-}
-
-#[test]
-fn test_mixed_workflow_escrow_and_program() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test workflow that uses both escrow types:
-    // 1. Individual bounty escrow for specific tasks
-    // 2. Program escrow for overall prize pool
-    // 3. Verify both work independently
-    // 4. Verify no interference between contracts
-
-    assert!(true); // Placeholder
-}
-
-// ============================================================================
-// Integration Tests: Error Handling
-// ============================================================================
-
-#[test]
-fn test_error_handling_in_cross_contract_calls() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test error handling when one contract calls another
-    // and the called contract fails
-
-    assert!(true); // Placeholder
-}
-
-#[test]
-fn test_insufficient_funds_error_propagation() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test that insufficient funds errors are properly
-    // handled and propagated across contract boundaries
-
-    assert!(true); // Placeholder
-}
-
-#[test]
-fn test_unauthorized_access_error_handling() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    // Test that unauthorized access attempts are properly
-    // rejected across all contracts
-
-    assert!(true); // Placeholder
+    // Now dependent actions across both escrow contracts should succeed
+    
+    // Bounty escrow release
+    bounty_client.release_funds(&bounty_id, &contributor);
+    assert_eq!(token_client.balance(&contributor), amount);
+    
+    // Program escrow config update
+    program_client.update_rate_limit_config(&3600, &10, &60);
+    let config = program_client.get_rate_limit_config();
+    assert_eq!(config.window_size, 3600);
 }

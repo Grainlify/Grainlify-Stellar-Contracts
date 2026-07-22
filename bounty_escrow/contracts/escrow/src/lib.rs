@@ -6,6 +6,11 @@ mod error_recovery;
 
 #[cfg(test)]
 mod test_rbac;
+mod test_admin_authz;
+mod test_coverage_boost;
+mod test_coverage_boost_small;
+mod test_coverage_comprehensive;
+mod test_serialization;
 
 use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
@@ -986,6 +991,24 @@ impl BountyEscrowContract {
         false
     }
 
+    /// Shared internal logic to execute token transfers and enforce pause state
+    /// at the deepest reachable point, protecting against indirect call bypasses.
+    fn execute_token_transfer(
+        env: &Env,
+        from: &Address,
+        to: &Address,
+        amount: i128,
+        operation: Symbol,
+    ) -> Result<(), Error> {
+        if Self::check_paused(env, operation) {
+            return Err(Error::FundsPaused);
+        }
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let client = token::Client::new(env, &token_addr);
+        client.transfer(from, to, &amount);
+        Ok(())
+    }
+
     /// Get current fee configuration (view function)
     pub fn get_fee_config(env: Env) -> FeeConfig {
         Self::get_fee_config_internal(&env)
@@ -1190,9 +1213,6 @@ impl BountyEscrowContract {
         // Apply rate limiting
         anti_abuse::check_rate_limit(&env, depositor.clone());
 
-        if Self::check_paused(&env, symbol_short!("lock")) {
-            return Err(Error::FundsPaused);
-        }
 
         // Check circuit breaker before proceeding
         if let Err(_) = check_and_allow(&env) {
@@ -1229,11 +1249,14 @@ impl BountyEscrowContract {
             }
         }
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&env, &token_addr);
-
-        // Transfer funds from depositor to contract
-        client.transfer(&depositor, &env.current_contract_address(), &amount);
+        // Execute token transfer using shared internal logic
+        Self::execute_token_transfer(
+            &env,
+            &depositor,
+            &env.current_contract_address(),
+            amount,
+            symbol_short!("lock"),
+        )?;
 
         let escrow = Escrow {
             depositor: depositor.clone(),
@@ -1326,16 +1349,17 @@ impl BountyEscrowContract {
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before this value transfer can proceed.
     pub fn release_funds(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
-        if Self::check_paused(&env, symbol_short!("release")) {
-            return Err(Error::FundsPaused);
-        }
-
-        // Check circuit breaker before proceeding
-        if let Err(_) = check_and_allow(&env) {
-            return Err(Error::CircuitBreakerOpen);
-        }
-
         Self::check_governance_requirements(&env)?;
+
+        // --- All validation BEFORE the reentrancy guard so early returns never
+        //     leak the guard flag. ---
+
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
 
         // Dispute protection: if a pending claim exists for this bounty,
         // the dispute must be resolved (claim or cancel) before any direct release.
@@ -1346,21 +1370,6 @@ impl BountyEscrowContract {
         {
             return Err(Error::RefundNotApproved);
         }
-        let _start = env.ledger().timestamp();
-
-        // Ensure contract is initialized
-        if env.storage().instance().has(&DataKey::ReentrancyGuard) {
-            panic!("Reentrancy detected");
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::ReentrancyGuard, &true);
-        if !env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::NotInitialized);
-        }
-
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
 
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
@@ -1371,22 +1380,25 @@ impl BountyEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(bounty_id))
             .unwrap();
-        Self::bump_escrow_ttl(&env, bounty_id);
 
         if escrow.status != EscrowStatus::Locked {
             return Err(Error::FundsNotLocked);
         }
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&env, &token_addr);
+        let _start = env.ledger().timestamp();
 
-        // Transfer funds to contributor
-        client.transfer(
-            &env.current_contract_address(),
-            &contributor,
-            &escrow.amount,
-        );
+        // --- Reentrancy guard: set after all validation so it cannot leak. ---
+        if env.storage().instance().has(&DataKey::ReentrancyGuard) {
+            panic!("Reentrancy detected");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ReentrancyGuard, &true);
 
+        // --- Effects-before-interactions: update all state BEFORE the external
+        //     token transfer so a reentrant call sees the already-released status
+        //     and cannot double-spend. ---
+        let release_amount = escrow.amount;
         escrow.status = EscrowStatus::Released;
         // Zero remaining_amount to maintain SAC ≡ Σ remaining_amount invariant.
         escrow.remaining_amount = 0;
@@ -1395,13 +1407,22 @@ impl BountyEscrowContract {
             .set(&DataKey::Escrow(bounty_id), &escrow);
         Self::bump_escrow_ttl(&env, bounty_id);
 
+        // External call: transfer funds to contributor (state already committed above).
+        Self::execute_token_transfer(
+            &env,
+            &env.current_contract_address(),
+            &contributor,
+            release_amount,
+            symbol_short!("release"),
+        )?;
+
         let timestamp = env.ledger().timestamp();
 
         // Update analytics
-        update_analytics_on_release(&env, bounty_id, escrow.amount, timestamp);
+        update_analytics_on_release(&env, bounty_id, release_amount, timestamp);
 
         // Update incremental aggregate counters
-        Self::transition_locked_to_released(&env, escrow.amount);
+        Self::transition_locked_to_released(&env, release_amount);
 
         // Emit state transition event
         emit_bounty_state_transitioned(
@@ -1411,7 +1432,7 @@ impl BountyEscrowContract {
                 bounty_id,
                 previous_state: symbol_short!("locked"),
                 new_state: symbol_short!("released"),
-                amount: escrow.amount,
+                amount: release_amount,
                 actor: admin.clone(),
                 timestamp,
             },
@@ -1424,7 +1445,7 @@ impl BountyEscrowContract {
                 version: analytics::ANALYTICS_VERSION_V1,
                 bounty_id,
                 activity_type: symbol_short!("released"),
-                amount: escrow.amount,
+                amount: release_amount,
                 timestamp,
             },
         );
@@ -1434,7 +1455,7 @@ impl BountyEscrowContract {
             FundsReleased {
                 version: EVENT_VERSION_V2,
                 bounty_id,
-                amount: escrow.amount,
+                amount: release_amount,
                 recipient: contributor.clone(),
                 timestamp,
             },
@@ -1464,9 +1485,7 @@ impl BountyEscrowContract {
     /// Admin calls this instead of release_funds when claim period is active.
     /// Beneficiary must call claim() within the window to receive funds.
     pub fn authorize_claim(env: Env, bounty_id: u64, recipient: Address) -> Result<(), Error> {
-        if Self::check_paused(&env, symbol_short!("release")) {
-            return Err(Error::FundsPaused);
-        }
+
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
@@ -1506,10 +1525,16 @@ impl BountyEscrowContract {
             .instance()
             .get(&DataKey::ClaimWindow)
             .unwrap_or(0);
+        // Use remaining_amount, not the original amount — a prior
+        // partial_release can have already paid some of this escrow out, and
+        // claim() blindly transfers whatever this record says. Using the
+        // stale original amount would let a claim over-pay from the shared
+        // contract balance, silently draining funds that belong to other
+        // escrows.
         let claim = ClaimRecord {
             bounty_id,
             recipient: recipient.clone(),
-            amount: escrow.amount,
+            amount: escrow.remaining_amount,
             expires_at: now.saturating_add(claim_window),
             claimed: false,
         };
@@ -1524,7 +1549,7 @@ impl BountyEscrowContract {
                 version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient,
-                amount: escrow.amount,
+                amount: escrow.remaining_amount,
                 expires_at: claim.expires_at,
             },
         );
@@ -1533,14 +1558,9 @@ impl BountyEscrowContract {
 
     /// Beneficiary calls this to claim their authorized funds within the window.
     pub fn claim(env: Env, bounty_id: u64) -> Result<(), Error> {
-        if Self::check_paused(&env, symbol_short!("release")) {
-            return Err(Error::FundsPaused);
-        }
+        // --- All validation BEFORE the reentrancy guard so early returns never
+        //     leak the guard flag. ---
 
-        // Check circuit breaker before proceeding
-        if let Err(_) = check_and_allow(&env) {
-            return Err(Error::CircuitBreakerOpen);
-        }
         if !env
             .storage()
             .persistent()
@@ -1564,6 +1584,7 @@ impl BountyEscrowContract {
             return Err(Error::FundsNotLocked);
         }
 
+        // --- Reentrancy guard: set after all validation so it cannot leak. ---
         // Defense in depth: token transfer is an external call. Block nested
         // entry into claim/release paths before interacting with the token.
         if env.storage().instance().has(&DataKey::ReentrancyGuard) {
@@ -1573,13 +1594,11 @@ impl BountyEscrowContract {
             .instance()
             .set(&DataKey::ReentrancyGuard, &true);
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&env, &token_addr);
-        client.transfer(
-            &env.current_contract_address(),
-            &claim.recipient,
-            &claim.amount,
-        );
+        // --- Effects-before-interactions: update all state BEFORE the external
+        //     token transfer. A reentrant call sees claim.claimed==true and
+        //     escrow.status==Released so it cannot double-spend. ---
+
+        let claim_amount = claim.amount;
 
         // Update escrow status
         let mut escrow: Escrow = env
@@ -1596,12 +1615,21 @@ impl BountyEscrowContract {
         Self::bump_escrow_ttl(&env, bounty_id);
 
         // Update incremental aggregate counters
-        Self::transition_locked_to_released(&env, claim.amount);
+        Self::transition_locked_to_released(&env, claim_amount);
 
         claim.claimed = true;
         env.storage()
             .persistent()
             .set(&DataKey::PendingClaim(bounty_id), &claim);
+
+        // External call: execute token transfer using shared internal logic
+        Self::execute_token_transfer(
+            &env,
+            &env.current_contract_address(),
+            &claim.recipient,
+            claim_amount,
+            symbol_short!("release"),
+        )?;
 
         emit_claim_executed(
             &env,
@@ -1609,7 +1637,7 @@ impl BountyEscrowContract {
                 version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient: claim.recipient.clone(),
-                amount: claim.amount,
+                amount: claim_amount,
                 claimed_at: now,
             },
         );
@@ -1743,9 +1771,7 @@ impl BountyEscrowContract {
         contributor: Address,
         payout_amount: i128,
     ) -> Result<(), Error> {
-        if Self::check_paused(&env, symbol_short!("release")) {
-            return Err(Error::FundsPaused);
-        }
+
 
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
@@ -1760,6 +1786,13 @@ impl BountyEscrowContract {
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        // Pause enforcement takes priority over other business-logic guards
+        // below (e.g. dispute protection) — a paused release category must
+        // block the call regardless of the escrow's other state.
+        if Self::check_paused(&env, symbol_short!("release")) {
+            return Err(Error::FundsPaused);
+        }
 
         // Dispute protection: block partial releases while a dispute (pending claim) is open.
         if env
@@ -1803,15 +1836,16 @@ impl BountyEscrowContract {
             .instance()
             .set(&DataKey::ReentrancyGuard, &true);
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&env, &token_addr);
-
-        // Transfer only the requested partial amount to the contributor
-        client.transfer(
+        // Transfer only the requested partial amount to the contributor. Routed
+        // through execute_token_transfer so this respects release_paused /
+        // global_paused like every other outbound transfer.
+        Self::execute_token_transfer(
+            &env,
             &env.current_contract_address(),
             &contributor,
-            &payout_amount,
-        );
+            payout_amount,
+            symbol_short!("release"),
+        )?;
 
         // Decrement remaining; this is always an exact integer subtraction — no rounding
         escrow.remaining_amount -= payout_amount;
@@ -1897,9 +1931,7 @@ impl BountyEscrowContract {
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before funds can be refunded.
     pub fn refund(env: Env, bounty_id: u64) -> Result<(), Error> {
-        if Self::check_paused(&env, symbol_short!("refund")) {
-            return Err(Error::FundsPaused);
-        }
+
 
         // Check circuit breaker before proceeding
         if let Err(_) = check_and_allow(&env) {
@@ -1940,11 +1972,14 @@ impl BountyEscrowContract {
             .instance()
             .set(&DataKey::ReentrancyGuard, &true);
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&env, &token_addr);
-
         // Transfer the calculated refund amount to the designated recipient
-        client.transfer(&env.current_contract_address(), &refund_to, &refund_amount);
+        Self::execute_token_transfer(
+            &env,
+            &env.current_contract_address(),
+            &refund_to,
+            refund_amount,
+            symbol_short!("refund"),
+        )?;
 
         // Track original status to determine counter update strategy
         let original_status = escrow.status.clone();
@@ -2066,9 +2101,7 @@ impl BountyEscrowContract {
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before any expired bounty is swept.
     pub fn sweep_expired_refunds(env: Env, bounty_ids: Vec<u64>) -> Result<u32, Error> {
-        if Self::check_paused(&env, symbol_short!("refund")) {
-            return Err(Error::FundsPaused);
-        }
+
 
         if let Err(_) = check_and_allow(&env) {
             return Err(Error::CircuitBreakerOpen);
@@ -2091,6 +2124,13 @@ impl BountyEscrowContract {
             if escrow.remaining_amount <= 0 {
                 return Err(Error::InvalidAmount);
             }
+        }
+
+        // Every transfer below is a refund, so one check up front covers the
+        // whole batch — same gate the single-item refund() goes through via
+        // execute_token_transfer.
+        if Self::check_paused(&env, symbol_short!("refund")) {
+            return Err(Error::FundsPaused);
         }
 
         if env.storage().instance().has(&DataKey::ReentrancyGuard) {
@@ -2811,9 +2851,7 @@ impl BountyEscrowContract {
     /// # Note
     /// This operation is atomic - if any item fails, the entire transaction reverts.
     pub fn batch_lock_funds(env: Env, items: Vec<LockFundsItem>) -> Result<u32, Error> {
-        if Self::check_paused(&env, symbol_short!("lock")) {
-            return Err(Error::FundsPaused);
-        }
+
 
         // Check circuit breaker before proceeding
         if let Err(_) = check_and_allow(&env) {
@@ -2830,6 +2868,13 @@ impl BountyEscrowContract {
 
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
+        }
+
+        // Every transfer below is a lock, so one check up front covers the
+        // whole batch — same gate the single-item lock_funds() goes through
+        // via execute_token_transfer.
+        if Self::check_paused(&env, symbol_short!("lock")) {
+            return Err(Error::FundsPaused);
         }
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
@@ -2979,9 +3024,7 @@ impl BountyEscrowContract {
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before any item is released.
     pub fn batch_release_funds(env: Env, items: Vec<ReleaseFundsItem>) -> Result<u32, Error> {
-        if Self::check_paused(&env, symbol_short!("release")) {
-            return Err(Error::FundsPaused);
-        }
+
 
         // Check circuit breaker before proceeding
         if let Err(_) = check_and_allow(&env) {
@@ -3005,6 +3048,13 @@ impl BountyEscrowContract {
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        // Every transfer below is a release, so one check up front covers the
+        // whole batch — same gate the single-item release_funds() goes
+        // through via execute_token_transfer.
+        if Self::check_paused(&env, symbol_short!("release")) {
+            return Err(Error::FundsPaused);
+        }
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
@@ -3440,7 +3490,15 @@ impl BountyEscrowContract {
         let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         current_admin.require_auth();
 
-        set_circuit_admin(&env, admin, Some(current_admin));
+        // set_circuit_admin's own caller check exists for a self-service
+        // handoff between successive circuit-breaker admins; it was never
+        // meant to additionally gate this entrypoint, which the contract
+        // admin's require_auth() above already fully authorizes. Passing
+        // the admin's own address here (rather than the current circuit
+        // breaker admin) made every reassignment after the first one panic,
+        // since it could never equal whichever address was already set.
+        let current_circuit_admin = get_circuit_admin(&env);
+        set_circuit_admin(&env, admin, current_circuit_admin);
         Ok(())
     }
 
@@ -3542,3 +3600,5 @@ mod test_reentrancy;
 
 #[cfg(test)]
 mod test_balance_invariant;
+#[cfg(test)]
+mod test_upgrade_scenarios;

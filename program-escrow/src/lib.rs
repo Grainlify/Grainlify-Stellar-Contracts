@@ -149,6 +149,7 @@ mod reentrancy_guard;
 
 #[cfg(test)]
 mod error_recovery_tests;
+#[cfg(test)]
 mod reentrancy_tests;
 
 #[cfg(test)]
@@ -172,6 +173,7 @@ mod test_lifecycle;
 #[cfg(test)]
 mod budget_profiling_tests;
 
+#[cfg(test)]
 mod test_analytics_events;
 #[cfg(test)]
 mod test_governance_integration;
@@ -787,7 +789,7 @@ impl ProgramEscrowContract {
         recipient: &Address,
         amount: i128,
     ) {
-        let threshold = program_data.total_funds / 10; // 10% of total funds
+        let threshold = monitoring::get_large_payout_threshold_amount(env, program_data.total_funds);
         if amount >= threshold {
             env.events().publish(
                 (LARGE_PAYOUT,),
@@ -2850,6 +2852,25 @@ impl ProgramEscrowContract {
     pub fn get_performance_stats(env: Env, function_name: Symbol) -> monitoring::PerformanceStats {
         monitoring::get_performance_stats(&env, function_name)
     }
+
+    /// Get the large-payout alert threshold in basis points (default 1000 = 10%).
+    /// A payout is flagged as "large" when it equals or exceeds
+    /// `total_funds * threshold_bps / 10_000`.
+    pub fn get_large_payout_threshold(env: Env) -> u32 {
+        monitoring::get_large_payout_threshold_bps(&env)
+    }
+
+    /// Update the large-payout alert threshold (admin only).
+    /// `threshold_bps` is expressed in basis points (e.g. 1000 = 10%, 2500 = 25%).
+    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        monitoring::set_large_payout_threshold_bps(&env, threshold_bps);
+    }
 }
 
 #[cfg(test)]
@@ -3612,6 +3633,7 @@ mod integration_tests {
 }
 #[cfg(test)]
 mod rbac_tests;
+#[cfg(test)]
 mod test;
 #[cfg(test)]
 mod test_circuit_breaker_integration;
