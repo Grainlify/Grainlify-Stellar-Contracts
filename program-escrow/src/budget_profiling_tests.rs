@@ -1,4 +1,4 @@
-#![cfg(test)]
+﻿#![cfg(test)]
 
 extern crate std;
 
@@ -84,6 +84,50 @@ const BATCH_PER_RECIPIENT_MEM_BASELINE: u64 = 46_000;
 
 // ============================================================================
 // Internal types
+// ============================================================================
+
+// ============================================================================
+// Regression-threshold baselines
+//
+// These represent the *expected* instruction/memory cost measured against the
+// current implementation.  Together with REGRESSION_MARGIN they form a
+// tighter guard than the hard ceilings: a change that silently doubles the
+// cost of single_payout will fail here long before it hits the ceiling.
+//
+// ÔöÇÔöÇ How to update these baselines ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+// If a legitimate feature addition raises instruction cost, update the
+// relevant constant below to the new measured value and add a comment
+// explaining why the cost increased.  This is a deliberate, one-line change
+// that makes the regression visible in code review.
+//
+// Example:
+//   // Increased from 180_000 after adding whitelist enforcement check (#NNN)
+//   const SINGLE_PAYOUT_CPU_BASELINE: u64 = 215_000;
+// ============================================================================
+
+/// Allowed percentage increase over a baseline before the test fails.
+/// 15 % gives room for minor SDK/host fluctuations while catching genuine
+/// regressions.  Must be updated intentionally when cost legitimately grows.
+const REGRESSION_MARGIN_PCT: u64 = 15;
+
+// single_payout baselines
+const SINGLE_PAYOUT_CPU_BASELINE: u64 = 180_000;
+const SINGLE_PAYOUT_MEM_BASELINE: u64 = 55_000;
+
+// trigger_program_releases baselines (10 schedules)
+const TRIGGER_RELEASES_CPU_BASELINE: u64 = 1_800_000;
+const TRIGGER_RELEASES_MEM_BASELINE: u64 = 340_000;
+
+// batch_payout base (fixed per-call overhead) baselines
+const BATCH_BASE_CPU_BASELINE: u64 = 120_000;
+const BATCH_BASE_MEM_BASELINE: u64 = 60_000;
+
+// batch_payout per-recipient marginal cost baselines
+const BATCH_PER_RECIPIENT_CPU_BASELINE: u64 = 85_000;
+const BATCH_PER_RECIPIENT_MEM_BASELINE: u64 = 14_000;
+
+// ============================================================================
+// Helpers
 // ============================================================================
 
 #[derive(Clone, Copy, Debug)]
