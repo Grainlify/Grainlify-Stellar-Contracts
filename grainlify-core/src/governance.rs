@@ -463,6 +463,10 @@ fn derive_voting_power(env: &Env, config: &GovernanceConfig, voter: &Address) ->
     match config.voting_scheme {
         VotingScheme::OnePersonOneVote => 1,
         VotingScheme::TokenWeighted => {
+            // SECURITY NOTE: Cross-contract call to the governance token.
+            // This is a read-only `balance` query and inherently requires no authorization.
+            // The caller's intent is already secured by `voter.require_auth()` in `cast_vote`.
+            // There is no over-broad use of `authorize_as_current_contract`.
             token::Client::new(env, &config.governance_token).balance(voter)
         }
     }
@@ -484,6 +488,10 @@ fn enforce_min_proposal_stake(
         return Ok(());
     }
 
+    // SECURITY NOTE: Cross-contract call to the governance token.
+    // This is a read-only `balance` query and inherently requires no authorization.
+    // The proposer's intent is already secured by `proposer.require_auth()` in `create_proposal`.
+    // There is no over-broad use of `authorize_as_current_contract`.
     let balance = token::Client::new(env, &config.governance_token).balance(proposer);
     if balance < config.min_proposal_stake {
         return Err(Error::InsufficientStake);
@@ -494,7 +502,8 @@ fn enforce_min_proposal_stake(
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
+    use soroban_sdk::TryFromVal;
 
     fn setup_test(
         env: &Env,
@@ -884,6 +893,24 @@ fn test_cancel_proposal_success() {
 
     let status = client.get_proposal_status(&prop_id);
     assert_eq!(status, ProposalStatus::Cancelled);
+
+    let contract_id = client.address.clone();
+    let events = env.events().all();
+    let mut found_prop_canc = false;
+    for event in events.iter() {
+        if event.0 == contract_id
+            && event.1.len() >= 2
+            && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap())
+                == Ok(symbol_short!("PropCanc"))
+        {
+            let event_proposal_id: u32 =
+                soroban_sdk::TryFromVal::try_from_val(&env, &event.1.get(1).unwrap())
+                    .unwrap();
+            assert_eq!(event_proposal_id, prop_id);
+            found_prop_canc = true;
+        }
+    }
+    assert!(found_prop_canc, "PropCanc event should have been emitted");
 }
 
 #[test]
@@ -893,11 +920,13 @@ fn test_cancel_proposal_unauthorized() {
     let prop_id = create_test_proposal(&env, &client, &proposer);
     let unauthorized = Address::generate(&env);
 
+    let events_before = env.events().all().len();
     let result = client.try_cancel_proposal(&unauthorized, &prop_id);
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 
     let status = client.get_proposal_status(&prop_id);
     assert_eq!(status, ProposalStatus::Active);
+    assert_eq!(env.events().all().len(), events_before);
 }
 
 #[test]
@@ -925,5 +954,100 @@ fn test_cancel_proposal_already_cancelled_fails() {
     
     let result = client.try_cancel_proposal(&proposer, &prop_id);
     assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_wrong_proposal_id_returns_unauthorized() {
+    let env = Env::default();
+    let (client, _, proposer1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let proposer2 = Address::generate(&env);
+    let _prop1 = create_test_proposal(&env, &client, &proposer1);
+    let prop2 = create_test_proposal(&env, &client, &proposer2);
+
+    let result = client.try_cancel_proposal(&proposer1, &prop2);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+
+    let status = client.get_proposal_status(&prop2);
+    assert_eq!(status, ProposalStatus::Active);
+}
+
+#[test]
+fn test_cancel_proposal_after_rejection_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    client.cast_vote(&proposer, &prop_id, &VoteType::Against);
+    client.cast_vote(&voter2, &prop_id, &VoteType::Against);
+    client.cast_vote(&voter3, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Rejected);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_after_sweep_expired_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    let current_time = 150;
+    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+    assert!(result.is_ok());
+
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Expired);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cross_contract_auth_scope_minimal() {
+    let env = Env::default();
+    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let token_admin_client = token_admin_client.unwrap();
+
+    token_admin_client.mint(&proposer, &50);
+
+    env.mock_all_auths();
+
+    // This will call `enforce_min_proposal_stake` which does a cross-contract call
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Verify that only the `proposer.require_auth()` was used
+    let auths = env.auths();
+
+    // We expect `proposer` to have authorized `create_proposal`.
+    // If the contract had broadly used `authorize_as_current_contract`, we would see
+    // an authorization from the contract itself for the token balance call.
+    let mut contract_authorized = false;
+    let contract_id = client.address.clone();
+    for (addr, _) in auths.iter() {
+        if addr == &contract_id {
+            contract_authorized = true;
+        }
+    }
+    assert!(!contract_authorized, "Contract should not broadly authorize cross-contract read calls");
+
+    // Now test cast_vote which calls `derive_voting_power` (also a cross-contract call)
+    env.mock_all_auths();
+    let voter = Address::generate(&env);
+    token_admin_client.mint(&voter, &100);
+    client.cast_vote(&voter, &prop_id, &VoteType::For);
+
+    let mut vote_contract_authorized = false;
+    for (addr, _) in env.auths().iter() {
+        if addr == &contract_id {
+            vote_contract_authorized = true;
+        }
+    }
+    assert!(!vote_contract_authorized, "Contract should not broadly authorize cross-contract read calls in cast_vote");
 }
 }

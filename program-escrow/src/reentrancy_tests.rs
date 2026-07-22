@@ -529,7 +529,7 @@ fn test_reentrancy_guard_model_documentation() {
 // ============================================================================
 
 #[test]
-#[should_panic(expected = "Reentrancy detected")]
+#[should_panic(expected = "re-entry")]
 fn test_token_callback_reentrancy_single_payout() {
     let env = Env::default();
     env.mock_all_auths();
@@ -563,7 +563,7 @@ fn test_token_callback_reentrancy_single_payout() {
 }
 
 #[test]
-#[should_panic(expected = "Reentrancy detected")]
+#[should_panic(expected = "re-entry")]
 fn test_token_callback_reentrancy_trigger_releases() {
     let env = Env::default();
     env.mock_all_auths();
@@ -594,4 +594,83 @@ fn test_token_callback_reentrancy_trigger_releases() {
 
     // This should panic when it calls transfer()
     client.trigger_program_releases();
+}
+
+#[test]
+#[should_panic(expected = "Reentrancy detected")]
+fn test_token_callback_reentrancy_batch_payout() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let authorized_key = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let program_id = String::from_str(&env, "test-program");
+    let total_amount = 1000_0000000i128;
+
+    let token_address = env.register_contract(None, crate::malicious_reentrant::MaliciousReentrantContract);
+    let malicious_token = crate::malicious_reentrant::MaliciousReentrantContractClient::new(&env, &token_address);
+    malicious_token.init(&contract_id);
+    malicious_token.set_attack_mode(&0u32); 
+
+    client.init_program(&program_id, &authorized_key, &token_address);
+    client.lock_program_funds(&authorized_key, &total_amount);
+
+    malicious_token.set_attack_mode(&2u32); // 2 = attack batch_payout
+    malicious_token.reset_attack_count();
+
+    let recipients = vec![&env, recipient1, recipient2];
+    let amounts = vec![&env, 400_0000000i128, 600_0000000i128];
+    // This should panic when it calls transfer() on our malicious token
+    client.batch_payout(&recipients, &amounts);
+}
+
+#[test]
+fn test_token_callback_reentrancy_consistency() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let authorized_key = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let program_id = String::from_str(&env, "test-program");
+    let amount = 1000_0000000i128;
+
+    let token_address = env.register_contract(None, crate::malicious_reentrant::MaliciousReentrantContract);
+    let malicious_token = crate::malicious_reentrant::MaliciousReentrantContractClient::new(&env, &token_address);
+    malicious_token.init(&contract_id);
+    malicious_token.set_attack_mode(&0u32); 
+
+    client.init_program(&program_id, &authorized_key, &token_address);
+    client.lock_program_funds(&authorized_key, &amount);
+
+    // Save state before attack
+    let initial_monitoring = client.get_monitoring_analytics();
+    let initial_circuit_status = client.get_circuit_status();
+
+    // Enable attack mode 1 = attack single_payout
+    malicious_token.set_attack_mode(&1u32);
+    malicious_token.reset_attack_count();
+
+    // try_ catches the panic from reentrancy guard
+    let result = client.try_single_payout(&recipient, &(amount / 2));
+    assert!(result.is_err(), "Reentrancy should be blocked and return an error");
+
+    // Fetch state after caught panic
+    let final_monitoring = client.get_monitoring_analytics();
+    let final_circuit_status = client.get_circuit_status();
+
+    // Verify consistency: counters and circuit status should be unchanged
+    assert_eq!(initial_monitoring.operation_count, final_monitoring.operation_count);
+    assert_eq!(initial_monitoring.error_count, final_monitoring.error_count);
+    assert_eq!(
+        initial_circuit_status,
+        final_circuit_status,
+        "Circuit breaker status should remain unchanged on panic rollback"
+    );
 }

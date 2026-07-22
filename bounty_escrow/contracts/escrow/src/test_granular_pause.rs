@@ -797,3 +797,49 @@ fn test_batch_release_allowed_when_lock_and_refund_paused() {
     assert_eq!(count, 1);
     assert_eq!(token.balance(&contributor), 250);
 }
+
+// ---------------------------------------------------------------------------
+// § 14  Nested-call Pause Scoping Enforcement
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nested_call_pause_scoping_enforcement() {
+    let env = Env::default();
+    let (client, _, depositor, _) = setup(&env, 1_000);
+    let contributor = Address::generate(&env);
+
+    // Setup an authorized claim which creates a pending claim state
+    lock_bounty(&client, &env, &depositor, 1, 500);
+    client.set_claim_window(&500);
+    client.authorize_claim(&1, &contributor);
+
+    // Pause the release category
+    client.set_paused(&None, &Some(true), &None);
+
+    // Attempt to claim. Even though `claim` is a separate entrypoint, its internal
+    // call path to `execute_token_transfer` should enforce the `release` pause.
+    assert_eq!(
+        client.try_claim(&1),
+        Err(Ok(Error::FundsPaused))
+    );
+
+    // Partial release is another entrypoint that should enforce the pause deeply
+    assert_eq!(
+        client.try_partial_release(&1, &contributor, &100),
+        Err(Ok(Error::FundsPaused))
+    );
+
+    // Batch release is another entrypoint that should enforce the pause deeply
+    let items = soroban_sdk::vec![
+        &env,
+        ReleaseFundsItem {
+            bounty_id: 1,
+            contributor: contributor.clone(),
+        }
+    ];
+    assert_eq!(
+        client.try_batch_release_funds(&items),
+        Err(Ok(Error::FundsPaused))
+    );
+}
+

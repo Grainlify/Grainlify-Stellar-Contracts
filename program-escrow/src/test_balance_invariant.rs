@@ -501,3 +501,98 @@ fn test_reconciliation_invariant_after_each_mixed_operation() {
     assert_eq!(pending_scheduled_total(&client), 0);
     assert_eq!(token_client.balance(&contract_id), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Test A — incremental milestone claims maintain invariant
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invariant_incremental_milestone_claims() {
+    let env = Env::default();
+    let total: i128 = 9_000;
+    let (client, contract_id, _admin, token_client, _token_sac, _token_id) = setup(&env, total);
+
+    // Create three equal milestones
+    let w1 = Address::generate(&env);
+    let w2 = Address::generate(&env);
+    let w3 = Address::generate(&env);
+    let sched1 = client.create_program_release_schedule(&3_000, &0, &w1);
+    let sched2 = client.create_program_release_schedule(&3_000, &0, &w2);
+    let sched3 = client.create_program_release_schedule(&3_000, &0, &w3);
+
+    assert_balance_invariant(&client, &token_client, &contract_id, "initial");
+
+    client.release_program_schedule_manual(&sched1.schedule_id);
+    assert_balance_invariant(&client, &token_client, &contract_id, "after claim 1");
+
+    client.release_program_schedule_manual(&sched2.schedule_id);
+    assert_balance_invariant(&client, &token_client, &contract_id, "after claim 2");
+
+    client.release_program_schedule_manual(&sched3.schedule_id);
+    assert_balance_invariant(&client, &token_client, &contract_id, "after claim 3");
+
+    assert_eq!(client.get_remaining_balance(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Test B — double‑claim of a milestone is rejected and does not affect balance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invariant_double_claim_milestone_rejected() {
+    let env = Env::default();
+    let total: i128 = 5_000;
+    let (client, contract_id, _admin, token_client, _token_sac, _token_id) = setup(&env, total);
+
+    let winner = Address::generate(&env);
+    let sched = client.create_program_release_schedule(&total, &0, &winner);
+    assert_balance_invariant(&client, &token_client, &contract_id, "initial");
+
+    // First release succeeds
+    client.release_program_schedule_manual(&sched.schedule_id);
+    let bal_after_first = token_client.balance(&winner);
+
+    // Second attempt should fail
+    let res = client.try_release_program_schedule_manual(&sched.schedule_id);
+    assert!(res.is_err(), "double‑claim must be rejected");
+
+    let bal_after_second = token_client.balance(&winner);
+    assert_eq!(bal_after_second, bal_after_first, "balance must not change after double‑claim");
+
+    // Invariant still holds
+    assert_balance_invariant(&client, &token_client, &contract_id, "after double‑claim attempt");
+}
+
+// ---------------------------------------------------------------------------
+// Test C — out‑of‑order milestone releases keep invariant (contract permits independent releases)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invariant_out_of_order_milestone_claims() {
+    let env = Env::default();
+    let total: i128 = 9_000;
+    let (client, contract_id, _admin, token_client, _token_sac, _token_id) = setup(&env, total);
+
+    let w1 = Address::generate(&env);
+    let w2 = Address::generate(&env);
+    let w3 = Address::generate(&env);
+    let sched1 = client.create_program_release_schedule(&3_000, &0, &w1);
+    let sched2 = client.create_program_release_schedule(&3_000, &0, &w2);
+    let sched3 = client.create_program_release_schedule(&3_000, &0, &w3);
+
+    assert_balance_invariant(&client, &token_client, &contract_id, "initial");
+
+    // Release milestone 2 first
+    client.release_program_schedule_manual(&sched2.schedule_id);
+    assert_balance_invariant(&client, &token_client, &contract_id, "after claim 2");
+
+    // Release milestone 1 next
+    client.release_program_schedule_manual(&sched1.schedule_id);
+    assert_balance_invariant(&client, &token_client, &contract_id, "after claim 1");
+
+    // Release milestone 3 finally
+    client.release_program_schedule_manual(&sched3.schedule_id);
+    assert_balance_invariant(&client, &token_client, &contract_id, "after claim 3");
+
+    assert_eq!(client.get_remaining_balance(), 0);
+}
