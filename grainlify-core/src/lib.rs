@@ -1811,6 +1811,7 @@ mod test {
 
     #[test]
     #[should_panic(expected = "Upgrade timelock not elapsed")]
+    // Confirms that upgrade() rejects early execution before the timelock has elapsed.
     fn test_upgrade_rejects_early_execution() {
         let env = Env::default();
         env.mock_all_auths();
