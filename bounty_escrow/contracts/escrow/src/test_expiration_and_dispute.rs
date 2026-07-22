@@ -233,6 +233,76 @@ fn test_cancel_expired_claim_emits_expired_reason() {
     assert_eq!(reason, Symbol::new(&setup.env, "expired"));
 }
 
+#[test]
+fn test_cancel_active_claim_emits_manual_reason() {
+    let setup = TestSetup::new();
+    let bounty_id = 23;
+    let amount = 2_500;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 2_000;
+    let claim_window = 500;
+
+    setup.escrow.set_claim_window(&claim_window);
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    let claim = setup.escrow.get_pending_claim(&bounty_id);
+    // Still within the claim window (cancelled_at < claim.expires_at)
+    setup.env.ledger().set_timestamp(claim.expires_at - 1);
+
+    setup.escrow.cancel_pending_claim(&bounty_id);
+
+    let events = setup.env.events().all();
+    let (_contract, _topics, data) = events.last().expect("cancel should emit an event");
+    let data_map: Map<Symbol, Val> =
+        Map::try_from_val(&setup.env, &data).expect("event payload should be a map");
+    let reason_val = data_map
+        .get(Symbol::new(&setup.env, "reason"))
+        .expect("ClaimCancelled should include a reason");
+    let reason = Symbol::try_from_val(&setup.env, &reason_val).expect("reason should be a symbol");
+
+    assert_eq!(reason, Symbol::new(&setup.env, "manual"));
+}
+
+#[test]
+fn test_cancel_claim_at_boundary_emits_manual_reason() {
+    let setup = TestSetup::new();
+    let bounty_id = 24;
+    let amount = 2_500;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 2_000;
+    let claim_window = 500;
+
+    setup.escrow.set_claim_window(&claim_window);
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    let claim = setup.escrow.get_pending_claim(&bounty_id);
+    // Exactly at the boundary (cancelled_at == claim.expires_at)
+    setup.env.ledger().set_timestamp(claim.expires_at);
+
+    setup.escrow.cancel_pending_claim(&bounty_id);
+
+    let events = setup.env.events().all();
+    let (_contract, _topics, data) = events.last().expect("cancel should emit an event");
+    let data_map: Map<Symbol, Val> =
+        Map::try_from_val(&setup.env, &data).expect("event payload should be a map");
+    let reason_val = data_map
+        .get(Symbol::new(&setup.env, "reason"))
+        .expect("ClaimCancelled should include a reason");
+    let reason = Symbol::try_from_val(&setup.env, &reason_val).expect("reason should be a symbol");
+
+    assert_eq!(reason, Symbol::new(&setup.env, "manual"));
+}
+
 // Beneficiary misses claim window - admin must cancel then refund
 #[test]
 fn test_missed_claim_window_requires_admin_cancel_then_refund() {
