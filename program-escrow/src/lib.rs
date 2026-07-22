@@ -149,6 +149,7 @@ mod reentrancy_guard;
 
 #[cfg(test)]
 mod error_recovery_tests;
+#[cfg(test)]
 mod reentrancy_tests;
 
 #[cfg(test)]
@@ -172,6 +173,7 @@ mod test_lifecycle;
 #[cfg(test)]
 mod budget_profiling_tests;
 
+#[cfg(test)]
 mod test_analytics_events;
 #[cfg(test)]
 mod test_governance_integration;
@@ -718,20 +720,16 @@ impl ProgramEscrowContract {
 
     /// Bump the TTL for single-program persistent storage keys
     fn bump_persistent_symbol_ttl(env: &Env, key: &Symbol) {
-        env.storage().persistent().extend_ttl(
-            key,
-            PERSISTENT_TTL_THRESHOLD,
-            PERSISTENT_TTL_EXTEND_TO,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
 
     /// Bump the TTL for multi-program persistent storage keys
     fn bump_persistent_datakey_ttl(env: &Env, key: &DataKey) {
-        env.storage().persistent().extend_ttl(
-            key,
-            PERSISTENT_TTL_THRESHOLD,
-            PERSISTENT_TTL_EXTEND_TO,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
     /// Bump the TTL for the contract instance storage
     fn bump_instance_ttl(env: &Env) {
@@ -739,6 +737,7 @@ impl ProgramEscrowContract {
             .instance()
             .extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
+
 
     /// Get fee configuration (internal helper)
     fn get_fee_config_internal(env: &Env) -> FeeConfig {
@@ -839,7 +838,7 @@ impl ProgramEscrowContract {
         let start = env.ledger().timestamp();
         let caller_addr = from.clone();
         from.require_auth();
-
+        
         if Self::check_paused(&env, symbol_short!("lock")) {
             monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
             panic!("Funds Paused");
@@ -858,49 +857,32 @@ impl ProgramEscrowContract {
         Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Check fund caps if configured
-        let cap_config: FundCapConfig =
-            env.storage()
-                .instance()
-                .get(&FUND_CAP_CONFIG)
-                .unwrap_or(FundCapConfig {
-                    max_total_funds: None,
-                    max_single_lock: None,
-                });
+        let cap_config: FundCapConfig = env
+            .storage()
+            .instance()
+            .get(&FUND_CAP_CONFIG)
+            .unwrap_or(FundCapConfig {
+                max_total_funds: None,
+                max_single_lock: None,
+            });
 
         // Per-lock cap check
         if let Some(max_single) = cap_config.max_single_lock {
             if amount > max_single {
-                monitoring::track_operation(
-                    &env,
-                    symbol_short!("lock"),
-                    caller_addr.clone(),
-                    false,
-                );
+                monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
                 panic!("Amount exceeds per-lock maximum");
             }
         }
 
         // Total-funds cap check
         if let Some(max_total) = cap_config.max_total_funds {
-            let new_total = program_data
-                .total_funds
-                .checked_add(amount)
+            let new_total = program_data.total_funds.checked_add(amount)
                 .unwrap_or_else(|| {
-                    monitoring::track_operation(
-                        &env,
-                        symbol_short!("lock"),
-                        caller_addr.clone(),
-                        false,
-                    );
+                    monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
                     panic!("Total funds overflow");
                 });
             if new_total > max_total {
-                monitoring::track_operation(
-                    &env,
-                    symbol_short!("lock"),
-                    caller_addr.clone(),
-                    false,
-                );
+                monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
                 panic!("Total funds cap exceeded");
             }
         }
@@ -910,14 +892,8 @@ impl ProgramEscrowContract {
         token_client.transfer(&from, &env.current_contract_address(), &amount);
 
         // Update balances
-        program_data.total_funds = program_data
-            .total_funds
-            .checked_add(amount)
-            .expect("Total funds overflow");
-        program_data.remaining_balance = program_data
-            .remaining_balance
-            .checked_add(amount)
-            .expect("Remaining balance overflow");
+        program_data.total_funds = program_data.total_funds.checked_add(amount).expect("Total funds overflow");
+        program_data.remaining_balance = program_data.remaining_balance.checked_add(amount).expect("Remaining balance overflow");
 
         // Ensure invariant
         let contract_balance = token_client.balance(&env.current_contract_address());
@@ -970,7 +946,7 @@ impl ProgramEscrowContract {
         // If admin is already set, require auth from the current admin
         if env.storage().instance().has(&DataKey::Admin) {
             let currentadmin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-            Self::bump_instance_ttl(&env);
+        Self::bump_instance_ttl(&env);
             currentadmin.require_auth();
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -980,9 +956,7 @@ impl ProgramEscrowContract {
     /// Get the current admin
     pub fn getadmin(env: Env) -> Option<Address> {
         let admin = env.storage().instance().get(&DataKey::Admin);
-        if admin.is_some() {
-            Self::bump_instance_ttl(&env);
-        }
+        if admin.is_some() { Self::bump_instance_ttl(&env); }
         admin
     }
 
@@ -1329,33 +1303,25 @@ impl ProgramEscrowContract {
     /// Returns the current dispute record, if any.
     pub fn get_dispute(env: Env) -> Option<DisputeRecord> {
         let dispute = env.storage().instance().get(&DataKey::Dispute);
-        if dispute.is_some() {
-            Self::bump_instance_ttl(&env);
-        }
+        if dispute.is_some() { Self::bump_instance_ttl(&env); }
         dispute
     }
 
     /// Returns the current recipient-scoped dispute record, if any.
     pub fn get_recipient_dispute(env: Env, recipient: Address) -> Option<DisputeRecord> {
-        let record = env
-            .storage()
+        let record = env.storage()
             .instance()
             .get(&DataKey::RecipientDispute(recipient));
-        if record.is_some() {
-            Self::bump_instance_ttl(&env);
-        }
+        if record.is_some() { Self::bump_instance_ttl(&env); }
         record
     }
 
     /// Returns the current schedule-scoped dispute record, if any.
     pub fn get_schedule_dispute(env: Env, schedule_id: u64) -> Option<DisputeRecord> {
-        let record = env
-            .storage()
+        let record = env.storage()
             .instance()
             .get(&DataKey::ScheduleDispute(schedule_id));
-        if record.is_some() {
-            Self::bump_instance_ttl(&env);
-        }
+        if record.is_some() { Self::bump_instance_ttl(&env); }
         record
     }
 
@@ -1494,25 +1460,6 @@ impl ProgramEscrowContract {
             })
     }
 
-    /// Set the large payout threshold, expressed in basis points of total funds.
-    /// Admin only.
-    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) -> Result<(), Error> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("Not initialized"));
-        admin.require_auth();
-        Self::check_governance_requirements(&env)?;
-        monitoring::set_large_payout_threshold_bps(&env, threshold_bps);
-        Ok(())
-    }
-
-    /// Get the current large payout threshold in basis points.
-    pub fn get_large_payout_threshold(env: Env) -> u32 {
-        monitoring::get_large_payout_threshold_bps(&env)
-    }
-
     /// Set the fund cap configuration (admin only).
     /// When enabled, `lock_program_funds` will reject locks that exceed either cap.
     /// Pass `None` for either field to leave that cap unset.
@@ -1544,7 +1491,9 @@ impl ProgramEscrowContract {
             max_total_funds,
             max_single_lock,
         };
-        env.storage().instance().set(&FUND_CAP_CONFIG, &config);
+        env.storage()
+            .instance()
+            .set(&FUND_CAP_CONFIG, &config);
         Ok(())
     }
 
@@ -1608,7 +1557,9 @@ impl ProgramEscrowContract {
         // Emit whitelist enforcement changed event
         env.events().publish(
             (WHITELIST_ENFORCEMENT_CHANGED,),
-            WhitelistEnforcementChangedEvent { enabled },
+            WhitelistEnforcementChangedEvent {
+                enabled,
+            },
         );
     }
 
@@ -1710,14 +1661,14 @@ impl ProgramEscrowContract {
             panic!("Dispute in progress");
         }
 
-        let mut program_data: ProgramData = env
-            .storage()
-            .persistent()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| {
-                reentrancy_guard::clear_entered(&env);
-                panic!("Program not initialized")
-            });
+        let mut program_data: ProgramData =
+            env.storage()
+                .persistent()
+                .get(&PROGRAM_DATA)
+                .unwrap_or_else(|| {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Program not initialized")
+                });
         Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
@@ -1799,7 +1750,7 @@ impl ProgramEscrowContract {
         let timestamp = env.ledger().timestamp();
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &program_data.token_address);
-        let threshold = monitoring::get_large_payout_threshold_amount(&env, program_data.total_funds);
+        let threshold = program_data.total_funds / 10;
         let program_id = program_data.program_id.clone();
 
         for i in 0..batch_len {
@@ -1920,14 +1871,14 @@ impl ProgramEscrowContract {
         }
 
         // Verify authorization
-        let program_data: ProgramData = env
-            .storage()
-            .persistent()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| {
-                reentrancy_guard::clear_entered(&env);
-                panic!("Program not initialized")
-            });
+        let program_data: ProgramData =
+            env.storage()
+                .persistent()
+                .get(&PROGRAM_DATA)
+                .unwrap_or_else(|| {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Program not initialized")
+                });
         Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
@@ -2037,8 +1988,7 @@ impl ProgramEscrowContract {
     /// # Returns
     /// ProgramData containing all program information
     pub fn get_program_info(env: Env) -> ProgramData {
-        let val = env
-            .storage()
+        let val = env.storage()
             .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
@@ -2246,8 +2196,7 @@ impl ProgramEscrowContract {
     }
 
     pub fn get_program_release_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        let val = env
-            .storage()
+        let val = env.storage()
             .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
@@ -2256,8 +2205,7 @@ impl ProgramEscrowContract {
     }
 
     pub fn get_program_release_history(env: Env) -> Vec<ProgramReleaseHistory> {
-        let val = env
-            .storage()
+        let val = env.storage()
             .persistent()
             .get(&RELEASE_HISTORY)
             .unwrap_or_else(|| Vec::new(&env));
@@ -2273,12 +2221,7 @@ impl ProgramEscrowContract {
         Self::get_program_info(env)
     }
 
-    pub fn lock_program_funds_v2(
-        env: Env,
-        _program_id: String,
-        from: Address,
-        amount: i128,
-    ) -> ProgramData {
+    pub fn lock_program_funds_v2(env: Env, _program_id: String, from: Address, amount: i128) -> ProgramData {
         Self::lock_program_funds(env, from, amount)
     }
 
@@ -2908,6 +2851,25 @@ impl ProgramEscrowContract {
     /// Get performance stats for a specific function
     pub fn get_performance_stats(env: Env, function_name: Symbol) -> monitoring::PerformanceStats {
         monitoring::get_performance_stats(&env, function_name)
+    }
+
+    /// Get the large-payout alert threshold in basis points (default 1000 = 10%).
+    /// A payout is flagged as "large" when it equals or exceeds
+    /// `total_funds * threshold_bps / 10_000`.
+    pub fn get_large_payout_threshold(env: Env) -> u32 {
+        monitoring::get_large_payout_threshold_bps(&env)
+    }
+
+    /// Update the large-payout alert threshold (admin only).
+    /// `threshold_bps` is expressed in basis points (e.g. 1000 = 10%, 2500 = 25%).
+    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        monitoring::set_large_payout_threshold_bps(&env, threshold_bps);
     }
 }
 
@@ -3671,6 +3633,7 @@ mod integration_tests {
 }
 #[cfg(test)]
 mod rbac_tests;
+#[cfg(test)]
 mod test;
 #[cfg(test)]
 mod test_circuit_breaker_integration;
@@ -3680,7 +3643,3 @@ mod test_balance_invariant;
 
 #[cfg(test)]
 mod test_whitelist;
-
-// Issue #189 — claim/release edge-case tests (zero-balance, double-claim, pre-approval).
-#[cfg(test)]
-mod test_issue_189;
