@@ -3632,6 +3632,67 @@ mod integration_tests {
     }
 
     // ========================================================================
+    // list_programs() 0-or-1 boundary
+    //
+    // `list_programs` collapses to a 0-or-1-element "list" today: it returns an
+    // empty Vec unless PROGRAM_DATA exists, in which case it returns a single
+    // entry built from `get_program_info`. Both sides of that boundary are
+    // pinned down here so a future refactor to multiple programs cannot silently
+    // start returning stale, duplicated, or missing entries.
+    // ========================================================================
+
+    /// Before any program is initialized, `list_programs` must return an empty
+    /// Vec (the zero side of the boundary), not a defaulted/placeholder entry.
+    #[test]
+    fn test_list_programs_empty_before_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let programs = client.list_programs();
+        assert_eq!(programs.len(), 0);
+        assert!(programs.is_empty());
+
+        // Cross-check the sibling counter agrees on the empty boundary.
+        assert_eq!(client.get_program_count(), 0);
+    }
+
+    /// After initialization, `list_programs` must return exactly one entry, and
+    /// that entry must match `get_program_info` field for field (the one side of
+    /// the boundary).
+    #[test]
+    fn test_list_programs_single_after_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let token = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+
+        env.mock_all_auths();
+        client.initialize_program(&program_id, &authorized_key, &token);
+
+        let programs = client.list_programs();
+        assert_eq!(programs.len(), 1);
+
+        // The single listed entry must be identical to what get_program_info
+        // reports directly — no drift, duplication, or field mismatch.
+        let listed = programs.get(0).unwrap();
+        let info = client.get_program_info();
+        assert_eq!(listed, info);
+        assert_eq!(listed.program_id, program_id);
+        assert_eq!(listed.authorized_payout_key, authorized_key);
+        assert_eq!(listed.token_address, token);
+        assert_eq!(listed.total_funds, 0);
+        assert_eq!(listed.remaining_balance, 0);
+        assert_eq!(listed.payout_history.len(), 0);
+
+        // The counter must agree that exactly one program now exists.
+        assert_eq!(client.get_program_count(), 1);
+    }
+
+    // ========================================================================
     // get_program_release_schedule() not-found panic
     //
     // `get_program_release_schedule` linearly scans the schedule list and either
