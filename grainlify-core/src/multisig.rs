@@ -443,6 +443,7 @@ mod test {
     use super::*;
     use crate::GrainlifyContract;
     use soroban_sdk::{testutils::Address as _, testutils::Events, Env};
+    extern crate std;
     use std::panic;
 
     struct Setup {
@@ -1338,5 +1339,79 @@ mod test {
             // Remove signer_b with threshold=2 (guard should block and panic, no events emitted)
             MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_rotate_signers_rejects_duplicate_add_entries() {
+        let setup = setup();
+        let new_signer = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            let mut add_vec = Vec::new(&setup.env);
+            add_vec.push_back(new_signer.clone());
+            add_vec.push_back(new_signer.clone()); // Duplicate
+
+            let rm_vec = Vec::new(&setup.env);
+
+            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
+        });
+    }
+
+    #[test]
+    fn test_rotate_signers_overlapping_add_and_remove() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            let mut add_vec = Vec::new(&setup.env);
+            add_vec.push_back(setup.signer_b.clone());
+
+            let mut rm_vec = Vec::new(&setup.env);
+            rm_vec.push_back(setup.signer_b.clone());
+
+            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
+
+            let config = MultiSig::get_config(&setup.env);
+            assert!(config.signers.contains(&setup.signer_b));
+            assert_eq!(config.signers.len(), 2);
+            assert_eq!(config.threshold, 2);
+        });
+    }
+
+    #[test]
+    fn test_rotate_signers_threshold_only() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            let add_vec = Vec::new(&setup.env);
+            let rm_vec = Vec::new(&setup.env);
+
+            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, Some(1));
+
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(config.signers.len(), 2);
+            assert_eq!(config.threshold, 1);
+        });
+
+        let events = setup.env.events().all();
+        assert!(events.len() > 0);
     }
 }
