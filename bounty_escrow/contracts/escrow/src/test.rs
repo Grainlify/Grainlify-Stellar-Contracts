@@ -1961,3 +1961,45 @@ fn test_all_event_types_carry_v2_version() {
     }
     assert!(v2_count >= 8, "expected at least 8 events with version=2, got {}", v2_count);
 }
+
+#[test]
+fn test_authorize_claim_pending_exists_rejection() {
+    let setup = TestSetup::new();
+    let bounty_id = 900;
+    let amount = 1500;
+    let deadline = setup.env.ledger().timestamp() + 10_000;
+
+    setup.escrow.set_claim_window(&500);
+
+    // 1. Lock funds
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // 2. Authorize the first claim
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    // Fetch the pending claim to check regression later
+    let initial_claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(initial_claim.recipient, setup.contributor);
+    assert_eq!(initial_claim.amount, amount);
+
+    // 3. Attempt to authorize another claim on the same bounty before the first is resolved.
+    // This should fail with Error::PendingClaimExists.
+    let new_contributor = Address::generate(&setup.env);
+    let result = setup.escrow.try_authorize_claim(&bounty_id, &new_contributor);
+    assert_eq!(result, Err(Ok(Error::PendingClaimExists)));
+
+    // Regression check: original pending claim's recipient and amount fields must be unchanged.
+    let unchanged_claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(unchanged_claim.recipient, setup.contributor);
+    assert_eq!(unchanged_claim.amount, amount);
+    assert_eq!(unchanged_claim.expires_at, initial_claim.expires_at);
+
+    // 4. Resolve the first claim (e.g., by cancelling it)
+    setup.escrow.cancel_pending_claim(&bounty_id);
+
+    // 5. Prove that a fresh authorize_claim call on the same bounty succeeds again
+    setup.escrow.authorize_claim(&bounty_id, &new_contributor);
+    let new_claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(new_claim.recipient, new_contributor);
+    assert_eq!(new_claim.amount, amount);
+}

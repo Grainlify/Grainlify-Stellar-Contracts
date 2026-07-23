@@ -1,3 +1,14 @@
+//! Monitoring and Analytics Module
+//!
+//! Note on Health Check Semantics:
+//! The `health_check` function evaluates health using a rolling time window.
+//! An alert state triggered by a high error rate will clear (`is_healthy` flips to `true`)
+//! purely from the passage of time once the `WINDOW_DURATION` has elapsed, even if there
+//! are no new successful operations. This is a time-based clear, not a recovery-based clear.
+//! Off-chain monitoring relying on `health_check` should be aware that a healthy status
+//! might simply mean the error window decayed, and not necessarily that the underlying
+//! issue was fixed.
+
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol};
 
 // Storage keys
@@ -190,6 +201,9 @@ pub fn get_analytics(env: &Env) -> Analytics {
     let users: u64 = env.storage().persistent().get(&usr_key).unwrap_or(0);
     let errors: u64 = env.storage().persistent().get(&err_key).unwrap_or(0);
 
+    // Basis points via truncating integer division (floor toward zero).
+    // Off-chain alert thresholds should account for this slight under-report
+    // versus the true floating-point rate (e.g. 1/3 => 3333 bps, not 3334).
     let error_rate = if ops > 0 {
         ((errors as u128 * 10000) / ops as u128) as u32
     } else {
