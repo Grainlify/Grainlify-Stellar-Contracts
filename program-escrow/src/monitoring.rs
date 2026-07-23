@@ -201,6 +201,9 @@ pub fn get_analytics(env: &Env) -> Analytics {
     let users: u64 = env.storage().persistent().get(&usr_key).unwrap_or(0);
     let errors: u64 = env.storage().persistent().get(&err_key).unwrap_or(0);
 
+    // Basis points via truncating integer division (floor toward zero).
+    // Off-chain alert thresholds should account for this slight under-report
+    // versus the true floating-point rate (e.g. 1/3 => 3333 bps, not 3334).
     let error_rate = if ops > 0 {
         ((errors as u128 * 10000) / ops as u128) as u32
     } else {
