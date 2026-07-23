@@ -793,43 +793,63 @@ mod test {
 
         env.ledger().with_mut(|li| li.timestamp = 150);
         client.execute_proposal(&proposal_id);
-
         assert!(client.is_upgrade_approved(&approved_hash));
         assert!(!client.is_upgrade_approved(&other_hash));
     }
-#[test]
-fn test_sweep_expired_proposal_before_expiry_rejected() {
-    let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
-    let prop_id = create_test_proposal(&env, &client, &proposer);
 
-    // Proposal voting ends at timestamp 100 (voting_period = 100 from setup_test)
-    let current_time = 50; // Before expiry
+    #[test]
+    fn test_sweep_expired_proposal_strictly_before_voting_end_rejected() {
+        let env = Env::default();
+        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
 
-    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
-    assert_eq!(result, Err(Ok(Error::VotingStillActive)));
+        // Proposal voting_end is created_at (0) + voting_period (100) = 100.
+        // Test current_time strictly before proposal.voting_end (99 < 100)
+        let current_time = 99;
 
-    // Verify proposal is still Active - no unwrap needed
-    let status = client.get_proposal_status(&prop_id);
-    assert_eq!(status, ProposalStatus::Active);
-}
+        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        assert_eq!(result, Err(Ok(Error::VotingStillActive)));
 
-#[test]
-fn test_sweep_expired_proposal_after_expiry_succeeds() {
-    let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
-    let prop_id = create_test_proposal(&env, &client, &proposer);
+        // Verify proposal status remains Active and unchanged after rejected sweep attempt
+        let status = client.get_proposal_status(&prop_id);
+        assert_eq!(status, ProposalStatus::Active);
+    }
 
-    // Proposal voting ends at timestamp 100 (voting_period = 100 from setup_test)
-    let current_time = 150; // After expiry
+    #[test]
+    fn test_sweep_expired_proposal_exact_voting_end_boundary_rejected() {
+        let env = Env::default();
+        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
 
-    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
-    assert!(result.is_ok());
+        // Proposal voting_end is created_at (0) + voting_period (100) = 100.
+        // Test boundary case current_time == proposal.voting_end (100 == 100)
+        let current_time = 100;
 
-    // Verify proposal status is now Expired - no unwrap needed
-    let status = client.get_proposal_status(&prop_id);
-    assert_eq!(status, ProposalStatus::Expired);
-}
+        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        assert_eq!(result, Err(Ok(Error::VotingStillActive)));
+
+        // Verify proposal status remains Active and unchanged after exact-at-end rejected sweep attempt
+        let status = client.get_proposal_status(&prop_id);
+        assert_eq!(status, ProposalStatus::Active);
+    }
+
+    #[test]
+    fn test_sweep_expired_proposal_one_second_past_voting_end_succeeds() {
+        let env = Env::default();
+        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        // Proposal voting_end is created_at (0) + voting_period (100) = 100.
+        // Test current_time == proposal.voting_end + 1 (101 > 100)
+        let current_time = 101;
+
+        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        assert!(result.is_ok());
+
+        // Verify proposal status is updated to Expired after successful sweep
+        let status = client.get_proposal_status(&prop_id);
+        assert_eq!(status, ProposalStatus::Expired);
+    }
 
 #[test]
 fn test_sweep_expired_proposal_nonexistent_fails() {
