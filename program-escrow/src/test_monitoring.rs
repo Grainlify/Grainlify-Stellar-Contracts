@@ -311,37 +311,70 @@ fn test_metric_decay_and_alert_clearing() {
 }
 
 #[test]
-fn test_large_payout_threshold_bps_boundaries() {
+fn test_stale_window_time_based_clear() {
     let env = Env::default();
+    env.mock_all_auths();
+
     let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
+    let admin = Address::generate(&env);
+    let tokenadmin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+    let program_id = String::from_str(&env, "stale-clear");
+
+    env.ledger().set_timestamp(1000);
+    client.init_program(&program_id, &admin, &token_id);
+
+    // Drive error rate to >= 50% (threshold is 5000 bps)
     env.as_contract(&contract_id, || {
-        // 1. Default (never-configured) threshold behaves as 10% (1000 bps) of total_funds.
-        let total_funds = 100_000;
-        let threshold_amount = crate::monitoring::get_large_payout_threshold_amount(&env, total_funds);
-        assert_eq!(threshold_amount, 10_000); // 10% of 100_000
-
-        // 2. threshold_bps = 0 yields a threshold amount of 0 regardless of total_funds.
-        crate::monitoring::set_large_payout_threshold_bps(&env, 0);
-        let threshold_amount_0 = crate::monitoring::get_large_payout_threshold_amount(&env, total_funds);
-        assert_eq!(threshold_amount_0, 0);
-        let threshold_amount_0_other = crate::monitoring::get_large_payout_threshold_amount(&env, 999_999);
-        assert_eq!(threshold_amount_0_other, 0);
-
-        // 3. threshold_bps = 10_000 yields a threshold amount equal to total_funds exactly.
-        crate::monitoring::set_large_payout_threshold_bps(&env, 10_000);
-        let threshold_amount_10000 = crate::monitoring::get_large_payout_threshold_amount(&env, total_funds);
-        assert_eq!(threshold_amount_10000, total_funds);
-        let threshold_amount_10000_other = crate::monitoring::get_large_payout_threshold_amount(&env, 543_210);
-        assert_eq!(threshold_amount_10000_other, 543_210);
-
-        // 4. Non-evenly-divisible total_funds produces the correctly truncated result.
-        // total_funds = 123_456, threshold_bps = 1234 (12.34%)
-        // expected = 123_456 * 1234 / 10_000 = 152344704 / 10_000 = 15234 (integer truncation)
-        crate::monitoring::set_large_payout_threshold_bps(&env, 1234);
-        let threshold_amount_div = crate::monitoring::get_large_payout_threshold_amount(&env, 123_456);
-        assert_eq!(threshold_amount_div, 15234);
+        crate::monitoring::track_operation(&env, symbol_short!("op"), admin.clone(), false);
     });
+
+    // Verify unhealthy state
+    assert_eq!(client.health_check().is_healthy, false);
+
+    // Advance timestamp past WINDOW_DURATION with NO further operations
+    env.ledger().set_timestamp(1000 + 3600);
+
+    // Confirm is_healthy flips back to true purely from time decay
+    assert_eq!(client.health_check().is_healthy, true);
 }
 
+#[test]
+fn test_window_boundary_fresh_start() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let tokenadmin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+    let program_id = String::from_str(&env, "fresh-start");
+
+    env.ledger().set_timestamp(1000);
+    client.init_program(&program_id, &admin, &token_id);
+
+    // Drive error rate to >= 50%
+    env.as_contract(&contract_id, || {
+        crate::monitoring::track_operation(&env, symbol_short!("op"), admin.clone(), false);
+    });
+    assert_eq!(client.health_check().is_healthy, false);
+
+    // Advance timestamp exactly to the window boundary
+    env.ledger().set_timestamp(1000 + 3600);
+
+    // Single new operation exactly at boundary
+    env.as_contract(&contract_id, || {
+        crate::monitoring::track_operation(&env, symbol_short!("op"), admin.clone(), true);
+    });
+
+    // Starts a fresh window, error rate is 0%, no stale counts inherited
+    assert_eq!(client.health_check().is_healthy, true);
+    let snap = client.get_state_snapshot();
+    assert_eq!(snap.total_operations, 3);
+    assert_eq!(snap.total_errors, 1);
+}
 

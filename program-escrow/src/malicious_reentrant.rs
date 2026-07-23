@@ -6,12 +6,13 @@
 //!
 //! ## Attack Scenarios
 //!
-//! 1. **Payout Callback Attack**: When receiving a payout, immediately call
-//!    back into the escrow contract to request another payout
-//! 2. **Nested Batch Attack**: During a batch payout, attempt to trigger
-//!    another batch payout
-//! 3. **Schedule Release Attack**: During schedule release, attempt to
-//!    release another schedule or modify state
+//! ### Recipient-Contract Reentrancy
+//! 1. **Payout Callback Attack**: When receiving a payout, a malicious recipient contract attempts to re-enter single_payout.
+//! 2. **Nested Batch Attack**: During a batch payout, a malicious recipient contract attempts to trigger another batch_payout.
+//! 3. **Schedule Release Attack**: During schedule release, a malicious recipient contract attempts to release another schedule or modify state.
+//!
+//! ### Token-Callback Reentrancy (Cross-Contract)
+//! 4. **Token Transfer Hook Attack**: A malicious token contract intercepts the `transfer` call from the escrow and attempts to re-enter single_payout, batch_payout, or trigger_program_releases before returning.
 
 #![cfg(test)]
 
