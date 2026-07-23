@@ -443,6 +443,7 @@ mod test {
     use super::*;
     use crate::GrainlifyContract;
     use soroban_sdk::{testutils::Address as _, testutils::Events, Env};
+    extern crate std;
     use std::panic;
 
     struct Setup {

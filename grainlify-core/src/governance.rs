@@ -103,6 +103,7 @@ pub enum Error {
     ZeroVotingPower = 15,
     InvalidTotalVotingPower = 16,
     Unauthorized = 17,
+    VoteWeightOverflow = 18,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), soroban_sdk::contract)]
@@ -181,6 +182,13 @@ impl GovernanceContract {
         Ok(proposal_id)
     }
 
+    /// Casts a vote on an active proposal.
+    ///
+    /// # Tallying & Bounds
+    /// Vote weights (derived from token balance or 1 for OnePersonOneVote) are accumulated
+    /// in `i128`. Summing vote weights across all voters must not exceed `i128::MAX`. If a
+    /// single vote pushes any of the tallies (for, against, abstain) beyond `i128::MAX`,
+    /// the transaction will safely fail with `VoteWeightOverflow`.
     pub fn cast_vote(
         env: Env,
         voter: Address,
@@ -224,9 +232,9 @@ impl GovernanceContract {
         }
 
         match vote_type {
-            VoteType::For => proposal.votes_for += voting_power,
-            VoteType::Against => proposal.votes_against += voting_power,
-            VoteType::Abstain => proposal.votes_abstain += voting_power,
+            VoteType::For => proposal.votes_for = proposal.votes_for.checked_add(voting_power).ok_or(Error::VoteWeightOverflow)?,
+            VoteType::Against => proposal.votes_against = proposal.votes_against.checked_add(voting_power).ok_or(Error::VoteWeightOverflow)?,
+            VoteType::Abstain => proposal.votes_abstain = proposal.votes_abstain.checked_add(voting_power).ok_or(Error::VoteWeightOverflow)?,
         }
         proposal.total_votes += 1;
 
@@ -264,7 +272,9 @@ impl GovernanceContract {
             return Err(Error::VotingStillActive);
         }
 
-        let total_cast = proposal.votes_for + proposal.votes_against + proposal.votes_abstain;
+        let total_cast = proposal.votes_for
+            .checked_add(proposal.votes_against).ok_or(Error::VoteWeightOverflow)?
+            .checked_add(proposal.votes_abstain).ok_or(Error::VoteWeightOverflow)?;
         let total_power = total_voting_power(&config);
         if total_power <= 0 {
             return Err(Error::InvalidTotalVotingPower);
@@ -278,7 +288,7 @@ impl GovernanceContract {
             return Ok(proposal.status);
         }
 
-        let approval_votes = proposal.votes_for + proposal.votes_against;
+        let approval_votes = proposal.votes_for.checked_add(proposal.votes_against).ok_or(Error::VoteWeightOverflow)?;
         if approval_votes == 0 {
             proposal.status = ProposalStatus::Rejected;
         } else {
@@ -1049,5 +1059,34 @@ fn test_cross_contract_auth_scope_minimal() {
         }
     }
     assert!(!vote_contract_authorized, "Contract should not broadly authorize cross-contract read calls in cast_vote");
+}
+
+#[test]
+fn test_edge_case_vote_weight_overflow() {
+    let env = Env::default();
+    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let token_admin_client = token_admin_client.unwrap();
+
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+
+    // Give voter1 a balance near i128::MAX
+    token_admin_client.mint(&voter1, &(i128::MAX - 50));
+    // Give voter2 enough to overflow when added
+    token_admin_client.mint(&voter2, &100);
+    
+    // Give proposer enough stake to create a proposal
+    token_admin_client.mint(&proposer, &10);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Voter1 casts a For vote, successfully tallying i128::MAX - 50
+    let res1 = client.try_cast_vote(&voter1, &prop_id, &VoteType::For);
+    assert!(res1.is_ok());
+
+    // Voter2 casts a For vote, which would push the total to i128::MAX + 50
+    // This must trigger the typed overflow error, not a panic
+    let res2 = client.try_cast_vote(&voter2, &prop_id, &VoteType::For);
+    assert_eq!(res2, Err(Ok(Error::VoteWeightOverflow)));
 }
 }
