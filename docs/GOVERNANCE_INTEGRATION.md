@@ -86,6 +86,18 @@ reports an executed proposal for the exact `wasm_hash`. The escrow contracts
 use a Soroban `contractclient` interface to call the governance contract's
 short `is_upg_ok(wasm_hash)` query after the minimum version check passes.
 
+#### Governance Proposal Execution Guard
+
+```rust
+fn execute_governance_proposal(env: &Env, proposal_id: u32) -> bool
+```
+
+Consumes an approved grainlify-core governance proposal before a
+governance-triggered escrow action proceeds. The guard delegates to
+`grainlify-core`'s `execute_proposal(proposal_id)`, so quorum, approval
+threshold, execution delay, and replay protection are re-validated by the
+governance module instead of trusting a caller-supplied flag.
+
 ## Integration Points
 
 ### Admin Operations Protected by Governance
@@ -105,6 +117,11 @@ The following admin operations now check governance requirements:
 - `batch_release_funds()` - Batch admin-authorized contributor payouts
 - `refund()` - Post-deadline or approved refund transfer
 - `sweep_expired_refunds()` - Batch post-deadline refund sweep
+
+Bounty escrow also exposes `execute_governance_proposal(proposal_id)` as the
+proposal-state gate for governance-triggered actions. It returns
+`GovernanceProposalNotExecutable` when the proposal is pending, rejected,
+missing, delayed, or already executed.
 
 ### Governance Check Flow
 
@@ -246,6 +263,14 @@ pub fn check_upgrade_approval(env: &Env, wasm_hash: &BytesN<32>) -> bool {
 The `is_upg_ok` query returns `true` only when the matching proposal is
 `Executed` and the proposal's `execution_delay` has elapsed.
 
+### 4. Governance Action Replay Protection
+
+Governance-triggered escrow actions should first call
+`execute_governance_proposal(proposal_id)`. This replays the core governance
+state machine at the trust boundary: only an `Approved` proposal can be
+consumed, and successful consumption marks it `Executed`, preventing the same
+proposal from authorizing a second action.
+
 ## Testing
 
 ### Test Coverage
@@ -267,6 +292,8 @@ The integration includes comprehensive tests:
    - Admin operations with governance
    - Upgrade scenarios
    - Matching-hash approval, wrong-hash rejection, and missing-governance rejection
+   - Proposal execution guard rejection for pending, rejected, and already-executed proposals
+   - Proposal execution guard happy path and replay rejection
    - Cross-contract `bounty_escrow` + real `grainlify-core` version gates, including below-minimum rejection, at-minimum success, and numeric-encoded version checks
    - Value-transfer gates for release, partial release, refund, expired-refund sweep, and batch release paths
 

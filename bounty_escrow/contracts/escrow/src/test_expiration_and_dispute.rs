@@ -712,6 +712,220 @@ fn test_multiple_bounties_independent_resolution() {
     assert_eq!(setup.token.balance(&setup.depositor), 10_000_000 - 1500);
 }
 
+// ============================================================================
+// Expiration-during-dispute race tests
+//
+// Precedence rule (enforced by load_refundable_escrow):
+//   An open dispute (PendingClaim key present) ALWAYS blocks expiration.
+//   Expiration — whether triggered via refund() or sweep_expired_refunds() —
+//   is deferred until the dispute is explicitly resolved (cancel or claim).
+//   This prevents a race where a depositor auto-recovers funds while a
+//   legitimate dispute is still being adjudicated.
+// ============================================================================
+
+/// Race 1: dispute opened one ledger second BEFORE expiration.
+///
+/// Timeline: lock → authorize_claim (deadline - 1) → advance to deadline → try refund
+/// Expected: refund is blocked by the open dispute even though the deadline
+///           has now passed.  Funds stay locked until admin cancels the claim.
+#[test]
+fn test_dispute_opened_one_ledger_before_expiration_blocks_refund() {
+    let setup = TestSetup::new();
+    let bounty_id = 100_u64;
+    let amount = 4_000_i128;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 500;
+    let claim_window = 300;
+
+    setup.escrow.set_claim_window(&claim_window);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // Open dispute one ledger second before expiration
+    setup.env.ledger().set_timestamp(deadline - 1);
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    // Advance to exactly the deadline — expiration would normally fire here
+    setup.env.ledger().set_timestamp(deadline);
+
+    // Dispute takes precedence: refund must be blocked
+    let result = setup.escrow.try_refund(&bounty_id);
+    assert!(
+        result.is_err(),
+        "refund must be blocked while dispute is open, even at the deadline"
+    );
+
+    let escrow = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, EscrowStatus::Locked);
+    assert_eq!(setup.token.balance(&setup.escrow.address), amount);
+    assert_eq!(setup.token.balance(&setup.depositor), 10_000_000 - amount);
+
+    // Once admin resolves the dispute, refund becomes available
+    setup.escrow.cancel_pending_claim(&bounty_id);
+    setup.escrow.refund(&bounty_id);
+
+    assert_eq!(
+        setup.escrow.get_escrow_info(&bounty_id).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(setup.token.balance(&setup.depositor), 10_000_000);
+}
+
+/// Race 2: dispute opened in the SAME ledger second as expiration.
+///
+/// Timeline: lock → advance to deadline → authorize_claim (at deadline) → try refund
+/// Expected: the dispute wins the race even when opened at exactly the
+///           expiration timestamp.  Refund remains blocked.
+#[test]
+fn test_dispute_opened_same_ledger_as_expiration_blocks_refund() {
+    let setup = TestSetup::new();
+    let bounty_id = 101_u64;
+    let amount = 3_500_i128;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 400;
+    let claim_window = 300;
+
+    setup.escrow.set_claim_window(&claim_window);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // Advance to the exact expiration ledger and open the dispute there
+    setup.env.ledger().set_timestamp(deadline);
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    // Refund must still be blocked — dispute was registered at the same timestamp
+    let result = setup.escrow.try_refund(&bounty_id);
+    assert!(
+        result.is_err(),
+        "refund must be blocked when dispute is opened at the exact expiration timestamp"
+    );
+
+    let escrow = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, EscrowStatus::Locked);
+    assert_eq!(setup.token.balance(&setup.escrow.address), amount);
+
+    // Resolving the dispute restores normal flow
+    setup.escrow.cancel_pending_claim(&bounty_id);
+    setup.escrow.refund(&bounty_id);
+
+    assert_eq!(
+        setup.escrow.get_escrow_info(&bounty_id).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(setup.token.balance(&setup.depositor), 10_000_000);
+}
+
+/// Race 3: expiration (refund) already executed — late dispute attempt is rejected.
+///
+/// Timeline: lock → advance past deadline → refund succeeds → try authorize_claim
+/// Expected: once funds have been refunded the bounty is closed; a late
+///           authorize_claim must fail with FundsNotLocked (or equivalent),
+///           confirming that completed expirations cannot be disputed retroactively.
+#[test]
+fn test_expiration_already_executed_rejects_late_dispute() {
+    let setup = TestSetup::new();
+    let bounty_id = 102_u64;
+    let amount = 2_000_i128;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 300;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // Let the deadline pass with no dispute
+    setup.env.ledger().set_timestamp(deadline + 1);
+    setup.escrow.refund(&bounty_id);
+
+    // Confirm funds are back
+    assert_eq!(
+        setup.escrow.get_escrow_info(&bounty_id).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(setup.token.balance(&setup.depositor), 10_000_000);
+
+    // A late dispute attempt must be rejected — the bounty is already closed
+    let result = setup
+        .escrow
+        .try_authorize_claim(&bounty_id, &setup.contributor);
+    assert!(
+        result.is_err(),
+        "authorizing a claim on an already-refunded bounty must fail"
+    );
+
+    // Escrow state unchanged
+    assert_eq!(
+        setup.escrow.get_escrow_info(&bounty_id).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(setup.token.balance(&setup.escrow.address), 0);
+}
+
+/// Race 4: sweep_expired_refunds is blocked by an open dispute.
+///
+/// A dispute opened before the batch sweep runs must prevent that bounty
+/// from being swept, protecting funds while the dispute is live.
+/// Non-disputed expired bounties in the same batch should also be blocked
+/// atomically (sweep is all-or-nothing per batch call).
+#[test]
+fn test_sweep_blocked_by_open_dispute() {
+    let setup = TestSetup::new();
+    let disputed_bounty = 103_u64;
+    let clean_bounty = 104_u64;
+    let amount = 1_500_i128;
+    let now = setup.env.ledger().timestamp();
+    let deadline = now + 200;
+    let claim_window = 300;
+
+    setup.escrow.set_claim_window(&claim_window);
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &disputed_bounty, &amount, &deadline);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &clean_bounty, &amount, &deadline);
+
+    // Open a dispute on one of the bounties before expiration
+    setup.env.ledger().set_timestamp(deadline - 1);
+    setup
+        .escrow
+        .authorize_claim(&disputed_bounty, &setup.contributor);
+
+    // Advance past both deadlines
+    setup.env.ledger().set_timestamp(deadline + 1);
+
+    // Sweep with the disputed bounty in the batch — must be blocked entirely
+    let ids = vec![&setup.env, disputed_bounty, clean_bounty];
+    let result = try_sweep_direct(&setup, ids);
+    assert!(
+        result.is_err(),
+        "sweep must be blocked when any bounty in the batch has an open dispute"
+    );
+
+    // Both bounties remain locked; no funds moved
+    assert_eq!(
+        setup.escrow.get_escrow_info(&disputed_bounty).status,
+        EscrowStatus::Locked
+    );
+    assert_eq!(
+        setup.escrow.get_escrow_info(&clean_bounty).status,
+        EscrowStatus::Locked
+    );
+    assert_eq!(setup.token.balance(&setup.escrow.address), amount * 2);
+
+    // After resolving the dispute, the clean bounty can be swept on its own
+    setup.escrow.cancel_pending_claim(&disputed_bounty);
+    let clean_ids = vec![&setup.env, clean_bounty];
+    assert_eq!(setup.escrow.sweep_expired_refunds(&clean_ids), 1);
+    assert_eq!(
+        setup.escrow.get_escrow_info(&clean_bounty).status,
+        EscrowStatus::Refunded
+    );
+}
+
 // Claim cancellation properly restores refund eligibility
 #[test]
 fn test_claim_cancellation_restores_refund_eligibility() {

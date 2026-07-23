@@ -16,6 +16,30 @@ pub trait GovernanceInterface {
     fn get_ver(env: Env) -> u32;
     fn get_version_numeric_encoded(env: Env) -> u32;
     fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool;
+    fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), GovernanceError>;
+}
+
+#[soroban_sdk::contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum GovernanceError {
+    NotInitialized = 1,
+    InvalidThreshold = 2,
+    ThresholdTooLow = 3,
+    InsufficientStake = 4,
+    ProposalsNotFound = 5,
+    ProposalNotFound = 6,
+    ProposalNotActive = 7,
+    VotingNotStarted = 8,
+    VotingEnded = 9,
+    VotingStillActive = 10,
+    AlreadyVoted = 11,
+    ProposalNotApproved = 12,
+    ExecutionDelayNotMet = 13,
+    ProposalExpired = 14,
+    ZeroVotingPower = 15,
+    InvalidTotalVotingPower = 16,
+    Unauthorized = 17,
 }
 
 /// Set the governance contract address (admin only)
@@ -68,4 +92,24 @@ pub fn check_upgrade_approval(env: &Env, wasm_hash: &BytesN<32>) -> bool {
     }
 
     GovernanceClient::new(env, &gov_addr).is_upg_ok(wasm_hash)
+}
+
+/// Validate and consume an approved governance proposal before an escrow action.
+///
+/// This delegates to grainlify-core's `execute_proposal`, so quorum,
+/// approval threshold, execution delay, and replay protection are enforced by
+/// the governance module rather than a caller-supplied flag.
+pub fn execute_governance_proposal(env: &Env, proposal_id: u32) -> bool {
+    let Some(gov_addr) = get_governance_contract(env) else {
+        return false;
+    };
+
+    if !check_governance_version(env) {
+        return false;
+    }
+
+    matches!(
+        GovernanceClient::new(env, &gov_addr).try_execute_proposal(&proposal_id),
+        Ok(Ok(()))
+    )
 }

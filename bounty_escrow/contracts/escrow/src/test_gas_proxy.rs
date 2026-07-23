@@ -269,7 +269,6 @@ fn test_fee_calculation_precision_boundaries() {
     let overflow_fee = crate::BountyEscrowContract::calculate_fee(overflow_amount, 5000);
     assert_eq!(overflow_fee, 0, "Overflow should safely default to 0 due to checked_math");
 }
-
 // ═════════════════════════════════════════════════════════════════════════════
 // 2. BATCH LOCK — SIZE SCALING
 // ═════════════════════════════════════════════════════════════════════════════

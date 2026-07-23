@@ -33,6 +33,113 @@ mod mock_governance {
     }
 }
 
+mod mock_governance_with_proposal_state {
+    use crate::governance_integration::GovernanceError;
+    use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Map, Symbol};
+
+    const PROPOSAL_STATES: Symbol = symbol_short!("PR_STATE");
+    const STATUS_PENDING: u32 = 1;
+    const STATUS_APPROVED: u32 = 2;
+    const STATUS_REJECTED: u32 = 3;
+    const STATUS_EXECUTED: u32 = 4;
+
+    #[contract]
+    pub struct MockGovernanceWithProposalState;
+
+    #[contractimpl]
+    impl MockGovernanceWithProposalState {
+        pub fn get_ver(_env: Env) -> u32 {
+            2
+        }
+
+        pub fn get_version_numeric_encoded(_env: Env) -> u32 {
+            20_000
+        }
+
+        pub fn is_upg_ok(_env: Env, _wasm_hash: BytesN<32>) -> bool {
+            false
+        }
+
+        pub fn set_proposal_status(env: Env, proposal_id: u32, status: u32) {
+            let mut statuses: Map<u32, u32> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .unwrap_or(Map::new(&env));
+            statuses.set(proposal_id, status);
+            env.storage().instance().set(&PROPOSAL_STATES, &statuses);
+        }
+
+        pub fn get_proposal_status(env: Env, proposal_id: u32) -> u32 {
+            let statuses: Map<u32, u32> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .unwrap_or(Map::new(&env));
+            statuses.get(proposal_id).unwrap_or(0)
+        }
+
+        pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), GovernanceError> {
+            let mut statuses: Map<u32, u32> = env
+                .storage()
+                .instance()
+                .get(&PROPOSAL_STATES)
+                .ok_or(GovernanceError::ProposalsNotFound)?;
+            let status = statuses
+                .get(proposal_id)
+                .ok_or(GovernanceError::ProposalNotFound)?;
+
+            if status != STATUS_APPROVED {
+                return Err(GovernanceError::ProposalNotApproved);
+            }
+
+            statuses.set(proposal_id, STATUS_EXECUTED);
+            env.storage().instance().set(&PROPOSAL_STATES, &statuses);
+            Ok(())
+        }
+
+        pub fn pending_status(_env: Env) -> u32 {
+            STATUS_PENDING
+        }
+
+        pub fn approved_status(_env: Env) -> u32 {
+            STATUS_APPROVED
+        }
+
+        pub fn rejected_status(_env: Env) -> u32 {
+            STATUS_REJECTED
+        }
+
+        pub fn executed_status(_env: Env) -> u32 {
+            STATUS_EXECUTED
+        }
+    }
+}
+
+// Mock governance that returns version 1 (below minimum) but approves the same hash [7;32].
+// Used to exercise the version-gate short-circuit branch in check_upgrade_approval.
+mod mock_governance_low {
+    use soroban_sdk::{contract, contractimpl, BytesN, Env};
+
+    #[contract]
+    pub struct MockGovernanceLowVersion;
+
+    #[contractimpl]
+    impl MockGovernanceLowVersion {
+        pub fn get_ver(_env: Env) -> u32 {
+            1
+        }
+
+        pub fn get_version_numeric_encoded(_env: Env) -> u32 {
+            10_000 // v1.0.0 encoded
+        }
+
+        pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
+            wasm_hash == BytesN::from_array(&env, &[7u8; 32])
+        }
+    }
+}
+
 fn create_token_contract<'a>(
     env: &Env,
     admin: &Address,
@@ -86,6 +193,92 @@ impl<'a> ValueTransferSetup<'a> {
         self.escrow
             .lock_funds(&self.depositor, &bounty_id, &amount, &deadline);
     }
+}
+
+fn configure_stateful_governance<'a>(
+    env: &'a Env,
+    escrow: &BountyEscrowContractClient<'a>,
+) -> mock_governance_with_proposal_state::MockGovernanceWithProposalStateClient<'a> {
+    let gov_contract_id = env.register_contract(
+        None,
+        mock_governance_with_proposal_state::MockGovernanceWithProposalState,
+    );
+    escrow.set_governance_contract(&gov_contract_id);
+    escrow.set_min_governance_version(&2);
+    mock_governance_with_proposal_state::MockGovernanceWithProposalStateClient::new(
+        env,
+        &gov_contract_id,
+    )
+}
+
+#[test]
+fn test_governance_proposal_execution_rejects_pending_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&1, &governance.pending_status());
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&1),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+    assert_eq!(
+        governance.get_proposal_status(&1),
+        governance.pending_status()
+    );
+}
+
+#[test]
+fn test_governance_proposal_execution_rejects_rejected_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&2, &governance.rejected_status());
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&2),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+    assert_eq!(
+        governance.get_proposal_status(&2),
+        governance.rejected_status()
+    );
+}
+
+#[test]
+fn test_governance_proposal_execution_rejects_already_executed_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&3, &governance.executed_status());
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&3),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+    assert_eq!(
+        governance.get_proposal_status(&3),
+        governance.executed_status()
+    );
+}
+
+#[test]
+fn test_governance_proposal_execution_consumes_approved_proposal_once() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&4, &governance.approved_status());
+
+    setup.escrow.execute_governance_proposal(&4);
+    assert_eq!(
+        governance.get_proposal_status(&4),
+        governance.executed_status()
+    );
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&4),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
 }
 
 #[test]
@@ -527,4 +720,172 @@ fn test_governance_not_initialized_error() {
 
     // Should fail because contract is not initialized
     let _ = client.set_governance_contract(&governance_addr);
+}
+
+// =============================================================================
+// Version-gate coverage for check_upgrade_approval
+// =============================================================================
+// Branch map for check_upgrade_approval (governance_integration.rs):
+//   1) No governance configured           -> return false
+//      Exercised by: test_upgrade_approval_denies_when_governance_is_not_configured
+//   2) Version gate: check_governance_version() == false -> return false (short-circuit)
+//      Exercised by: test_upgrade_approval_version_gate_rejects_matching_hash_when_version_too_low*
+//   3) Hash mismatch: is_upg_ok returns false -> return false
+//      Exercised by: test_upgrade_approval_requires_matching_executed_governance_hash (wrong_hash)
+//   4) Happy path: version ok + hash matches -> return true
+//      Exercised by: test_upgrade_approval_requires_matching_executed_governance_hash (approved_hash)
+//                    + test_upgrade_approval_version_gate_allows_matching_hash_when_version_meets*
+//                    + test_upgrade_approval_same_hash_transitions_from_reject_to_accept_when_min_version_lowered
+// * = new tests added for this bounty.
+
+/// A matching upgrade hash must be rejected when the linked governance contract's
+/// on-chain version is below min_governance_version. This pins down the version-gate
+/// short-circuit at the top of check_upgrade_approval — the hash would otherwise match,
+/// but the function must return false before ever reaching is_upg_ok.
+#[test]
+fn test_upgrade_approval_version_gate_rejects_matching_hash_when_version_too_low() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    // Mock governance returns version 1, but we require version 2 — so the version
+    // gate should short-circuit and reject even though the hash matches.
+    let gov_contract_id =
+        env.register_contract(None, mock_governance_low::MockGovernanceLowVersion);
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    let matching_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        // Directly assert the version check fails, proving we are on the version-gate branch.
+        assert!(
+            !governance_integration::check_governance_version(&env),
+            "governance version should be too low (1 < 2)"
+        );
+        // The version gate must short-circuit the upgrade approval to false,
+        // even though is_upg_ok would return true for this hash.
+        assert!(
+            !governance_integration::check_upgrade_approval(&env, &matching_hash),
+            "matching hash must be rejected when governance version is below minimum"
+        );
+    });
+}
+
+/// The same matching hash must be accepted once the governance version meets
+/// min_governance_version. This is the complementary positive case to the rejection test above.
+#[test]
+fn test_upgrade_approval_version_gate_allows_matching_hash_when_version_meets() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    // Same low-version mock (version 1), but now min_version is also 1, so the gate passes.
+    let gov_contract_id =
+        env.register_contract(None, mock_governance_low::MockGovernanceLowVersion);
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&1);
+
+    let matching_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            governance_integration::check_governance_version(&env),
+            "governance version 1 should meet min 1"
+        );
+        assert!(
+            governance_integration::check_upgrade_approval(&env, &matching_hash),
+            "matching hash should be accepted when version requirement is met"
+        );
+    });
+}
+
+/// Proves that with all else unchanged (same governance contract, same hash),
+/// lowering min_governance_version from a too-high value to a met value flips
+/// check_upgrade_approval from false to true. This demonstrates the version gate
+/// is the sole reason for the earlier rejection.
+#[test]
+fn test_upgrade_approval_same_hash_transitions_from_reject_to_accept_when_min_version_lowered() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    let gov_contract_id =
+        env.register_contract(None, mock_governance_low::MockGovernanceLowVersion);
+    client.set_governance_contract(&gov_contract_id);
+
+    let matching_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    // Step 1: min_version = 2, governance version = 1 => should reject (version too low).
+    client.set_min_governance_version(&2);
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &matching_hash
+        ));
+    });
+
+    // Step 2: all else unchanged, lower min_version to 1 => should now accept same hash.
+    client.set_min_governance_version(&1);
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_upgrade_approval(
+            &env,
+            &matching_hash
+        ));
+    });
+}
+
+/// Same version-gate logic but exercising the numeric-encoded semver path
+/// (min_version >= 10_000 uses get_version_numeric_encoded).
+#[test]
+fn test_upgrade_approval_numeric_encoded_version_gate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    // Mock low returns 10_000 (v1.0.0 encoded). Require 20_000 (v2.0.0) => should fail.
+    let gov_contract_id =
+        env.register_contract(None, mock_governance_low::MockGovernanceLowVersion);
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&20_000);
+
+    let matching_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_governance_version(&env));
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &matching_hash
+        ));
+    });
+
+    // Lower requirement to 10_000 => should now pass and accept the same hash.
+    client.set_min_governance_version(&10_000);
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_governance_version(&env));
+        assert!(governance_integration::check_upgrade_approval(
+            &env,
+            &matching_hash
+        ));
+    });
 }

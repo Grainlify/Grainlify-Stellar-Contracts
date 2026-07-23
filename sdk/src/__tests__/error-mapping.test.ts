@@ -303,6 +303,7 @@ describe('Cross-layer consistency', () => {
       [21, 'CircuitBreakerOpen'],
       [22, 'ClaimExpired'],
       [23, 'Bounty GovernanceVersionTooLow'],
+      [25, 'Bounty GovernanceProposalNotExecutable'],
     ];
 
     for (const [code, message] of numericToString) {

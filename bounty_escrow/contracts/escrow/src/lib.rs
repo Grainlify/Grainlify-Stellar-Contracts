@@ -404,6 +404,8 @@ pub enum Error {
     GovernanceVersionTooLow = 23,
     /// Returned when authorize_claim is called while a non-expired pending claim already exists
     PendingClaimExists = 24,
+    /// Returned when a governance proposal is missing, unapproved, delayed, rejected, or already executed
+    GovernanceProposalNotExecutable = 25,
 }
 
 #[contracttype]
@@ -2767,6 +2769,25 @@ impl BountyEscrowContract {
         governance_integration::get_min_governance_version(&env)
     }
 
+    /// Validate and consume an approved governance proposal before executing a governance action.
+    ///
+    /// The configured grainlify-core governance contract re-checks quorum and
+    /// approval state by executing the proposal itself. Pending, rejected,
+    /// delayed, missing, or already-executed proposals are rejected.
+    pub fn execute_governance_proposal(env: Env, proposal_id: u32) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+
+        Self::check_governance_requirements(&env)?;
+
+        if !governance_integration::execute_governance_proposal(&env, proposal_id) {
+            return Err(Error::GovernanceProposalNotExecutable);
+        }
+
+        Ok(())
+    }
+
     /// Check if governance requirements are met before admin operations
     fn check_governance_requirements(env: &Env) -> Result<(), Error> {
         if !governance_integration::check_governance_version(env) {
@@ -3602,3 +3623,5 @@ mod test_reentrancy;
 mod test_balance_invariant;
 #[cfg(test)]
 mod test_upgrade_scenarios;
+#[cfg(test)]
+mod test_admin_audit_views;

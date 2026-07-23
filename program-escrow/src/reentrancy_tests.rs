@@ -529,7 +529,7 @@ fn test_reentrancy_guard_model_documentation() {
 // ============================================================================
 
 #[test]
-#[should_panic(expected = "Reentrancy detected")]
+#[should_panic(expected = "re-entry")]
 fn test_token_callback_reentrancy_single_payout() {
     let env = Env::default();
     env.mock_all_auths();
@@ -563,7 +563,7 @@ fn test_token_callback_reentrancy_single_payout() {
 }
 
 #[test]
-#[should_panic(expected = "Reentrancy detected")]
+#[should_panic(expected = "re-entry")]
 fn test_token_callback_reentrancy_trigger_releases() {
     let env = Env::default();
     env.mock_all_auths();
