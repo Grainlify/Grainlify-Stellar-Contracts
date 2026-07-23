@@ -108,7 +108,8 @@ pub fn execute_governance_proposal(env: &Env, proposal_id: u32) -> bool {
         return false;
     }
 
-    GovernanceClient::new(env, &gov_addr)
-        .execute_proposal(&proposal_id)
-        .is_ok()
+    matches!(
+        GovernanceClient::new(env, &gov_addr).try_execute_proposal(&proposal_id),
+        Ok(Ok(()))
+    )
 }

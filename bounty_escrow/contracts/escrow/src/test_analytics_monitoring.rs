@@ -12,6 +12,7 @@
 /// * `get_escrow_count`     – increments on each lock; never decrements
 /// * `query_escrows_by_status` – returns correct subset filtered by status
 /// * `query_escrows_by_amount` – range filter works for locked, released, and mixed states
+/// * `get_high_value_bounties` – filters bounties >= min_amount with inclusive boundary, limit truncation, and empty result handling
 /// * `query_escrows_by_deadline` – deadline range filter returns correct bounties
 /// * `query_escrows_by_depositor` – per-depositor index is populated on lock
 /// * `get_escrow_ids_by_status` – ID-only view mirrors full-object equivalent
@@ -511,6 +512,86 @@ fn test_query_by_amount_no_results_outside_range() {
 
     let results = escrow.query_escrows_by_amount(&600, &1_000, &0, &10);
     assert_eq!(results.len(), 0);
+}
+
+// ===========================================================================
+// 6b. Get high value bounties – correctness & edge case assertions
+// ===========================================================================
+
+#[test]
+fn test_get_high_value_bounties_inclusive_boundary_and_filtering() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &10_000_000);
+
+    let deadline = env.ledger().timestamp() + 2000;
+    escrow.lock_funds(&depositor, &10, &400, &deadline);
+    escrow.lock_funds(&depositor, &11, &500, &deadline);
+    escrow.lock_funds(&depositor, &12, &600, &deadline);
+
+    // Call get_high_value_bounties(500, 10)
+    let results = escrow.get_high_value_bounties(&500, &10);
+
+    // Asserts 500 (bounty 11) and 600 (bounty 12) are included (proving inclusive boundary >=),
+    // and excludes 400 (bounty 10).
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.get(0), Some(11));
+    assert_eq!(results.get(1), Some(12));
+}
+
+#[test]
+fn test_get_high_value_bounties_limit_truncation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &10_000_000);
+
+    let deadline = env.ledger().timestamp() + 2000;
+    // Lock 5 bounties that all meet min_amount (>= 500)
+    for i in 1..=5 {
+        escrow.lock_funds(&depositor, &i, &(500 + (i as i128) * 100), &deadline);
+    }
+
+    // Call get_high_value_bounties(500, 2) when 5 qualify
+    let results = escrow.get_high_value_bounties(&500, &2);
+
+    // Asserts exactly limit = 2 IDs are returned
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.get(0), Some(1));
+    assert_eq!(results.get(1), Some(2));
+}
+
+#[test]
+fn test_get_high_value_bounties_returns_empty_vec_when_none_qualify() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &10_000_000);
+
+    let deadline = env.ledger().timestamp() + 2000;
+    escrow.lock_funds(&depositor, &1, &100, &deadline);
+    escrow.lock_funds(&depositor, &2, &200, &deadline);
+    escrow.lock_funds(&depositor, &3, &300, &deadline);
+
+    // min_amount set higher than every escrow's amount
+    let results = escrow.get_high_value_bounties(&1000, &10);
+
+    // Asserts an empty Vec is returned without panicking or returning stale/partial data
+    assert_eq!(results.len(), 0);
+    assert!(results.is_empty());
 }
 
 // ===========================================================================

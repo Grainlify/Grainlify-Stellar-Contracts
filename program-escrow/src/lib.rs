@@ -789,7 +789,7 @@ impl ProgramEscrowContract {
         recipient: &Address,
         amount: i128,
     ) {
-        let threshold = program_data.total_funds / 10; // 10% of total funds
+        let threshold = monitoring::get_large_payout_threshold_amount(env, program_data.total_funds);
         if amount >= threshold {
             env.events().publish(
                 (LARGE_PAYOUT,),
@@ -2852,6 +2852,25 @@ impl ProgramEscrowContract {
     pub fn get_performance_stats(env: Env, function_name: Symbol) -> monitoring::PerformanceStats {
         monitoring::get_performance_stats(&env, function_name)
     }
+
+    /// Get the large-payout alert threshold in basis points (default 1000 = 10%).
+    /// A payout is flagged as "large" when it equals or exceeds
+    /// `total_funds * threshold_bps / 10_000`.
+    pub fn get_large_payout_threshold(env: Env) -> u32 {
+        monitoring::get_large_payout_threshold_bps(&env)
+    }
+
+    /// Update the large-payout alert threshold (admin only).
+    /// `threshold_bps` is expressed in basis points (e.g. 1000 = 10%, 2500 = 25%).
+    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        monitoring::set_large_payout_threshold_bps(&env, threshold_bps);
+    }
 }
 
 #[cfg(test)]
@@ -3610,6 +3629,170 @@ mod integration_tests {
         let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
         client.update_rate_limit_config(&3600, &10, &30);
+    }
+
+    // ========================================================================
+    // list_programs() 0-or-1 boundary
+    //
+    // `list_programs` collapses to a 0-or-1-element "list" today: it returns an
+    // empty Vec unless PROGRAM_DATA exists, in which case it returns a single
+    // entry built from `get_program_info`. Both sides of that boundary are
+    // pinned down here so a future refactor to multiple programs cannot silently
+    // start returning stale, duplicated, or missing entries.
+    // ========================================================================
+
+    /// Before any program is initialized, `list_programs` must return an empty
+    /// Vec (the zero side of the boundary), not a defaulted/placeholder entry.
+    #[test]
+    fn test_list_programs_empty_before_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let programs = client.list_programs();
+        assert_eq!(programs.len(), 0);
+        assert!(programs.is_empty());
+
+        // Cross-check the sibling counter agrees on the empty boundary.
+        assert_eq!(client.get_program_count(), 0);
+    }
+
+    /// After initialization, `list_programs` must return exactly one entry, and
+    /// that entry must match `get_program_info` field for field (the one side of
+    /// the boundary).
+    #[test]
+    fn test_list_programs_single_after_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let token = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+
+        env.mock_all_auths();
+        client.initialize_program(&program_id, &authorized_key, &token);
+
+        let programs = client.list_programs();
+        assert_eq!(programs.len(), 1);
+
+        // The single listed entry must be identical to what get_program_info
+        // reports directly — no drift, duplication, or field mismatch.
+        let listed = programs.get(0).unwrap();
+        let info = client.get_program_info();
+        assert_eq!(listed, info);
+        assert_eq!(listed.program_id, program_id);
+        assert_eq!(listed.authorized_payout_key, authorized_key);
+        assert_eq!(listed.token_address, token);
+        assert_eq!(listed.total_funds, 0);
+        assert_eq!(listed.remaining_balance, 0);
+        assert_eq!(listed.payout_history.len(), 0);
+
+        // The counter must agree that exactly one program now exists.
+        assert_eq!(client.get_program_count(), 1);
+    }
+
+    // ========================================================================
+    // get_program_release_schedule() not-found panic
+    //
+    // `get_program_release_schedule` linearly scans the schedule list and either
+    // returns the matching entry or `panic!("Schedule not found")`. Every other
+    // call site passes an id known to exist, so the panic branch was never
+    // exercised. These tests lock in the fail-closed behavior and the exact
+    // panic wording: if the scan were ever refactored (e.g. to an indexed
+    // lookup) and started returning a defaulted/zeroed schedule on a miss,
+    // callers could silently act on bogus schedule data instead of failing.
+    // ========================================================================
+
+    /// Requesting a `schedule_id` that does not exist on a program that *does*
+    /// have schedules must panic with exactly "Schedule not found".
+    #[test]
+    #[should_panic(expected = "Schedule not found")]
+    fn test_get_program_release_schedule_nonexistent_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let winner = Address::generate(&env);
+        let token = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+        let amount = 1000_0000000;
+
+        env.mock_all_auths();
+
+        // One schedule (id 1) exists; ask for a wholly unrelated id.
+        setup_program_with_schedule(
+            &env,
+            &client,
+            &contract_id,
+            &authorized_key,
+            &token,
+            &program_id,
+            amount,
+            &winner,
+            1000,
+        );
+
+        client.get_program_release_schedule(&999);
+    }
+
+    /// A program with zero configured schedules must panic on any lookup rather
+    /// than returning a default/empty struct.
+    #[test]
+    #[should_panic(expected = "Schedule not found")]
+    fn test_get_program_release_schedule_zero_schedules_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let token = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+
+        env.mock_all_auths();
+
+        // Initialize a program but never create any release schedule.
+        client.initialize_program(&program_id, &authorized_key, &token);
+        assert_eq!(client.get_program_release_schedules().len(), 0);
+
+        client.get_program_release_schedule(&1);
+    }
+
+    /// A `schedule_id` exactly one past the highest configured id must be
+    /// treated as not-found, not accidentally matched to the last entry.
+    #[test]
+    #[should_panic(expected = "Schedule not found")]
+    fn test_get_program_release_schedule_one_past_highest_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let winner1 = Address::generate(&env);
+        let winner2 = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+        let amount1 = 600_0000000;
+        let amount2 = 400_0000000;
+        let total_amount = amount1 + amount2;
+
+        env.mock_all_auths();
+
+        let token_client = create_token_contract(&env, &authorized_key);
+        client.initialize_program(&program_id, &authorized_key, &token_client.address);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
+
+        // Highest configured id is 2 after creating two schedules.
+        client.create_program_release_schedule(&amount1, &1000, &winner1);
+        client.create_program_release_schedule(&amount2, &2000, &winner2);
+
+        // Sanity: the highest configured id resolves before we probe past it.
+        assert_eq!(client.get_program_release_schedule(&2).schedule_id, 2);
+
+        // One past the highest must not be treated as a valid match.
+        client.get_program_release_schedule(&3);
     }
 }
 #[cfg(test)]

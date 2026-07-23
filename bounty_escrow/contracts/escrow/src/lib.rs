@@ -1527,10 +1527,16 @@ impl BountyEscrowContract {
             .instance()
             .get(&DataKey::ClaimWindow)
             .unwrap_or(0);
+        // Use remaining_amount, not the original amount — a prior
+        // partial_release can have already paid some of this escrow out, and
+        // claim() blindly transfers whatever this record says. Using the
+        // stale original amount would let a claim over-pay from the shared
+        // contract balance, silently draining funds that belong to other
+        // escrows.
         let claim = ClaimRecord {
             bounty_id,
             recipient: recipient.clone(),
-            amount: escrow.amount,
+            amount: escrow.remaining_amount,
             expires_at: now.saturating_add(claim_window),
             claimed: false,
         };
@@ -1545,7 +1551,7 @@ impl BountyEscrowContract {
                 version: EVENT_VERSION_V2,
                 bounty_id,
                 recipient,
-                amount: escrow.amount,
+                amount: escrow.remaining_amount,
                 expires_at: claim.expires_at,
             },
         );
@@ -1783,6 +1789,13 @@ impl BountyEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        // Pause enforcement takes priority over other business-logic guards
+        // below (e.g. dispute protection) — a paused release category must
+        // block the call regardless of the escrow's other state.
+        if Self::check_paused(&env, symbol_short!("release")) {
+            return Err(Error::FundsPaused);
+        }
+
         // Dispute protection: block partial releases while a dispute (pending claim) is open.
         if env
             .storage()
@@ -1825,15 +1838,16 @@ impl BountyEscrowContract {
             .instance()
             .set(&DataKey::ReentrancyGuard, &true);
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&env, &token_addr);
-
-        // Transfer only the requested partial amount to the contributor
-        client.transfer(
+        // Transfer only the requested partial amount to the contributor. Routed
+        // through execute_token_transfer so this respects release_paused /
+        // global_paused like every other outbound transfer.
+        Self::execute_token_transfer(
+            &env,
             &env.current_contract_address(),
             &contributor,
-            &payout_amount,
-        );
+            payout_amount,
+            symbol_short!("release"),
+        )?;
 
         // Decrement remaining; this is always an exact integer subtraction — no rounding
         escrow.remaining_amount -= payout_amount;
@@ -2112,6 +2126,13 @@ impl BountyEscrowContract {
             if escrow.remaining_amount <= 0 {
                 return Err(Error::InvalidAmount);
             }
+        }
+
+        // Every transfer below is a refund, so one check up front covers the
+        // whole batch — same gate the single-item refund() goes through via
+        // execute_token_transfer.
+        if Self::check_paused(&env, symbol_short!("refund")) {
+            return Err(Error::FundsPaused);
         }
 
         if env.storage().instance().has(&DataKey::ReentrancyGuard) {
@@ -2870,6 +2891,13 @@ impl BountyEscrowContract {
             return Err(Error::NotInitialized);
         }
 
+        // Every transfer below is a lock, so one check up front covers the
+        // whole batch — same gate the single-item lock_funds() goes through
+        // via execute_token_transfer.
+        if Self::check_paused(&env, symbol_short!("lock")) {
+            return Err(Error::FundsPaused);
+        }
+
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
         let contract_address = env.current_contract_address();
@@ -3041,6 +3069,13 @@ impl BountyEscrowContract {
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        // Every transfer below is a release, so one check up front covers the
+        // whole batch — same gate the single-item release_funds() goes
+        // through via execute_token_transfer.
+        if Self::check_paused(&env, symbol_short!("release")) {
+            return Err(Error::FundsPaused);
+        }
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
@@ -3476,7 +3511,15 @@ impl BountyEscrowContract {
         let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         current_admin.require_auth();
 
-        set_circuit_admin(&env, admin, Some(current_admin));
+        // set_circuit_admin's own caller check exists for a self-service
+        // handoff between successive circuit-breaker admins; it was never
+        // meant to additionally gate this entrypoint, which the contract
+        // admin's require_auth() above already fully authorizes. Passing
+        // the admin's own address here (rather than the current circuit
+        // breaker admin) made every reassignment after the first one panic,
+        // since it could never equal whichever address was already set.
+        let current_circuit_admin = get_circuit_admin(&env);
+        set_circuit_admin(&env, admin, current_circuit_admin);
         Ok(())
     }
 
@@ -3580,3 +3623,5 @@ mod test_reentrancy;
 mod test_balance_invariant;
 #[cfg(test)]
 mod test_upgrade_scenarios;
+#[cfg(test)]
+mod test_admin_audit_views;
