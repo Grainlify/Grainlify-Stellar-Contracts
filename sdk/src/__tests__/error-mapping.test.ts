@@ -335,16 +335,16 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 11 program-escrow + 22 bounty-escrow + 15 governance + 3 circuit-breaker = 51
-    expect(count).toBe(51);
+    // 11 program-escrow + 23 bounty-escrow + 15 governance + 3 circuit-breaker = 52
+    expect(count).toBe(52);
   });
 
   it('PROGRAM_ESCROW_ERROR_MAP has 1 entry', () => {
     expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(1);
   });
 
-  it('BOUNTY_ESCROW_ERROR_MAP has 22 entries', () => {
-    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(22);
+  it('BOUNTY_ESCROW_ERROR_MAP has 23 entries', () => {
+    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(23);
   });
 
   it('GOVERNANCE_ERROR_MAP has 15 entries', () => {
