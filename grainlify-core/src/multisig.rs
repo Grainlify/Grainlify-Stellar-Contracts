@@ -597,18 +597,30 @@ mod test {
 
         setup.env.as_contract(&setup.contract_id, || {
             MultiSig::approve(&setup.env, proposal_id, setup.signer_a.clone());
-        });
-
-        setup.env.as_contract(&setup.contract_id, || {
             MultiSig::approve(&setup.env, proposal_id, setup.signer_b.clone());
         });
 
-        setup.env.as_contract(&setup.contract_id, || {
-            MultiSig::execute(&setup.env, proposal_id, action.clone(), 0, || {});
-        });
+        let mut side_effect_counter = 0u32;
 
         setup.env.as_contract(&setup.contract_id, || {
-            MultiSig::execute(&setup.env, proposal_id, action, 0, || {});
+            MultiSig::execute(&setup.env, proposal_id, action.clone(), 0, || {
+                side_effect_counter += 1;
+            });
+        });
+
+        assert_eq!(side_effect_counter, 1);
+
+        let current_nonce =
+            setup.env.as_contract(&setup.contract_id, || MultiSig::nonce(&setup.env));
+        assert_eq!(current_nonce, 1);
+
+        // Re-executing the same proposal with the updated current nonce and matching action
+        // must still be rejected with AlreadyExecuted, proving the AlreadyExecuted guard
+        // fires before the action closure can run a second time.
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::execute(&setup.env, proposal_id, action, current_nonce, || {
+                side_effect_counter += 1;
+            });
         });
     }
 
