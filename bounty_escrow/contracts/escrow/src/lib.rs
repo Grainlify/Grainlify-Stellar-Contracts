@@ -3624,4 +3624,5 @@ mod test_balance_invariant;
 #[cfg(test)]
 mod test_upgrade_scenarios;
 #[cfg(test)]
+mod test_multisig_approval_authz;
 mod test_admin_audit_views;
