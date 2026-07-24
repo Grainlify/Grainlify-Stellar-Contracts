@@ -3,7 +3,7 @@ use crate::{BountyEscrowContract, BountyEscrowContractClient, Error as ContractE
 use soroban_sdk::testutils::Events;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Env, Map, Symbol, TryFromVal, Val,
+    token, vec, Address, Env, Map, Symbol, TryFromVal, Val,
 };
 
 fn create_test_env() -> (Env, BountyEscrowContractClient<'static>, Address) {
