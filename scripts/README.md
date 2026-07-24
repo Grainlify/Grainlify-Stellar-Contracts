@@ -256,7 +256,10 @@ Upgrades an existing contract to a new WASM version.
 
 ### verify-deployment.sh
 
-Checks if a deployed contract is healthy and responsive.
+Checks if a deployed contract is healthy and responsive. When
+`--expected-wasm` or `--expected-wasm-hash` is provided, it reads the deployed
+WASM hash with `stellar contract info hash --contract-id` and compares it with
+the expected artifact or hash.
 
 #### Usage
 
@@ -269,9 +272,13 @@ Checks if a deployed contract is healthy and responsive.
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-n, --network` | Target network | `testnet` |
-| `-f, --function` | Function to call | `get_version` |
+| `-f, --function` | Function to call for the primary responsiveness check | `get_version` |
 | `--check-admin` | Verify admin address | false |
 | `--expected-admin` | Expected admin value | - |
+| `--expected-wasm` | Local WASM artifact whose SHA-256 must match the deployed hash | - |
+| `--expected-wasm-hash` | Expected deployed WASM hash | - |
+| `--smoke-functions` | Comma-separated read-only functions to smoke test | `get_version,get_admin,get_pause_flags` |
+| `--skip-smoke` | Skip read-only smoke checks | false |
 | `--json` | Output as JSON | false |
 
 #### Examples
@@ -288,6 +295,16 @@ Checks if a deployed contract is healthy and responsive.
 
 # Verify admin matches expected
 ./contracts/scripts/verify-deployment.sh CABC123... --check-admin --expected-admin GABC...
+
+# Verify deployed WASM hash from a local artifact and run default smoke checks
+./contracts/scripts/verify-deployment.sh CABC123... --expected-wasm target/escrow.wasm
+
+# Verify against a known deployed WASM hash
+./contracts/scripts/verify-deployment.sh CABC123... --expected-wasm-hash 7a8b9c0d...
+
+# Customize or skip smoke checks
+./contracts/scripts/verify-deployment.sh CABC123... --smoke-functions get_version,get_admin
+./contracts/scripts/verify-deployment.sh CABC123... --skip-smoke
 
 # JSON output (for CI/CD pipelines)
 ./contracts/scripts/verify-deployment.sh CABC123... --json
@@ -313,6 +330,17 @@ Result:          1
   "verification": {
     "function": "get_version",
     "result": "1"
+  },
+  "wasm_hash": {
+    "status": "MATCH",
+    "expected": "7a8b9c0d...",
+    "actual": "7a8b9c0d...",
+    "error": null
+  },
+  "smoke_tests": {
+    "status": "PASS",
+    "results": "get_version:PASS:1; get_admin:PASS:GABC...",
+    "error": null
   },
   "verified_at": "2024-01-15T10:30:00Z"
 }

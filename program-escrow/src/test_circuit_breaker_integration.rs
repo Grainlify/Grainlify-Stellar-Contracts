@@ -60,7 +60,13 @@ fn setup() -> (Env, Address, Address, Address, Address) {
     let no_caller: Option<Address> = None;
     client.set_circuitadmin(&circuit_admin, &no_caller);
 
-    (env, contract_id, authorized_key, circuit_admin, token_address)
+    (
+        env,
+        contract_id,
+        authorized_key,
+        circuit_admin,
+        token_address,
+    )
 }
 
 /// Open the circuit via `emergency_open_circuit` and assert the state is Open.
@@ -125,7 +131,10 @@ fn test_open_circuit_blocks_batch_payout() {
     let amounts = soroban_sdk::vec![&env, 1_000i128];
     let result = client.try_batch_payout(&recipients, &amounts);
 
-    assert!(result.is_err(), "batch_payout must fail when circuit is open");
+    assert!(
+        result.is_err(),
+        "batch_payout must fail when circuit is open"
+    );
 }
 
 /// An open circuit must block `single_payout`.
@@ -138,7 +147,10 @@ fn test_open_circuit_blocks_single_payout() {
     open_circuit(&client, &circuit_admin);
 
     let result = client.try_single_payout(&recipient, &1_000i128);
-    assert!(result.is_err(), "single_payout must fail when circuit is open");
+    assert!(
+        result.is_err(),
+        "single_payout must fail when circuit is open"
+    );
 }
 
 /// An open circuit must block `trigger_program_releases`.
@@ -330,7 +342,11 @@ fn test_threshold_failures_auto_open_circuit_batch_payout() {
     // 3rd failure hits the threshold → circuit opens
     drive_failures(&env, &contract_id, 1);
     let status = client.get_circuit_status();
-    assert_eq!(status.state, CircuitState::Open, "circuit must open at threshold");
+    assert_eq!(
+        status.state,
+        CircuitState::Open,
+        "circuit must open at threshold"
+    );
 
     // Now a real payout is rejected by check_and_allow
     let recipients = soroban_sdk::vec![&env, recipient];

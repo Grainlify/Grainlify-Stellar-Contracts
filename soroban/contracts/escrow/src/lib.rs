@@ -1,3 +1,16 @@
+// ============================================================================
+// ⚠️  NOT THE LIVE ESCROW CONTRACT — SCAFFOLD ONLY (see issue #195)
+//
+// This crate is the untouched `stellar contract init` hello-world placeholder
+// created when the `soroban/` workspace was first set up (see
+// docs/soroban/README.md). It contains no escrow logic and is not deployed.
+//
+// The live, actively maintained escrow implementation is:
+//     bounty_escrow/contracts/escrow/src/lib.rs
+//
+// Apply all bug fixes and security patches (reentrancy, overflow,
+// fund-safety, etc.) to that copy — never to this file.
+// ============================================================================
 #![no_std]
 use soroban_sdk::{contract, contractimpl, vec, Env, String, Vec};
 

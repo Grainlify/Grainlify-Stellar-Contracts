@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "bounty_escrow/contracts/escrow",
+    "grainlify-core",
+    "program-escrow"
+]
+
+[workspace.dependencies]
+soroban-sdk = "21.0.0"
+
+[package]
+name = "grainlify-stellar-contracts-root"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+grainlify-core = { path = "grainlify-core" }
+program-escrow = { path = "program-escrow" }
+bounty-escrow = { path = "bounty_escrow/contracts/escrow" }
+
+[[test]]
+name = "integration_tests"
+path = "integration_tests.rs"

@@ -98,6 +98,7 @@ export enum ContractErrorCode {
   BOUNTY_CIRCUIT_BREAKER_OPEN = 'BOUNTY_CIRCUIT_BREAKER_OPEN', // 21
   BOUNTY_CLAIM_EXPIRED        = 'BOUNTY_CLAIM_EXPIRED',        // 22
   BOUNTY_GOVERNANCE_VERSION_TOO_LOW = 'BOUNTY_GOVERNANCE_VERSION_TOO_LOW', // 23
+  BOUNTY_GOVERNANCE_PROPOSAL_NOT_EXECUTABLE = 'BOUNTY_GOVERNANCE_PROPOSAL_NOT_EXECUTABLE', // 25
 
   // ── Governance (contracts/grainlify-core/governance) ───────────────────
   GOV_NOT_INITIALIZED        = 'GOV_NOT_INITIALIZED',          // 1
@@ -114,6 +115,7 @@ export enum ContractErrorCode {
   GOV_PROPOSAL_NOT_APPROVED  = 'GOV_PROPOSAL_NOT_APPROVED',    // 12
   GOV_EXECUTION_DELAY_NOT_MET = 'GOV_EXECUTION_DELAY_NOT_MET', // 13
   GOV_PROPOSAL_EXPIRED       = 'GOV_PROPOSAL_EXPIRED',         // 14
+  GOV_VOTE_WEIGHT_OVERFLOW   = 'GOV_VOTE_WEIGHT_OVERFLOW',     // 18
 
   // ── Circuit-Breaker / Error-Recovery ────────────────────────────────────
   CIRCUIT_OPEN               = 'CIRCUIT_OPEN',                 // 1001
@@ -162,6 +164,7 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN]: 'Bounty escrow circuit breaker is open',
   [ContractErrorCode.BOUNTY_CLAIM_EXPIRED]:        'Authorized bounty claim window has expired',
   [ContractErrorCode.BOUNTY_GOVERNANCE_VERSION_TOO_LOW]: 'Linked governance contract version is below the bounty escrow minimum',
+  [ContractErrorCode.BOUNTY_GOVERNANCE_PROPOSAL_NOT_EXECUTABLE]: 'Governance proposal is not executable for this bounty escrow action',
 
   // Governance
   [ContractErrorCode.GOV_NOT_INITIALIZED]:        'Governance contract has not been initialized',
@@ -178,6 +181,7 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.GOV_PROPOSAL_NOT_APPROVED]:  'Proposal has not been approved',
   [ContractErrorCode.GOV_EXECUTION_DELAY_NOT_MET]: 'Execution delay period has not elapsed yet',
   [ContractErrorCode.GOV_PROPOSAL_EXPIRED]:       'Proposal has expired',
+  [ContractErrorCode.GOV_VOTE_WEIGHT_OVERFLOW]:   'Vote weight overflow',
 
   // Circuit-Breaker
   [ContractErrorCode.CIRCUIT_OPEN]:               'Circuit breaker is open; operation rejected without attempting',
@@ -218,6 +222,7 @@ export const BOUNTY_ESCROW_ERROR_MAP: Record<number, ContractErrorCode> = {
   21: ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN,
   22: ContractErrorCode.BOUNTY_CLAIM_EXPIRED,
   23: ContractErrorCode.BOUNTY_GOVERNANCE_VERSION_TOO_LOW,
+  25: ContractErrorCode.BOUNTY_GOVERNANCE_PROPOSAL_NOT_EXECUTABLE,
 };
 
 /** Governance #[contracterror] discriminants → SDK code */
@@ -236,6 +241,7 @@ export const GOVERNANCE_ERROR_MAP: Record<number, ContractErrorCode> = {
   12: ContractErrorCode.GOV_PROPOSAL_NOT_APPROVED,
   13: ContractErrorCode.GOV_EXECUTION_DELAY_NOT_MET,
   14: ContractErrorCode.GOV_PROPOSAL_EXPIRED,
+  18: ContractErrorCode.GOV_VOTE_WEIGHT_OVERFLOW,
 };
 
 /** Circuit-breaker u32 error constants → SDK code */
@@ -399,6 +405,9 @@ export function parseContractError(error: any): ContractError {
   }
   if (hasBountyContext && (errorMessage.includes('GovernanceVersionTooLow') || errorMessage.includes('governance version'))) {
     return createContractError(ContractErrorCode.BOUNTY_GOVERNANCE_VERSION_TOO_LOW);
+  }
+  if (hasBountyContext && (errorMessage.includes('GovernanceProposalNotExecutable') || errorMessage.includes('governance proposal is not executable'))) {
+    return createContractError(ContractErrorCode.BOUNTY_GOVERNANCE_PROPOSAL_NOT_EXECUTABLE);
   }
   if (errorMessage.includes('CircuitBreakerOpen') || errorMessage.includes('Bounty escrow circuit breaker')) {
     return createContractError(ContractErrorCode.BOUNTY_CIRCUIT_BREAKER_OPEN);

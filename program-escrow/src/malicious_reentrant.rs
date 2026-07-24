@@ -6,12 +6,13 @@
 //!
 //! ## Attack Scenarios
 //!
-//! 1. **Payout Callback Attack**: When receiving a payout, immediately call
-//!    back into the escrow contract to request another payout
-//! 2. **Nested Batch Attack**: During a batch payout, attempt to trigger
-//!    another batch payout
-//! 3. **Schedule Release Attack**: During schedule release, attempt to
-//!    release another schedule or modify state
+//! ### Recipient-Contract Reentrancy
+//! 1. **Payout Callback Attack**: When receiving a payout, a malicious recipient contract attempts to re-enter single_payout.
+//! 2. **Nested Batch Attack**: During a batch payout, a malicious recipient contract attempts to trigger another batch_payout.
+//! 3. **Schedule Release Attack**: During schedule release, a malicious recipient contract attempts to release another schedule or modify state.
+//!
+//! ### Token-Callback Reentrancy (Cross-Contract)
+//! 4. **Token Transfer Hook Attack**: A malicious token contract intercepts the `transfer` call from the escrow and attempts to re-enter single_payout, batch_payout, or trigger_program_releases before returning.
 
 #![cfg(test)]
 
@@ -182,5 +183,44 @@ impl MaliciousReentrantContract {
 
         // This should trigger the callback which will attempt reentrancy
         client.single_payout(&attacker, &amount);
+    }
+
+    /// Standard token interface transfer method to perform callback attacks
+    pub fn transfer(env: Env, _from: Address, to: Address, amount: i128) {
+        let attack_mode = Self::get_attack_mode(env.clone());
+
+        // Only attack once to avoid infinite loops in tests
+        let attack_count = Self::get_attack_count(env.clone());
+        if attack_count > 0 {
+            return;
+        }
+
+        Self::increment_attack_count(&env);
+
+        match attack_mode {
+            1 => {
+                let target = Self::get_target(env.clone());
+                let client = crate::ProgramEscrowContractClient::new(&env, &target);
+                client.single_payout(&to, &amount);
+            }
+            2 => {
+                let target = Self::get_target(env.clone());
+                let client = crate::ProgramEscrowContractClient::new(&env, &target);
+                let recipients = soroban_sdk::vec![&env, to];
+                let amounts = soroban_sdk::vec![&env, amount];
+                client.batch_payout(&recipients, &amounts);
+            }
+            3 => {
+                let target = Self::get_target(env.clone());
+                let client = crate::ProgramEscrowContractClient::new(&env, &target);
+                client.trigger_program_releases();
+            }
+            _ => { }
+        }
+    }
+
+    /// Dummy balance method required by token interface
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        1000_0000000i128
     }
 }

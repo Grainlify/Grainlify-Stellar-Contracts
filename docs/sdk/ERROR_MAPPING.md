@@ -90,6 +90,7 @@ Source: `contracts/bounty_escrow/contracts/escrow/src/lib.rs`
 | 21 | `BOUNTY_CIRCUIT_BREAKER_OPEN` | CircuitBreakerOpen | Bounty escrow circuit breaker is open |
 | 22 | `BOUNTY_CLAIM_EXPIRED` | ClaimExpired | Authorized bounty claim window has expired |
 | 23 | `BOUNTY_GOVERNANCE_VERSION_TOO_LOW` | GovernanceVersionTooLow | Linked governance contract version is below the bounty escrow minimum |
+| 25 | `BOUNTY_GOVERNANCE_PROPOSAL_NOT_EXECUTABLE` | GovernanceProposalNotExecutable | Governance proposal is not executable for this bounty escrow action |
 
 ### Governance Contract
 

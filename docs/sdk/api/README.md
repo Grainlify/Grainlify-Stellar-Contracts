@@ -19,14 +19,18 @@
 
 ## Interfaces
 
+- [AdminConfigSnapshot](interfaces/AdminConfigSnapshot.md)
 - [AggregateStats](interfaces/AggregateStats.md)
 - [BountyEscrowConfig](interfaces/BountyEscrowConfig.md)
+- [CircuitBreakerConfig](interfaces/CircuitBreakerConfig.md)
+- [CircuitBreakerStatus](interfaces/CircuitBreakerStatus.md)
 - [ClaimRecord](interfaces/ClaimRecord.md)
 - [Escrow](interfaces/Escrow.md)
 - [EscrowQueryFilter](interfaces/EscrowQueryFilter.md)
 - [EscrowWithId](interfaces/EscrowWithId.md)
 - [FeeConfig](interfaces/FeeConfig.md)
 - [LockFundsItem](interfaces/LockFundsItem.md)
+- [MultisigConfig](interfaces/MultisigConfig.md)
 - [PauseFlags](interfaces/PauseFlags.md)
 - [PayoutRecord](interfaces/PayoutRecord.md)
 - [ProgramData](interfaces/ProgramData.md)
@@ -39,6 +43,7 @@
 
 ## Type Aliases
 
+- [CircuitState](type-aliases/CircuitState.md)
 - [EscrowStatus](type-aliases/EscrowStatus.md)
 - [RefundMode](type-aliases/RefundMode.md)
 

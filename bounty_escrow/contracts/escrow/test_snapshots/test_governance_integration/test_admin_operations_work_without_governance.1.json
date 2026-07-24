@@ -160,6 +160,14 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "global_paused"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "lock_paused"
                               },
                               "val": {
@@ -599,6 +607,14 @@
                   },
                   "val": {
                     "u64": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 2
                   }
                 }
               ]

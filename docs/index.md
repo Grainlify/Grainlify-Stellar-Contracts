@@ -90,6 +90,7 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | Document | Description |
 |----------|-------------|
 | [Soroban README](soroban/README.md) | Soroban project structure and setup |
+| [Program Escrow Duplication Audit](soroban/PROGRAM_ESCROW_DUPLICATION_AUDIT.md) | Audit of `soroban/contracts/program-escrow` vs the production `program-escrow` crate, including TTL-fix parity findings |
 
 ## Scripts
 

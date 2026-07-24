@@ -48,6 +48,12 @@ Additional fields are considered additive and should be ignored by forward-compa
       - [Payload Example](#payload-example-4)
     - [5.10 `PauseStateChanged` (bounty)](#510-pausestatechanged-bounty)
       - [Payload Example](#payload-example-5)
+    - [5.11 `ClaimCreated`](#511-claimcreated)
+      - [v2 Payload Example](#v2-payload-example-8)
+    - [5.12 `ClaimExecuted`](#512-claimexecuted)
+      - [v2 Payload Example](#v2-payload-example-9)
+    - [5.13 `ClaimCancelled`](#513-claimcancelled)
+      - [v2 Payload Example](#v2-payload-example-10)
   - [6. Contract: `program_escrow`](#6-contract-program_escrow)
     - [6.1 `ProgramInitialized`](#61-programinitialized)
       - [v2 Payload Example](#v2-payload-example-4)
@@ -67,6 +73,12 @@ Additional fields are considered additive and should be ignored by forward-compa
       - [Payload Example](#payload-example-6)
     - [7.3 `PerformanceMetric`](#73-performancemetric)
       - [Payload Example](#payload-example-7)
+    - [7.4 `SignerRot` (signer added)](#74-signerrot-signer-added)
+      - [Payload Example](#payload-example-8)
+    - [7.5 `SignerRot` (signer removed)](#75-signerrot-signer-removed)
+      - [Payload Example](#payload-example-9)
+    - [7.6 `SignerRot` (threshold-only change)](#76-signerrot-threshold-only-change)
+      - [Payload Example](#payload-example-10)
   - [8. Event Topic Reference](#8-event-topic-reference)
   - [9. Payload Field Reference](#9-payload-field-reference)
   - [10. v1 → v2 Migration Guide](#10-v1--v2-migration-guide)
@@ -397,12 +409,10 @@ pub struct BountyExpired {
 **Struct:** `FeeCollected`
 **Lifecycle phase:** Any operation that deducts a fee (lock or release)
 
-> **Version note:** `FeeCollected` does **not** carry a `version` field. It is a v1-style
-> payload. Parsers must not require `version` for this event.
-
 ```rust
 #[contracttype]
 pub struct FeeCollected {
+    pub version:        u32,               // Always EVENT_VERSION_V2 = 2
     pub operation_type: FeeOperationType,  // enum: Lock | Release
     pub amount:         i128,
     pub fee_rate:       i128,
@@ -414,10 +424,11 @@ pub struct FeeCollected {
 pub enum FeeOperationType { Lock, Release }
 ```
 
-#### Payload Example
+#### v2 Payload Example
 
 ```json
 {
+  "version":        2,
   "operation_type": "Lock",
   "amount":         10000000,
   "fee_rate":       100,
@@ -426,13 +437,14 @@ pub enum FeeOperationType { Lock, Release }
 }
 ```
 
-| Field            | Rust type          | Required | Description |
-|------------------|--------------------|----------|-------------|
-| `operation_type` | `FeeOperationType` | **Yes**  | `Lock` or `Release` — which operation triggered the fee |
-| `amount`         | `i128`             | **Yes**  | Fee amount collected (token stroops) |
-| `fee_rate`       | `i128`             | **Yes**  | Fee rate in basis points at time of collection |
-| `recipient`      | `Address`          | **Yes**  | Address that received the fee |
-| `timestamp`      | `u64`              | **Yes**  | Ledger timestamp |
+| Field            | Rust type          | v2 required | Description |
+|------------------|--------------------|-------------|-------------|
+| `version`        | `u32`              | **Yes**     | Always `2` |
+| `operation_type` | `FeeOperationType` | **Yes**     | `Lock` or `Release` — which operation triggered the fee |
+| `amount`         | `i128`             | **Yes**     | Fee amount collected (token stroops) |
+| `fee_rate`       | `i128`             | **Yes**     | Fee rate in basis points at time of collection |
+| `recipient`      | `Address`          | **Yes**     | Address that received the fee |
+| `timestamp`      | `u64`              | **Yes**     | Ledger timestamp |
 
 ---
 
@@ -443,32 +455,33 @@ pub enum FeeOperationType { Lock, Release }
 **Struct:** `BatchFundsLocked`
 **Lifecycle phase:** Batch bounty creation
 
-> **Version note:** No `version` field — v1-style payload.
-
 ```rust
 #[contracttype]
 pub struct BatchFundsLocked {
+    pub version:      u32,   // Always EVENT_VERSION_V2 = 2
     pub count:        u32,
     pub total_amount: i128,
     pub timestamp:    u64,
 }
 ```
 
-#### Payload Example
+#### v2 Payload Example
 
 ```json
 {
+  "version":      2,
   "count":        5,
   "total_amount": 5000000000,
   "timestamp":    1740000200
 }
 ```
 
-| Field          | Rust type | Required | Description |
-|----------------|-----------|----------|-------------|
-| `count`        | `u32`     | **Yes**  | Number of bounties locked in the batch |
-| `total_amount` | `i128`    | **Yes**  | Aggregate amount locked across all bounties |
-| `timestamp`    | `u64`     | **Yes**  | Ledger timestamp |
+| Field          | Rust type | v2 required | Description |
+|----------------|-----------|-------------|-------------|
+| `version`      | `u32`     | **Yes**     | Always `2` |
+| `count`        | `u32`     | **Yes**     | Number of bounties locked in the batch |
+| `total_amount` | `i128`    | **Yes**     | Aggregate amount locked across all bounties |
+| `timestamp`    | `u64`     | **Yes**     | Ledger timestamp |
 
 ---
 
@@ -479,32 +492,33 @@ pub struct BatchFundsLocked {
 **Struct:** `BatchFundsReleased`
 **Lifecycle phase:** Batch bounty payout
 
-> **Version note:** No `version` field — v1-style payload.
-
 ```rust
 #[contracttype]
 pub struct BatchFundsReleased {
+    pub version:      u32,   // Always EVENT_VERSION_V2 = 2
     pub count:        u32,
     pub total_amount: i128,
     pub timestamp:    u64,
 }
 ```
 
-#### Payload Example
+#### v2 Payload Example
 
 ```json
 {
+  "version":      2,
   "count":        5,
   "total_amount": 4900000000,
   "timestamp":    1740100200
 }
 ```
 
-| Field          | Rust type | Required | Description |
-|----------------|-----------|----------|-------------|
-| `count`        | `u32`     | **Yes**  | Number of bounties released in the batch |
-| `total_amount` | `i128`    | **Yes**  | Aggregate net amount released |
-| `timestamp`    | `u64`     | **Yes**  | Ledger timestamp |
+| Field          | Rust type | v2 required | Description |
+|----------------|-----------|-------------|-------------|
+| `version`      | `u32`     | **Yes**     | Always `2` |
+| `count`        | `u32`     | **Yes**     | Number of bounties released in the batch |
+| `total_amount` | `i128`    | **Yes**     | Aggregate net amount released |
+| `timestamp`    | `u64`     | **Yes**     | Ledger timestamp |
 
 ---
 
@@ -515,11 +529,10 @@ pub struct BatchFundsReleased {
 **Struct:** `ApprovalAdded`
 **Lifecycle phase:** Work submission / approval flow
 
-> **Version note:** No `version` field — v1-style payload.
-
 ```rust
 #[contracttype]
 pub struct ApprovalAdded {
+    pub version:     u32,   // Always EVENT_VERSION_V2 = 2
     pub bounty_id:   u64,
     pub contributor: Address,
     pub approver:    Address,
@@ -527,10 +540,11 @@ pub struct ApprovalAdded {
 }
 ```
 
-#### Payload Example
+#### v2 Payload Example
 
 ```json
 {
+  "version":     2,
   "bounty_id":   42,
   "contributor": "GCON…",
   "approver":    "GAPR…",
@@ -538,12 +552,13 @@ pub struct ApprovalAdded {
 }
 ```
 
-| Field         | Rust type | Required | Description |
-|---------------|-----------|----------|-------------|
-| `bounty_id`   | `u64`     | **Yes**  | Bounty identifier; also in topic[1] |
-| `contributor` | `Address` | **Yes**  | Address of the work submitter |
-| `approver`    | `Address` | **Yes**  | Address of the approver |
-| `timestamp`   | `u64`     | **Yes**  | Ledger timestamp |
+| Field         | Rust type | v2 required | Description |
+|---------------|-----------|-------------|-------------|
+| `version`     | `u32`     | **Yes**     | Always `2` |
+| `bounty_id`   | `u64`     | **Yes**     | Bounty identifier; also in topic[1] |
+| `contributor` | `Address` | **Yes**     | Address of the work submitter |
+| `approver`    | `Address` | **Yes**     | Address of the approver |
+| `timestamp`   | `u64`     | **Yes**     | Ledger timestamp |
 
 ---
 
@@ -554,11 +569,10 @@ pub struct ApprovalAdded {
 **Struct:** `FeeConfigUpdated`
 **Lifecycle phase:** Admin fee configuration change
 
-> **Version note:** No `version` field — v1-style payload.
-
 ```rust
 #[contracttype]
 pub struct FeeConfigUpdated {
+    pub version:          u32,   // Always EVENT_VERSION_V2 = 2
     pub lock_fee_rate:    i128,
     pub release_fee_rate: i128,
     pub fee_recipient:    Address,
@@ -567,10 +581,11 @@ pub struct FeeConfigUpdated {
 }
 ```
 
-#### Payload Example
+#### v2 Payload Example
 
 ```json
 {
+  "version":          2,
   "lock_fee_rate":    50,
   "release_fee_rate": 100,
   "fee_recipient":    "GFEE…",
@@ -579,13 +594,14 @@ pub struct FeeConfigUpdated {
 }
 ```
 
-| Field              | Rust type | Required | Description |
-|--------------------|-----------|----------|-------------|
-| `lock_fee_rate`    | `i128`    | **Yes**  | New lock-operation fee in basis points |
-| `release_fee_rate` | `i128`    | **Yes**  | New release-operation fee in basis points |
-| `fee_recipient`    | `Address` | **Yes**  | Address that will receive fees going forward |
-| `fee_enabled`      | `bool`    | **Yes**  | Whether fee collection is active after this update |
-| `timestamp`        | `u64`     | **Yes**  | Ledger timestamp |
+| Field              | Rust type | v2 required | Description |
+|--------------------|-----------|-------------|-------------|
+| `version`          | `u32`     | **Yes**     | Always `2` |
+| `lock_fee_rate`    | `i128`    | **Yes**     | New lock-operation fee in basis points |
+| `release_fee_rate` | `i128`    | **Yes**     | New release-operation fee in basis points |
+| `fee_recipient`    | `Address` | **Yes**     | Address that will receive fees going forward |
+| `fee_enabled`      | `bool`    | **Yes**     | Whether fee collection is active after this update |
+| `timestamp`        | `u64`     | **Yes**     | Ledger timestamp |
 
 ---
 
@@ -620,6 +636,132 @@ pub struct PauseStateChanged {
 | `operation` | `Symbol`  | **Yes**  | Which operation was toggled: `lock`, `release`, or `refund` |
 | `paused`    | `bool`    | **Yes**  | `true` = now paused, `false` = now unpaused |
 | `admin`     | `Address` | **Yes**  | Admin address that triggered the change |
+
+---
+
+### 5.11 `ClaimCreated`
+
+**Emitted by:** `emit_claim_created()`
+**Topics:** `(symbol_short!("claim"), symbol_short!("created"))`
+**Struct:** `ClaimCreated`
+**Lifecycle phase:** Admin authorises a pending claim window for a bounty
+
+```rust
+#[contracttype]
+pub struct ClaimCreated {
+    pub version:    u32,   // Always EVENT_VERSION_V2 = 2
+    pub bounty_id:  u64,
+    pub recipient:  Address,
+    pub amount:     i128,
+    pub expires_at: u64,
+}
+```
+
+#### v2 Payload Example
+
+```json
+{
+  "version":    2,
+  "bounty_id":  42,
+  "recipient":  "GCON…",
+  "amount":     1000000000,
+  "expires_at": 1740500000
+}
+```
+
+| Field        | Rust type | v2 required | Description |
+|--------------|-----------|-------------|-------------|
+| `version`    | `u32`     | **Yes**     | Always `2` |
+| `bounty_id`  | `u64`     | **Yes**     | Bounty identifier |
+| `recipient`  | `Address` | **Yes**     | Beneficiary authorised to claim |
+| `amount`     | `i128`    | **Yes**     | Amount the beneficiary may claim |
+| `expires_at` | `u64`     | **Yes**     | Ledger timestamp after which the claim window closes |
+
+---
+
+### 5.12 `ClaimExecuted`
+
+**Emitted by:** `emit_claim_executed()`
+**Topics:** `(symbol_short!("claim"), symbol_short!("done"))`
+**Struct:** `ClaimExecuted`
+**Lifecycle phase:** Beneficiary successfully claims funds within the window
+
+```rust
+#[contracttype]
+pub struct ClaimExecuted {
+    pub version:    u32,   // Always EVENT_VERSION_V2 = 2
+    pub bounty_id:  u64,
+    pub recipient:  Address,
+    pub amount:     i128,
+    pub claimed_at: u64,
+}
+```
+
+#### v2 Payload Example
+
+```json
+{
+  "version":    2,
+  "bounty_id":  42,
+  "recipient":  "GCON…",
+  "amount":     1000000000,
+  "claimed_at": 1740400000
+}
+```
+
+| Field        | Rust type | v2 required | Description |
+|--------------|-----------|-------------|-------------|
+| `version`    | `u32`     | **Yes**     | Always `2` |
+| `bounty_id`  | `u64`     | **Yes**     | Bounty identifier |
+| `recipient`  | `Address` | **Yes**     | Beneficiary that claimed the funds |
+| `amount`     | `i128`    | **Yes**     | Amount transferred to the recipient |
+| `claimed_at` | `u64`     | **Yes**     | Ledger timestamp of the claim |
+
+---
+
+### 5.13 `ClaimCancelled`
+
+**Emitted by:** `emit_claim_cancelled()`
+**Topics:** `(symbol_short!("claim"), symbol_short!("cancel"))`
+**Struct:** `ClaimCancelled`
+**Lifecycle phase:** Admin cancels a pending (possibly expired) claim, returning escrow to Locked
+
+```rust
+#[contracttype]
+pub struct ClaimCancelled {
+    pub version:      u32,   // Always EVENT_VERSION_V2 = 2
+    pub bounty_id:    u64,
+    pub recipient:    Address,
+    pub amount:       i128,
+    pub cancelled_at: u64,
+    pub cancelled_by: Address,
+    pub reason:       Symbol,  // "expired" | "manual"
+}
+```
+
+#### v2 Payload Example
+
+```json
+{
+  "version":      2,
+  "bounty_id":    42,
+  "recipient":    "GCON…",
+  "amount":       1000000000,
+  "cancelled_at": 1740450000,
+  "cancelled_by": "GADM…",
+  "reason":       "expired"
+}
+```
+
+| Field          | Rust type | v2 required | Description |
+|----------------|-----------|-------------|-------------|
+| `version`      | `u32`     | **Yes**     | Always `2` |
+| `bounty_id`    | `u64`     | **Yes**     | Bounty identifier |
+| `recipient`    | `Address` | **Yes**     | Beneficiary whose claim was cancelled |
+| `amount`       | `i128`    | **Yes**     | Amount that was pending — remains locked in escrow |
+| `cancelled_at` | `u64`     | **Yes**     | Ledger timestamp of the cancellation |
+| `cancelled_by` | `Address` | **Yes**     | Admin address that cancelled |
+| `reason`       | `Symbol`  | **Yes**     | `"expired"` if window had passed; `"manual"` if cancelled before expiry |
 
 ---
 
@@ -965,6 +1107,117 @@ pub struct PerformanceMetric {
 
 ---
 
+### 7.4 `SignerRot` (signer added)
+
+**Emitted by:** `MultiSig::add_signer()` and `MultiSig::rotate_signers()` (once per added address)
+**Topics:** `(symbol_short!("SignerRot"), symbol_short!("add"))`
+**Data:** Raw tuple `(Address, Address, u32)` — not a named struct
+**Lifecycle phase:** Multisig signer addition
+
+```rust
+// Inside add_signer() and rotate_signers():
+env.events().publish(
+    (symbol_short!("SignerRot"), symbol_short!("add")),
+    (caller, new_signer, config.threshold),
+);
+```
+
+#### Payload Example
+
+```json
+["GCALLER…", "GNEWSIGNER…", 2]
+```
+
+| Tuple index | Rust type | Description |
+|-------------|-----------|-------------|
+| `0`         | `Address` | Address of the caller who initiated the addition (`caller`) |
+| `1`         | `Address` | The newly added signer address (`new_signer`) |
+| `2`         | `u32`     | The current threshold **after** the mutation takes effect |
+
+> **Zero-events-on-revert guarantee:** If `add_signer` or `rotate_signers` panics (e.g. the
+> new signer is already present, or the post-mutation threshold check fails in
+> `rotate_signers`), the Soroban host rolls back the entire transaction. No `SignerRot`
+> event is emitted for failed or partially-applied mutations. Indexers do **not** need to
+> special-case partial payloads or compensate for missing events on revert.
+
+---
+
+### 7.5 `SignerRot` (signer removed)
+
+**Emitted by:** `MultiSig::remove_signer()` and `MultiSig::rotate_signers()` (once per removed address)
+**Topics:** `(symbol_short!("SignerRot"), symbol_short!("remove"))`
+**Data:** Raw tuple `(Address, Address, u32)` — not a named struct
+**Lifecycle phase:** Multisig signer removal
+
+```rust
+// Inside remove_signer() and rotate_signers():
+env.events().publish(
+    (symbol_short!("SignerRot"), symbol_short!("remove")),
+    (caller, signer_to_remove, config.threshold),
+);
+```
+
+#### Payload Example
+
+```json
+["GCALLER…", "GREMOVEDSIGNER…", 2]
+```
+
+| Tuple index | Rust type | Description |
+|-------------|-----------|-------------|
+| `0`         | `Address` | Address of the caller who initiated the removal (`caller`) |
+| `1`         | `Address` | The removed signer address (`signer_to_remove`) |
+| `2`         | `u32`     | The current threshold **after** the mutation takes effect |
+
+> **Zero-events-on-revert guarantee:** If `remove_signer` panics (e.g. the target address
+> is not a signer, or the removal would leave fewer signers than the threshold via
+> `RemovalWouldBreakThreshold`), or if `rotate_signers` panics due to a similar guard
+> failure, the entire transaction is rolled back and **no** `SignerRot` event is emitted.
+> Indexers do **not** need to handle partial or compensating events on revert.
+
+---
+
+### 7.6 `SignerRot` (threshold-only change)
+
+**Emitted by:** `MultiSig::rotate_signers()` — only when `add` and `remove` are both empty and `new_threshold` is `Some`
+**Topics:** `(symbol_short!("SignerRot"), symbol_short!("thresh"))`
+**Data:** Raw tuple `(Address, Address, u32)` — not a named struct
+**Lifecycle phase:** Multisig threshold adjustment without signer membership change
+
+```rust
+// Inside rotate_signers(), threshold-only branch:
+if add.is_empty() && remove.is_empty() && new_threshold.is_some() {
+    env.events().publish(
+        (symbol_short!("SignerRot"), symbol_short!("thresh")),
+        (caller.clone(), caller.clone(), config.threshold),
+    );
+}
+```
+
+#### Payload Example
+
+```json
+["GCALLER…", "GCALLER…", 3]
+```
+
+| Tuple index | Rust type | Description |
+|-------------|-----------|-------------|
+| `0`         | `Address` | Address of the caller (`caller`) — duplicated as a positional placeholder matching the shared `(caller, signer, threshold)` layout |
+| `1`         | `Address` | Same as tuple index `0`; no individual signer is added or removed, so the caller address fills both positions |
+| `2`         | `u32`     | The **new** threshold after the update |
+
+> **Disambiguation note:** This event is emitted exclusively when the `add` and `remove`
+> vecs are empty and `new_threshold` is `Some`. When signers are also added or removed in
+> the same `rotate_signers` call, those individual `"add"` / `"remove"` events carry the
+> post-mutation threshold in tuple index `2`; no separate `"thresh"` event is emitted for
+> that case.
+
+> **Zero-events-on-revert guarantee:** If `rotate_signers` panics during the threshold
+> guard check (e.g. the new threshold is `0` or exceeds the signer count), the transaction
+> rolls back completely and **no** `SignerRot` event of any sub-type is emitted.
+
+---
+
 ## 8. Event Topic Reference
 
 Complete lookup table of every `env.events().publish(topics, …)` call in this codebase:
@@ -981,6 +1234,9 @@ Complete lookup table of every `env.events().publish(topics, …)` call in this 
 | `bounty_escrow`  | `(symbol_short!("b_rel"),)`                             | `"b_rel"`                 | `BatchFundsReleased`      |
 | `bounty_escrow`  | `(symbol_short!("approval"), bounty_id)`                | `"approval"` + u64        | `ApprovalAdded`           |
 | `bounty_escrow`  | `(symbol_short!("fee_cfg"),)`                           | `"fee_cfg"`               | `FeeConfigUpdated`        |
+| `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("created"))`    | `"claim"` + `"created"`   | `ClaimCreated`            |
+| `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("done"))`       | `"claim"` + `"done"`      | `ClaimExecuted`           |
+| `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("cancel"))`     | `"claim"` + `"cancel"`    | `ClaimCancelled`          |
 | `bounty_escrow`  | `(symbol_short!("pause"), event.operation.clone())`     | `"pause"` + op symbol     | `PauseStateChanged`       |
 | `program_escrow` | `(PROGRAM_INITIALIZED,)` = `("PrgInit",)`               | `"PrgInit"`               | `ProgramInitializedEvent` |
 | `program_escrow` | `(FUNDS_LOCKED,)` = `("FndsLock",)`                     | `"FndsLock"`              | `FundsLockedEvent`        |
@@ -990,6 +1246,9 @@ Complete lookup table of every `env.events().publish(topics, …)` call in this 
 | `grainlify-core` | `(symbol_short!("migration"),)`                         | `"migration"`             | `MigrationEvent`          |
 | `grainlify-core` | `(symbol_short!("metric"), symbol_short!("op"))`        | `"metric"` + `"op"`       | `OperationMetric`         |
 | `grainlify-core` | `(symbol_short!("metric"), symbol_short!("perf"))`      | `"metric"` + `"perf"`     | `PerformanceMetric`       |
+| `grainlify-core` | `(symbol_short!("SignerRot"), symbol_short!("add"))`    | `"SignerRot"` + `"add"`   | Tuple `(Address,Address,u32)` |
+| `grainlify-core` | `(symbol_short!("SignerRot"), symbol_short!("remove"))` | `"SignerRot"` + `"remove"`| Tuple `(Address,Address,u32)` |
+| `grainlify-core` | `(symbol_short!("SignerRot"), symbol_short!("thresh"))` | `"SignerRot"` + `"thresh"`| Tuple `(Address,Address,u32)` |
 
 ---
 
@@ -1034,6 +1293,8 @@ All fields appearing across all three contracts:
 | `caller`                | `Address`          | `Address`   | grainlify |
 | `function`              | `Symbol`           | `Symbol`    | grainlify |
 | `duration`              | `u64`              | `U64`       | grainlify |
+| `signer` / `new_signer` / `signer_to_remove` | `Address` | `Address` | grainlify (SignerRot tuple index 1) |
+| `threshold` (inline)    | `u32`              | `U32`       | grainlify (SignerRot tuple index 2) |
 
 > **Integer precision:** `i128` values must be handled as `BigInt` in JavaScript/TypeScript.
 > USDC on Stellar uses 7 decimal places (1 USDC = 10,000,000 stroops).
@@ -1042,14 +1303,16 @@ All fields appearing across all three contracts:
 
 ## 10. v1 → v2 Migration Guide
 
-Five events in `bounty_escrow` are **permanently v1** (no `version` field was ever added):
-`FeeCollected`, `BatchFundsLocked`, `BatchFundsReleased`, `ApprovalAdded`, `FeeConfigUpdated`.
-Parsers must never require `version` on these events.
+All `bounty_escrow` events now carry a `version: u32` field set to `2`. The previously
+unversioned events (`FeeCollected`, `BatchFundsLocked`, `BatchFundsReleased`, `ApprovalAdded`,
+`FeeConfigUpdated`, `ClaimCreated`, `ClaimExecuted`, `ClaimCancelled`) were upgraded as part
+of the v2 rollout. Parsers that previously decoded these without a `version` key must be
+updated: **`version` is now the first field** in every `bounty_escrow` event struct.
 
-For events that do carry `version` (`BountyEscrowInitialized`, `FundsLocked`, `FundsReleased`,
-`FundsRefunded`, `BountyExpired` in bounty_escrow; all events in `program_escrow`):
+For all events that carry `version`:
 
-1. **Detect version.** Read `version` from payload. If absent → treat as `1`.
+1. **Detect version.** Read `version` from payload. If absent → treat as `1` (very old
+   on-chain history before this upgrade).
 2. **`amount` is always safe.** Both v1 and v2 include `amount` on value-transfer events.
 3. **New v2 fields are additive.** Initialise absent keys as `null` / `None`.
 4. **Do not rely on field order.** `scValToNative` returns objects keyed by name; iterate
@@ -1132,6 +1395,9 @@ Events are exercised by tests embedded in each source file. Key scenarios per co
 | `test_migration_emits_success_event` | grainlify | Event count increases after `migrate()` |
 | `test_migration_requires_admin_authorization` | grainlify | Auth check fires before event |
 | `test_migration_only_runs_once_per_version` | grainlify | `MigrationEvent` timestamp unchanged on second call |
+| `test_add_signer_emits_event` | grainlify (multisig) | `SignerRot "add"` — event emitted, signer count increments, threshold unchanged |
+| `test_rotate_signers_simultaneous_threshold_change` | grainlify (multisig) | `SignerRot "add"` + `"remove"` — both emitted; new threshold recorded in tuple index 2 |
+| `test_rotate_signers_rejected_no_events` | grainlify (multisig) | No event — `RemovalWouldBreakThreshold` panic rolls back before any publish call |
 
 Run all tests:
 
@@ -1172,12 +1438,19 @@ cargo tarpaulin --out Html --output-dir coverage/
 | `MigrationEvent` | `emit_migration_event()` → `migrate()` | `contracts/grainlify-core/src/lib.rs` – success and failure paths in `migrate` |
 | `OperationMetric` | `monitoring::track_operation()` | `contracts/grainlify-core/src/lib.rs` – monitoring module, called from `init_admin`, `upgrade`, `set_version`, `migrate` |
 | `PerformanceMetric` | `monitoring::emit_performance()` | `contracts/grainlify-core/src/lib.rs` – monitoring module, called from same admin fns |
+| `SignerRot "add"` | `MultiSig::add_signer()` | `grainlify-core/src/multisig.rs` – end of `add_signer`, after config write |
+| `SignerRot "add"` (batch) | `MultiSig::rotate_signers()` | `grainlify-core/src/multisig.rs` – `rotate_signers` add-loop, after all mutations |
+| `SignerRot "remove"` | `MultiSig::remove_signer()` | `grainlify-core/src/multisig.rs` – end of `remove_signer`, after config write |
+| `SignerRot "remove"` (batch) | `MultiSig::rotate_signers()` | `grainlify-core/src/multisig.rs` – `rotate_signers` remove-loop, after all mutations |
+| `SignerRot "thresh"` | `MultiSig::rotate_signers()` | `grainlify-core/src/multisig.rs` – `rotate_signers` threshold-only branch (add and remove both empty) |
 
 ---
 
 ## 15. Changelog
 
-| Date       | Doc version | Branch / Author           | Notes |
-|------------|-------------|---------------------------|-------|
-| 2026-03-03 | 2.0.0       | `docs/event-schema-audit` | Full source-grounded audit against `bounty_escrow/src/events.rs`, `program_escrow/src/lib.rs`, and `grainlify-core/src/lib.rs`. Replaced previously inferred schema with exact `#[contracttype]` struct definitions, correct topic tuples, v1/v2 versioning per-event, complete topic reference table, reentrancy/pause security notes, tarpaulin command, and forward-compatible TypeScript parser. |
-| (prior)    | 1.0.0       | —                         | Initial placeholder schema |
+| Date       | Doc version | Branch / Author                        | Notes |
+|------------|-------------|----------------------------------------|-------|
+| 2026-07-22 | 3.1.0       | `docs/event-schema-signer-rotation`    | Added §7.4–7.6 documenting `SignerRot "add"`, `"remove"`, and `"thresh"` events from `grainlify-core/src/multisig.rs`. Payload cross-checked line-by-line against `add_signer`, `remove_signer`, and `rotate_signers` publish call sites. Zero-events-on-revert guarantee explicitly noted in each subsection. Added `SignerRot` rows to §8 topic reference, §9 field reference, §13 test coverage, and §14 source references. Added versioning note to EVENT_VERSIONING.md. |
+| 2026-06-21 | 3.0.0       | `refactor/version-all-bounty-events`   | Added `version: u32` (= `EVENT_VERSION_V2`) to all 8 previously-unversioned `bounty_escrow` events: `FeeCollected`, `BatchFundsLocked`, `BatchFundsReleased`, `ApprovalAdded`, `FeeConfigUpdated`, `ClaimCreated`, `ClaimExecuted`, `ClaimCancelled`. Added emit functions for Claim events. Updated topic reference, migration guide, and test coverage notes. Removed "permanently v1" caveat. |
+| 2026-03-03 | 2.0.0       | `docs/event-schema-audit`              | Full source-grounded audit against `bounty_escrow/src/events.rs`, `program_escrow/src/lib.rs`, and `grainlify-core/src/lib.rs`. Replaced previously inferred schema with exact `#[contracttype]` struct definitions, correct topic tuples, v1/v2 versioning per-event, complete topic reference table, reentrancy/pause security notes, tarpaulin command, and forward-compatible TypeScript parser. |
+| (prior)    | 1.0.0       | —                                      | Initial placeholder schema |

@@ -149,6 +149,7 @@ mod reentrancy_guard;
 
 #[cfg(test)]
 mod error_recovery_tests;
+#[cfg(test)]
 mod reentrancy_tests;
 
 #[cfg(test)]
@@ -172,6 +173,7 @@ mod test_lifecycle;
 #[cfg(test)]
 mod budget_profiling_tests;
 
+#[cfg(test)]
 mod test_analytics_events;
 #[cfg(test)]
 mod test_governance_integration;
@@ -194,18 +196,24 @@ const PAUSE_STATE_CHANGED: Symbol = symbol_short!("PauseSt");
 const AGGREGATE_STATS: Symbol = symbol_short!("AggStats");
 const LARGE_PAYOUT: Symbol = symbol_short!("LrgPay");
 const SCHEDULE_TRIGGERED: Symbol = symbol_short!("SchedTrg");
+const WHITELIST_CHANGED: Symbol = symbol_short!("WlChange");
+const WHITELIST_ENFORCEMENT_CHANGED: Symbol = symbol_short!("WlEnfChg");
 
 // Storage keys
 const PROGRAM_DATA: Symbol = symbol_short!("ProgData");
 const SCHEDULES: Symbol = symbol_short!("Scheds");
 const RELEASE_HISTORY: Symbol = symbol_short!("RelHist");
 const NEXT_SCHEDULE_ID: Symbol = symbol_short!("NxtSched");
-const PROGRAM_INDEX: Symbol = symbol_short!("ProgIdx");
-const AUTH_KEY_INDEX: Symbol = symbol_short!("AuthIdx");
 const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
 const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
 const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
+const FUND_CAP_CONFIG: Symbol = symbol_short!("FnCapCfg");
 const BASIS_POINTS: i128 = 10_000;
+/// Threshold for bumping persistent storage TTL (approx. 1 day on 5s ledgers).
+const PERSISTENT_TTL_THRESHOLD: u32 = 17_280;
+/// Extension horizon for persistent storage TTL (approx. 30 days on 5s ledgers).
+/// This ensures long-lived release schedules and history remain accessible.
+const PERSISTENT_TTL_EXTEND_TO: u32 = 518_400;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PayoutRecord {
@@ -282,6 +290,19 @@ pub struct LargePayoutEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhitelistChangedEvent {
+    pub address: Address,
+    pub whitelisted: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhitelistEnforcementChangedEvent {
+    pub enabled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduleTriggeredEvent {
     pub version: u32,
     pub program_id: String,
@@ -311,7 +332,6 @@ pub enum DataKey {
     ReleaseSchedule(String, u64),    // program_id, schedule_id -> ProgramReleaseSchedule
     ReleaseHistory(String),          // program_id -> Vec<ProgramReleaseHistory>
     NextScheduleId(String),          // program_id -> next schedule_id
-    MultisigConfig(String),          // program_id -> MultisigConfig
     PayoutApproval(String, Address), // program_id, recipient -> PayoutApproval
     PendingClaim(String, u64),       // (program_id, schedule_id) -> ClaimRecord
     ClaimWindow,                     // u64 seconds (global config)
@@ -319,7 +339,11 @@ pub enum DataKey {
     RateLimitConfig,                 // RateLimitConfig struct
     FeeConfig,                       // FeeConfig struct
     ProgramRegistry,                 // Vec<String> of program IDs
-    Dispute,                         // DisputeRecord (program-level dispute)
+    Dispute,                         // DisputeRecord (global program-level dispute)
+    RecipientDispute(Address),       // recipient -> DisputeRecord
+    ScheduleDispute(u64),            // schedule_id -> DisputeRecord
+    Whitelist(Address),              // Address -> bool (whitelisted flag)
+    WhitelistEnforced,               // bool (enforcement flag)
 }
 
 #[contracttype]
@@ -355,6 +379,18 @@ pub struct FeeConfig {
     pub fee_enabled: bool,
 }
 
+/// Admin-configurable caps for fund locking.
+/// When set, `lock_program_funds` rejects amounts that would exceed either cap.
+/// Default: no cap (backward-compatible).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FundCapConfig {
+    /// Maximum total funds allowed across all lock operations (None = no cap).
+    pub max_total_funds: Option<i128>,
+    /// Maximum amount allowed for a single lock operation (None = no cap).
+    pub max_single_lock: Option<i128>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Analytics {
@@ -363,14 +399,6 @@ pub struct Analytics {
     pub total_payouts: u32,
     pub active_programs: u32,
     pub operation_count: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MultisigConfig {
-    pub threshold_amount: i128,
-    pub signers: Vec<Address>,
-    pub required_signatures: u32,
 }
 
 #[contracttype]
@@ -441,6 +469,19 @@ pub enum DisputeStatus {
     Cancelled,
 }
 
+/// Scope for a dispute halt.
+///
+/// `Global` preserves the original program-wide dispute behavior. `Recipient`
+/// blocks direct payouts and releases for one recipient, while `Schedule`
+/// blocks only one release schedule.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisputeScope {
+    Global,
+    Recipient(Address),
+    Schedule(u64),
+}
+
 /// Record stored on-chain for an active or historical dispute.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -460,6 +501,7 @@ pub struct DisputeRecord {
 pub struct DisputeOpenedEvent {
     pub version: u32,
     pub program_id: String,
+    pub scope: DisputeScope,
     pub opened_by: Address,
     pub reason: String,
     pub timestamp: u64,
@@ -470,6 +512,7 @@ pub struct DisputeOpenedEvent {
 pub struct DisputeResolvedEvent {
     pub version: u32,
     pub program_id: String,
+    pub scope: DisputeScope,
     pub resolved_by: Address,
     pub timestamp: u64,
 }
@@ -479,6 +522,7 @@ pub struct DisputeResolvedEvent {
 pub struct DisputeCancelledEvent {
     pub version: u32,
     pub program_id: String,
+    pub scope: DisputeScope,
     pub cancelled_by: Address,
     pub timestamp: u64,
 }
@@ -557,7 +601,8 @@ impl ProgramEscrowContract {
         token_address: Address,
     ) -> ProgramData {
         // Check if program already exists
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             panic!("Program already initialized");
         }
 
@@ -571,14 +616,18 @@ impl ProgramEscrowContract {
         };
 
         // Store program data
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         env.storage()
-            .instance()
+            .persistent()
             .set(&SCHEDULES, &Vec::<ProgramReleaseSchedule>::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         env.storage()
-            .instance()
+            .persistent()
             .set(&RELEASE_HISTORY, &Vec::<ProgramReleaseHistory>::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         env.storage().instance().set(&NEXT_SCHEDULE_ID, &1_u64);
+        Self::bump_instance_ttl(&env);
 
         // Emit ProgramInitialized event
         env.events().publish(
@@ -618,7 +667,8 @@ impl ProgramEscrowContract {
         }
         for i in 0..batch_size {
             let program_key = DataKey::Program(items.get(i).unwrap().program_id.clone());
-            if env.storage().instance().has(&program_key) {
+            if env.storage().persistent().has(&program_key) {
+                Self::bump_persistent_datakey_ttl(&env, &program_key);
                 return Err(BatchError::ProgramAlreadyExists);
             }
         }
@@ -643,17 +693,8 @@ impl ProgramEscrowContract {
                 token_address: token_address.clone(),
             };
             let program_key = DataKey::Program(program_id.clone());
-            env.storage().instance().set(&program_key, &program_data);
-
-            let multisig_config = MultisigConfig {
-                threshold_amount: i128::MAX,
-                signers: vec![&env],
-                required_signatures: 0,
-            };
-            env.storage().persistent().set(
-                &DataKey::MultisigConfig(program_id.clone()),
-                &multisig_config,
-            );
+            env.storage().persistent().set(&program_key, &program_data);
+            Self::bump_persistent_datakey_ttl(&env, &program_key);
 
             env.events().publish(
                 (symbol_short!("BatchReg"),),
@@ -677,6 +718,27 @@ impl ProgramEscrowContract {
             .unwrap_or(0)
     }
 
+    /// Bump the TTL for single-program persistent storage keys
+    fn bump_persistent_symbol_ttl(env: &Env, key: &Symbol) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    }
+
+    /// Bump the TTL for multi-program persistent storage keys
+    fn bump_persistent_datakey_ttl(env: &Env, key: &DataKey) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    }
+    /// Bump the TTL for the contract instance storage
+    fn bump_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    }
+
+
     /// Get fee configuration (internal helper)
     fn get_fee_config_internal(env: &Env) -> FeeConfig {
         env.storage()
@@ -694,9 +756,10 @@ impl ProgramEscrowContract {
     fn emit_aggregate_stats(env: &Env, program_data: &ProgramData) {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(env));
+        Self::bump_persistent_symbol_ttl(env, &SCHEDULES);
 
         let mut scheduled_count = 0u32;
         for i in 0..schedules.len() {
@@ -726,7 +789,7 @@ impl ProgramEscrowContract {
         recipient: &Address,
         amount: i128,
     ) {
-        let threshold = program_data.total_funds / 10; // 10% of total funds
+        let threshold = monitoring::get_large_payout_threshold_amount(env, program_data.total_funds);
         if amount >= threshold {
             env.events().publish(
                 (LARGE_PAYOUT,),
@@ -746,11 +809,13 @@ impl ProgramEscrowContract {
     /// * `bool` - True if program exists, false otherwise
     pub fn program_exists(env: Env) -> bool {
         // Check both PROGRAM_DATA (single program) and DataKey::Program registry
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             return true;
         }
         // Check if any programs exist in registry
         let registry: Option<Vec<String>> = env.storage().instance().get(&PROGRAM_REGISTRY);
+        Self::bump_instance_ttl(&env);
         if let Some(reg) = registry {
             return reg.len() > 0;
         }
@@ -786,9 +851,41 @@ impl ProgramEscrowContract {
 
         let mut program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
+
+        // Check fund caps if configured
+        let cap_config: FundCapConfig = env
+            .storage()
+            .instance()
+            .get(&FUND_CAP_CONFIG)
+            .unwrap_or(FundCapConfig {
+                max_total_funds: None,
+                max_single_lock: None,
+            });
+
+        // Per-lock cap check
+        if let Some(max_single) = cap_config.max_single_lock {
+            if amount > max_single {
+                monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
+                panic!("Amount exceeds per-lock maximum");
+            }
+        }
+
+        // Total-funds cap check
+        if let Some(max_total) = cap_config.max_total_funds {
+            let new_total = program_data.total_funds.checked_add(amount)
+                .unwrap_or_else(|| {
+                    monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
+                    panic!("Total funds overflow");
+                });
+            if new_total > max_total {
+                monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
+                panic!("Total funds cap exceeded");
+            }
+        }
 
         // Transfer funds
         let token_client = token::Client::new(&env, &program_data.token_address);
@@ -805,7 +902,8 @@ impl ProgramEscrowContract {
         }
 
         // Store updated data
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Emit FundsLocked event
         env.events().publish(
@@ -836,9 +934,11 @@ impl ProgramEscrowContract {
     /// This must be called before any admin protected functions (like pause) can be used.
     pub fn initialize_contract(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
+            Self::bump_instance_ttl(&env);
             panic!("Already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Self::bump_instance_ttl(&env);
     }
 
     /// Register or replace the contract admin. Can be called multiple times to rotate the admin.
@@ -846,14 +946,18 @@ impl ProgramEscrowContract {
         // If admin is already set, require auth from the current admin
         if env.storage().instance().has(&DataKey::Admin) {
             let currentadmin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::bump_instance_ttl(&env);
             currentadmin.require_auth();
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Self::bump_instance_ttl(&env);
     }
 
     /// Get the current admin
     pub fn getadmin(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Admin)
+        let admin = env.storage().instance().get(&DataKey::Admin);
+        if admin.is_some() { Self::bump_instance_ttl(&env); }
+        admin
     }
 
     /// Update pause flags (admin only)
@@ -864,10 +968,12 @@ impl ProgramEscrowContract {
         refund: Option<bool>,
     ) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
+            Self::bump_instance_ttl(&env);
             panic!("Not initialized");
         }
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::bump_instance_ttl(&env);
         admin.require_auth();
 
         // Check governance requirements
@@ -900,6 +1006,7 @@ impl ProgramEscrowContract {
         }
 
         env.storage().instance().set(&DataKey::PauseFlags, &flags);
+        Self::bump_instance_ttl(&env);
         Ok(())
     }
 
@@ -940,17 +1047,143 @@ impl ProgramEscrowContract {
             .unwrap_or_else(|| panic!("Admin not set"))
     }
 
-    /// Internal guard — panics if a dispute is currently open.
-    fn check_not_disputed(env: &Env) {
-        if let Some(record) = env
+    /// Returns true when the given dispute key currently stores an open dispute.
+    fn is_dispute_open_for_key(env: &Env, key: &DataKey) -> bool {
+        if let Some(record) = env.storage().instance().get::<DataKey, DisputeRecord>(key) {
+            Self::bump_instance_ttl(&env);
+            record.status == DisputeStatus::Open
+        } else {
+            false
+        }
+    }
+
+    /// Returns true when a due schedule should be skipped by scoped dispute handling.
+    fn is_schedule_scope_disputed(env: &Env, schedule_id: u64, recipient: &Address) -> bool {
+        Self::is_dispute_open_for_key(env, &DataKey::ScheduleDispute(schedule_id))
+            || Self::is_dispute_open_for_key(env, &DataKey::RecipientDispute(recipient.clone()))
+    }
+
+    fn program_id_for_event(env: &Env) -> String {
+        let program_data: ProgramData = env
+            .storage()
+            .persistent()
+            .get(&PROGRAM_DATA)
+            .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
+        program_data.program_id
+    }
+
+    fn open_dispute_at(
+        env: &Env,
+        key: DataKey,
+        scope: DisputeScope,
+        reason: String,
+        duplicate_message: &str,
+    ) {
+        let admin = Self::requireadmin(env);
+        admin.require_auth();
+
+        if Self::is_dispute_open_for_key(env, &key) {
+            panic!("{}", duplicate_message);
+        }
+
+        let program_id = Self::program_id_for_event(env);
+        let now = env.ledger().timestamp();
+        let record = DisputeRecord {
+            opened_by: admin.clone(),
+            opened_at: now,
+            reason: reason.clone(),
+            status: DisputeStatus::Open,
+            resolved_by: None,
+            resolved_at: None,
+        };
+
+        env.storage().instance().set(&key, &record);
+        Self::bump_instance_ttl(&env);
+
+        env.events().publish(
+            (DISPUTE_OPENED,),
+            DisputeOpenedEvent {
+                version: EVENT_VERSION_V2,
+                program_id,
+                scope,
+                opened_by: admin,
+                reason,
+                timestamp: now,
+            },
+        );
+    }
+
+    fn resolve_dispute_at(env: &Env, key: DataKey, scope: DisputeScope, missing_message: &str) {
+        let admin = Self::requireadmin(env);
+        admin.require_auth();
+
+        let mut record: DisputeRecord = env
             .storage()
             .instance()
-            .get::<DataKey, DisputeRecord>(&DataKey::Dispute)
-        {
-            if record.status == DisputeStatus::Open {
-                panic!("Dispute in progress");
-            }
+            .get(&key)
+            .unwrap_or_else(|| panic!("{}", missing_message));
+        Self::bump_instance_ttl(&env);
+
+        if record.status != DisputeStatus::Open {
+            panic!("No open dispute to resolve");
         }
+
+        let program_id = Self::program_id_for_event(env);
+        let now = env.ledger().timestamp();
+        record.status = DisputeStatus::Resolved;
+        record.resolved_by = Some(admin.clone());
+        record.resolved_at = Some(now);
+
+        env.storage().instance().set(&key, &record);
+        Self::bump_instance_ttl(&env);
+
+        env.events().publish(
+            (DISPUTE_RESOLVED,),
+            DisputeResolvedEvent {
+                version: EVENT_VERSION_V2,
+                program_id,
+                scope,
+                resolved_by: admin,
+                timestamp: now,
+            },
+        );
+    }
+
+    fn cancel_dispute_at(env: &Env, key: DataKey, scope: DisputeScope, missing_message: &str) {
+        let admin = Self::requireadmin(env);
+        admin.require_auth();
+
+        let mut record: DisputeRecord = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{}", missing_message));
+        Self::bump_instance_ttl(&env);
+
+        if record.status != DisputeStatus::Open {
+            panic!("No open dispute to cancel");
+        }
+
+        let program_id = Self::program_id_for_event(env);
+        let now = env.ledger().timestamp();
+        record.status = DisputeStatus::Cancelled;
+        record.resolved_by = Some(admin.clone());
+        record.resolved_at = Some(now);
+
+        env.storage().instance().set(&key, &record);
+        Self::bump_instance_ttl(&env);
+
+        env.events().publish(
+            (DISPUTE_CANCELLED,),
+            DisputeCancelledEvent {
+                version: EVENT_VERSION_V2,
+                program_id,
+                scope,
+                cancelled_by: admin,
+                timestamp: now,
+            },
+        );
     }
 
     /// Open a dispute on this program, blocking further payouts until resolved or cancelled.
@@ -962,47 +1195,40 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If a dispute is already open
     pub fn open_dispute(env: Env, reason: String) {
-        let admin = Self::requireadmin(&env);
-        admin.require_auth();
+        Self::open_dispute_at(
+            &env,
+            DataKey::Dispute,
+            DisputeScope::Global,
+            reason,
+            "Dispute already open",
+        );
+    }
 
-        // Reject if a dispute is already open
-        if let Some(existing) = env
-            .storage()
-            .instance()
-            .get::<DataKey, DisputeRecord>(&DataKey::Dispute)
-        {
-            if existing.status == DisputeStatus::Open {
-                panic!("Dispute already open");
-            }
-        }
+    /// Open a recipient-scoped dispute.
+    ///
+    /// Direct payouts and release schedules for this recipient are blocked,
+    /// while unrelated recipients remain payable unless a global dispute is open.
+    pub fn open_recipient_dispute(env: Env, recipient: Address, reason: String) {
+        Self::open_dispute_at(
+            &env,
+            DataKey::RecipientDispute(recipient.clone()),
+            DisputeScope::Recipient(recipient),
+            reason,
+            "Recipient dispute already open",
+        );
+    }
 
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-
-        let now = env.ledger().timestamp();
-        let record = DisputeRecord {
-            opened_by: admin.clone(),
-            opened_at: now,
-            reason: reason.clone(),
-            status: DisputeStatus::Open,
-            resolved_by: None,
-            resolved_at: None,
-        };
-
-        env.storage().instance().set(&DataKey::Dispute, &record);
-
-        env.events().publish(
-            (DISPUTE_OPENED,),
-            DisputeOpenedEvent {
-                version: EVENT_VERSION_V2,
-                program_id: program_data.program_id.clone(),
-                opened_by: admin,
-                reason,
-                timestamp: now,
-            },
+    /// Open a schedule-scoped dispute.
+    ///
+    /// Only the selected release schedule is blocked unless a global or
+    /// recipient-scoped dispute also applies.
+    pub fn open_schedule_dispute(env: Env, schedule_id: u64, reason: String) {
+        Self::open_dispute_at(
+            &env,
+            DataKey::ScheduleDispute(schedule_id),
+            DisputeScope::Schedule(schedule_id),
+            reason,
+            "Schedule dispute already open",
         );
     }
 
@@ -1012,40 +1238,31 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If no dispute is currently open
     pub fn resolve_dispute(env: Env) {
-        let admin = Self::requireadmin(&env);
-        admin.require_auth();
+        Self::resolve_dispute_at(
+            &env,
+            DataKey::Dispute,
+            DisputeScope::Global,
+            "No dispute to resolve",
+        );
+    }
 
-        let mut record: DisputeRecord = env
-            .storage()
-            .instance()
-            .get(&DataKey::Dispute)
-            .unwrap_or_else(|| panic!("No dispute to resolve"));
+    /// Resolve an open recipient-scoped dispute.
+    pub fn resolve_recipient_dispute(env: Env, recipient: Address) {
+        Self::resolve_dispute_at(
+            &env,
+            DataKey::RecipientDispute(recipient.clone()),
+            DisputeScope::Recipient(recipient),
+            "No recipient dispute to resolve",
+        );
+    }
 
-        if record.status != DisputeStatus::Open {
-            panic!("No open dispute to resolve");
-        }
-
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-
-        let now = env.ledger().timestamp();
-        record.status = DisputeStatus::Resolved;
-        record.resolved_by = Some(admin.clone());
-        record.resolved_at = Some(now);
-
-        env.storage().instance().set(&DataKey::Dispute, &record);
-
-        env.events().publish(
-            (DISPUTE_RESOLVED,),
-            DisputeResolvedEvent {
-                version: EVENT_VERSION_V2,
-                program_id: program_data.program_id.clone(),
-                resolved_by: admin,
-                timestamp: now,
-            },
+    /// Resolve an open schedule-scoped dispute.
+    pub fn resolve_schedule_dispute(env: Env, schedule_id: u64) {
+        Self::resolve_dispute_at(
+            &env,
+            DataKey::ScheduleDispute(schedule_id),
+            DisputeScope::Schedule(schedule_id),
+            "No schedule dispute to resolve",
         );
     }
 
@@ -1055,65 +1272,79 @@ impl ProgramEscrowContract {
     /// * If admin not set
     /// * If no dispute is currently open
     pub fn cancel_dispute(env: Env) {
-        let admin = Self::requireadmin(&env);
-        admin.require_auth();
+        Self::cancel_dispute_at(
+            &env,
+            DataKey::Dispute,
+            DisputeScope::Global,
+            "No dispute to cancel",
+        );
+    }
 
-        let mut record: DisputeRecord = env
-            .storage()
-            .instance()
-            .get(&DataKey::Dispute)
-            .unwrap_or_else(|| panic!("No dispute to cancel"));
+    /// Cancel an open recipient-scoped dispute.
+    pub fn cancel_recipient_dispute(env: Env, recipient: Address) {
+        Self::cancel_dispute_at(
+            &env,
+            DataKey::RecipientDispute(recipient.clone()),
+            DisputeScope::Recipient(recipient),
+            "No recipient dispute to cancel",
+        );
+    }
 
-        if record.status != DisputeStatus::Open {
-            panic!("No open dispute to cancel");
-        }
-
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-
-        let now = env.ledger().timestamp();
-        record.status = DisputeStatus::Cancelled;
-        record.resolved_by = Some(admin.clone());
-        record.resolved_at = Some(now);
-
-        env.storage().instance().set(&DataKey::Dispute, &record);
-
-        env.events().publish(
-            (DISPUTE_CANCELLED,),
-            DisputeCancelledEvent {
-                version: EVENT_VERSION_V2,
-                program_id: program_data.program_id.clone(),
-                cancelled_by: admin,
-                timestamp: now,
-            },
+    /// Cancel an open schedule-scoped dispute.
+    pub fn cancel_schedule_dispute(env: Env, schedule_id: u64) {
+        Self::cancel_dispute_at(
+            &env,
+            DataKey::ScheduleDispute(schedule_id),
+            DisputeScope::Schedule(schedule_id),
+            "No schedule dispute to cancel",
         );
     }
 
     /// Returns the current dispute record, if any.
     pub fn get_dispute(env: Env) -> Option<DisputeRecord> {
-        env.storage().instance().get(&DataKey::Dispute)
+        let dispute = env.storage().instance().get(&DataKey::Dispute);
+        if dispute.is_some() { Self::bump_instance_ttl(&env); }
+        dispute
+    }
+
+    /// Returns the current recipient-scoped dispute record, if any.
+    pub fn get_recipient_dispute(env: Env, recipient: Address) -> Option<DisputeRecord> {
+        let record = env.storage()
+            .instance()
+            .get(&DataKey::RecipientDispute(recipient));
+        if record.is_some() { Self::bump_instance_ttl(&env); }
+        record
+    }
+
+    /// Returns the current schedule-scoped dispute record, if any.
+    pub fn get_schedule_dispute(env: Env, schedule_id: u64) -> Option<DisputeRecord> {
+        let record = env.storage()
+            .instance()
+            .get(&DataKey::ScheduleDispute(schedule_id));
+        if record.is_some() { Self::bump_instance_ttl(&env); }
+        record
     }
 
     /// Returns true if a dispute is currently open.
     pub fn is_disputed(env: Env) -> bool {
-        if let Some(record) = env
-            .storage()
-            .instance()
-            .get::<DataKey, DisputeRecord>(&DataKey::Dispute)
-        {
-            record.status == DisputeStatus::Open
-        } else {
-            false
-        }
+        Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+    }
+
+    /// Returns true if a recipient-scoped dispute is currently open.
+    pub fn is_recipient_disputed(env: Env, recipient: Address) -> bool {
+        Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient))
+    }
+
+    /// Returns true if a schedule-scoped dispute is currently open.
+    pub fn is_schedule_disputed(env: Env, schedule_id: u64) -> bool {
+        Self::is_dispute_open_for_key(&env, &DataKey::ScheduleDispute(schedule_id))
     }
 
     // --- Circuit Breaker & Rate Limit ---
 
     pub fn set_circuitadmin(env: Env, newadmin: Address, caller: Option<Address>) {
         error_recovery::set_circuitadmin(&env, newadmin, caller);
+        Self::bump_instance_ttl(&env);
     }
 
     pub fn get_circuitadmin(env: Env) -> Option<Address> {
@@ -1229,7 +1460,56 @@ impl ProgramEscrowContract {
             })
     }
 
-    pub fn set_whitelist(env: Env, _address: Address, _whitelisted: bool) {
+    /// Set the fund cap configuration (admin only).
+    /// When enabled, `lock_program_funds` will reject locks that exceed either cap.
+    /// Pass `None` for either field to leave that cap unset.
+    pub fn set_fund_cap_config(
+        env: Env,
+        max_total_funds: Option<i128>,
+        max_single_lock: Option<i128>,
+    ) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Admin not set"));
+        admin.require_auth();
+
+        // Validate: if set, values must be positive
+        if let Some(val) = max_total_funds {
+            if val <= 0 {
+                panic!("max_total_funds must be positive");
+            }
+        }
+        if let Some(val) = max_single_lock {
+            if val <= 0 {
+                panic!("max_single_lock must be positive");
+            }
+        }
+
+        let config = FundCapConfig {
+            max_total_funds,
+            max_single_lock,
+        };
+        env.storage()
+            .instance()
+            .set(&FUND_CAP_CONFIG, &config);
+        Ok(())
+    }
+
+    /// Get the current fund cap configuration.
+    pub fn get_fund_cap_config(env: Env) -> FundCapConfig {
+        env.storage()
+            .instance()
+            .get(&FUND_CAP_CONFIG)
+            .unwrap_or(FundCapConfig {
+                max_total_funds: None,
+                max_single_lock: None,
+            })
+    }
+
+    /// Set the whitelist status of an address (admin only).
+    pub fn set_whitelist(env: Env, address: Address, whitelisted: bool) {
         // Only admin can set whitelist
         let admin: Address = env
             .storage()
@@ -1237,6 +1517,58 @@ impl ProgramEscrowContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("Not initialized"));
         admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Whitelist(address.clone()), &whitelisted);
+
+        // Emit whitelist changed event
+        env.events().publish(
+            (WHITELIST_CHANGED,),
+            WhitelistChangedEvent {
+                address,
+                whitelisted,
+            },
+        );
+    }
+
+    /// Check if an address is whitelisted.
+    pub fn is_whitelisted(env: Env, address: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Whitelist(address))
+            .unwrap_or(false)
+    }
+
+    /// Enable or disable whitelist enforcement (admin only).
+    pub fn set_whitelist_enforced(env: Env, enabled: bool) {
+        // Only admin can change whitelist enforcement
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WhitelistEnforced, &enabled);
+
+        // Emit whitelist enforcement changed event
+        env.events().publish(
+            (WHITELIST_ENFORCEMENT_CHANGED,),
+            WhitelistEnforcementChangedEvent {
+                enabled,
+            },
+        );
+    }
+
+    /// Check if whitelist enforcement is enabled.
+    pub fn is_whitelist_enforced(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforced)
+            .unwrap_or(false)
     }
 
     // ========================================================================
@@ -1288,9 +1620,19 @@ impl ProgramEscrowContract {
 
     /// Execute batch payouts to multiple recipients
     ///
+    /// The batch is bounded by `MAX_BATCH_SIZE` (currently 100). Calls with
+    /// zero recipients or more than `MAX_BATCH_SIZE` recipients are rejected
+    /// before any token transfer occurs, and the reentrancy guard is cleared
+    /// on those early-return paths to avoid a stuck guard.
+    ///
     /// # Arguments
-    /// * `recipients` - Vector of recipient addresses
-    /// * `amounts` - Vector of amounts (must match recipients length)
+    /// * `recipients` - Vector of recipient addresses (1..=MAX_BATCH_SIZE)
+    /// * `amounts` - Vector of amounts (must match recipients length; all > 0)
+    ///
+    /// # Panics
+    /// * `"Batch size exceeds maximum allowed"` — when `recipients.len() > MAX_BATCH_SIZE`
+    /// * `"Cannot process empty batch"` — when `recipients.len() == 0`
+    /// * `"Recipients and amounts vectors must have the same length"` — on length mismatch
     ///
     /// # Returns
     /// Updated ProgramData after payouts
@@ -1313,23 +1655,44 @@ impl ProgramEscrowContract {
             panic!("Funds Paused");
         }
 
-        // Dispute guard: block payouts while a dispute is open
-        if Self::is_disputed(env.clone()) {
+        // Global dispute guard: block all payouts while a global dispute is open.
+        if Self::is_dispute_open_for_key(&env, &DataKey::Dispute) {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
 
-        // Verify authorization
         let mut program_data: ProgramData =
             env.storage()
-                .instance()
+                .persistent()
                 .get(&PROGRAM_DATA)
                 .unwrap_or_else(|| {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Program not initialized")
                 });
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
+
+        // Whitelist guard: block payouts to non-whitelisted recipients if enforcement is enabled
+        let whitelist_enforced = env
+            .storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforced)
+            .unwrap_or(false);
+
+        if whitelist_enforced {
+            for recipient in recipients.iter() {
+                let whitelisted = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Whitelist(recipient.clone()))
+                    .unwrap_or(false);
+                if !whitelisted {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Recipient not whitelisted");
+                }
+            }
+        }
 
         let batch_len = recipients.len();
         let recipient_count = batch_len as u32;
@@ -1343,6 +1706,18 @@ impl ProgramEscrowContract {
         if batch_len == 0 {
             reentrancy_guard::clear_entered(&env);
             panic!("Cannot process empty batch");
+        }
+
+        if recipient_count > MAX_BATCH_SIZE {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Batch size exceeds maximum allowed");
+        }
+
+        for recipient in recipients.iter() {
+            if Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient)) {
+                reentrancy_guard::clear_entered(&env);
+                panic!("Dispute in progress");
+            }
         }
 
         // Calculate total payout amount
@@ -1421,7 +1796,8 @@ impl ProgramEscrowContract {
             });
 
         // Store updated data
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Emit BatchPayout event
         env.events().publish(
@@ -1485,8 +1861,11 @@ impl ProgramEscrowContract {
             panic!("Funds Paused");
         }
 
-        // Dispute guard: block payouts while a dispute is open
-        if Self::is_disputed(env.clone()) {
+        // Dispute guard: global disputes block all payouts; recipient disputes
+        // block only this payout target.
+        if Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+            || Self::is_dispute_open_for_key(&env, &DataKey::RecipientDispute(recipient.clone()))
+        {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
@@ -1494,14 +1873,34 @@ impl ProgramEscrowContract {
         // Verify authorization
         let program_data: ProgramData =
             env.storage()
-                .instance()
+                .persistent()
                 .get(&PROGRAM_DATA)
                 .unwrap_or_else(|| {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Program not initialized")
                 });
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
+
+        // Whitelist guard: block payouts to non-whitelisted recipients if enforcement is enabled
+        let whitelist_enforced = env
+            .storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforced)
+            .unwrap_or(false);
+
+        if whitelist_enforced {
+            let whitelisted = env
+                .storage()
+                .instance()
+                .get(&DataKey::Whitelist(recipient.clone()))
+                .unwrap_or(false);
+            if !whitelisted {
+                reentrancy_guard::clear_entered(&env);
+                panic!("Recipient not whitelisted");
+            }
+        }
 
         // Validate amount
         if amount <= 0 {
@@ -1549,7 +1948,8 @@ impl ProgramEscrowContract {
         updated_data.payout_history = updated_history;
 
         // Store updated data
-        env.storage().instance().set(&PROGRAM_DATA, &updated_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &updated_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Emit Payout event
         env.events().publish(
@@ -1588,10 +1988,12 @@ impl ProgramEscrowContract {
     /// # Returns
     /// ProgramData containing all program information
     pub fn get_program_info(env: Env) -> ProgramData {
-        env.storage()
-            .instance()
+        let val = env.storage()
+            .persistent()
             .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"))
+            .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
+        val
     }
 
     /// Get remaining balance
@@ -1601,9 +2003,10 @@ impl ProgramEscrowContract {
     pub fn get_remaining_balance(env: Env) -> i128 {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.remaining_balance
     }
@@ -1617,9 +2020,10 @@ impl ProgramEscrowContract {
     ) -> ProgramReleaseSchedule {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         program_data.authorized_payout_key.require_auth();
 
@@ -1629,9 +2033,10 @@ impl ProgramEscrowContract {
 
         let mut schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let schedule_id: u64 = env
             .storage()
             .instance()
@@ -1649,11 +2054,13 @@ impl ProgramEscrowContract {
         };
         schedules.push_back(schedule.clone());
 
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         env.storage()
             .instance()
             .set(&NEXT_SCHEDULE_ID, &(schedule_id + 1));
 
+        Self::bump_instance_ttl(&env);
         schedule
     }
 
@@ -1669,32 +2076,35 @@ impl ProgramEscrowContract {
             panic!("Circuit breaker open: schedule releases temporarily disabled");
         }
 
-        // Dispute guard: block schedule releases while a dispute is open
-        if Self::is_disputed(env.clone()) {
+        // Global dispute guard: block all schedule releases while a global dispute is open.
+        if Self::is_dispute_open_for_key(&env, &DataKey::Dispute) {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
 
         let mut program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| {
                 reentrancy_guard::clear_entered(&env);
                 panic!("Program not initialized")
             });
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         program_data.authorized_payout_key.require_auth();
 
         let mut schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut release_history: Vec<ProgramReleaseHistory> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&RELEASE_HISTORY)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
 
         let now = env.ledger().timestamp();
         let contract_address = env.current_contract_address();
@@ -1702,8 +2112,18 @@ impl ProgramEscrowContract {
         let mut released_count: u32 = 0;
 
         for i in 0..schedules.len() {
+            // Bound the number of releases per invocation to prevent unbounded
+            // Soroban instruction/memory usage when many schedules are due.
+            if released_count >= MAX_BATCH_SIZE {
+                break;
+            }
+
             let mut schedule = schedules.get(i).unwrap();
             if schedule.released || now < schedule.release_timestamp {
+                continue;
+            }
+
+            if Self::is_schedule_scope_disputed(&env, schedule.schedule_id, &schedule.recipient) {
                 continue;
             }
 
@@ -1754,11 +2174,14 @@ impl ProgramEscrowContract {
             released_count += 1;
         }
 
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         env.storage()
-            .instance()
+            .persistent()
             .set(&RELEASE_HISTORY, &release_history);
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
 
         // Inform the circuit breaker of the outcome.
         if released_count > 0 {
@@ -1773,17 +2196,21 @@ impl ProgramEscrowContract {
     }
 
     pub fn get_program_release_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        env.storage()
-            .instance()
+        let val = env.storage()
+            .persistent()
             .get(&SCHEDULES)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
+        val
     }
 
     pub fn get_program_release_history(env: Env) -> Vec<ProgramReleaseHistory> {
-        env.storage()
-            .instance()
+        let val = env.storage()
+            .persistent()
             .get(&RELEASE_HISTORY)
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
+        val
     }
 
     // ========================================================================
@@ -1825,9 +2252,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -1860,9 +2288,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -1895,9 +2324,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -1929,9 +2359,10 @@ impl ProgramEscrowContract {
     ) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut results = Vec::new(&env);
         let mut count = 0u32;
         let mut skipped = 0u32;
@@ -1962,9 +2393,10 @@ impl ProgramEscrowContract {
     ) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut results = Vec::new(&env);
         let mut count = 0u32;
         let mut skipped = 0u32;
@@ -1995,9 +2427,10 @@ impl ProgramEscrowContract {
     ) -> Vec<ProgramReleaseHistory> {
         let history: Vec<ProgramReleaseHistory> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&RELEASE_HISTORY)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         let mut results = Vec::new(&env);
         let mut count = 0u32;
         let mut skipped = 0u32;
@@ -2023,14 +2456,16 @@ impl ProgramEscrowContract {
     pub fn get_program_aggregate_stats(env: Env) -> ProgramAggregateStats {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
 
         let mut released_count = 0u32;
         let mut scheduled_count = 0u32;
@@ -2066,9 +2501,10 @@ impl ProgramEscrowContract {
     ) -> Vec<PayoutRecord> {
         let program_data: ProgramData = env
             .storage()
-            .instance()
+            .persistent()
             .get(&PROGRAM_DATA)
             .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
         let history = program_data.payout_history;
         let mut results = Vec::new(&env);
         let mut count = 0u32;
@@ -2095,9 +2531,10 @@ impl ProgramEscrowContract {
     pub fn get_pending_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut results = Vec::new(&env);
 
         for i in 0..schedules.len() {
@@ -2113,9 +2550,10 @@ impl ProgramEscrowContract {
     pub fn get_due_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let now = env.ledger().timestamp();
         let mut results = Vec::new(&env);
 
@@ -2132,9 +2570,10 @@ impl ProgramEscrowContract {
     pub fn get_total_scheduled_amount(env: Env) -> i128 {
         let schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&SCHEDULES)
             .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         let mut total = 0i128;
 
         for i in 0..schedules.len() {
@@ -2147,7 +2586,8 @@ impl ProgramEscrowContract {
     }
 
     pub fn get_program_count(env: Env) -> u32 {
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             1
         } else {
             0
@@ -2156,7 +2596,8 @@ impl ProgramEscrowContract {
 
     pub fn list_programs(env: Env) -> Vec<ProgramData> {
         let mut results = Vec::new(&env);
-        if env.storage().instance().has(&PROGRAM_DATA) {
+        if env.storage().persistent().has(&PROGRAM_DATA) {
+            Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
             results.push_back(Self::get_program_info(env.clone()));
         }
         results
@@ -2212,6 +2653,12 @@ impl ProgramEscrowContract {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Already released");
                 }
+                if Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+                    || Self::is_schedule_scope_disputed(&env, s.schedule_id, &s.recipient)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Dispute in progress");
+                }
 
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
@@ -2248,9 +2695,11 @@ impl ProgramEscrowContract {
             panic!("Schedule not found");
         }
 
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         // Persist the updated remaining_balance.
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Transfer succeeded — inform the circuit breaker.
         error_recovery::record_success(&env);
@@ -2259,9 +2708,10 @@ impl ProgramEscrowContract {
         if let Some(s) = released_schedule {
             let mut history: Vec<ProgramReleaseHistory> = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&RELEASE_HISTORY)
                 .unwrap_or_else(|| Vec::new(&env));
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
             history.push_back(ProgramReleaseHistory {
                 schedule_id: s.schedule_id,
                 recipient: s.recipient,
@@ -2269,7 +2719,8 @@ impl ProgramEscrowContract {
                 released_at: now,
                 release_type: ReleaseType::Manual,
             });
-            env.storage().instance().set(&RELEASE_HISTORY, &history);
+            env.storage().persistent().set(&RELEASE_HISTORY, &history);
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         }
 
         // Clear reentrancy guard before returning
@@ -2303,6 +2754,12 @@ impl ProgramEscrowContract {
                 if now < s.release_timestamp {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Not yet due");
+                }
+                if Self::is_dispute_open_for_key(&env, &DataKey::Dispute)
+                    || Self::is_schedule_scope_disputed(&env, s.schedule_id, &s.recipient)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Dispute in progress");
                 }
 
                 // Transfer funds
@@ -2340,9 +2797,11 @@ impl ProgramEscrowContract {
             panic!("Schedule not found");
         }
 
-        env.storage().instance().set(&SCHEDULES, &schedules);
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
         // Persist the updated remaining_balance.
-        env.storage().instance().set(&PROGRAM_DATA, &program_data);
+        env.storage().persistent().set(&PROGRAM_DATA, &program_data);
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
 
         // Transfer succeeded — inform the circuit breaker.
         error_recovery::record_success(&env);
@@ -2351,9 +2810,10 @@ impl ProgramEscrowContract {
         if let Some(s) = released_schedule {
             let mut history: Vec<ProgramReleaseHistory> = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&RELEASE_HISTORY)
                 .unwrap_or_else(|| Vec::new(&env));
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
             history.push_back(ProgramReleaseHistory {
                 schedule_id: s.schedule_id,
                 recipient: s.recipient,
@@ -2361,7 +2821,8 @@ impl ProgramEscrowContract {
                 released_at: now,
                 release_type: ReleaseType::Automatic,
             });
-            env.storage().instance().set(&RELEASE_HISTORY, &history);
+            env.storage().persistent().set(&RELEASE_HISTORY, &history);
+            Self::bump_persistent_symbol_ttl(&env, &RELEASE_HISTORY);
         }
 
         // Clear reentrancy guard before returning
@@ -2390,6 +2851,25 @@ impl ProgramEscrowContract {
     /// Get performance stats for a specific function
     pub fn get_performance_stats(env: Env, function_name: Symbol) -> monitoring::PerformanceStats {
         monitoring::get_performance_stats(&env, function_name)
+    }
+
+    /// Get the large-payout alert threshold in basis points (default 1000 = 10%).
+    /// A payout is flagged as "large" when it equals or exceeds
+    /// `total_funds * threshold_bps / 10_000`.
+    pub fn get_large_payout_threshold(env: Env) -> u32 {
+        monitoring::get_large_payout_threshold_bps(&env)
+    }
+
+    /// Update the large-payout alert threshold (admin only).
+    /// `threshold_bps` is expressed in basis points (e.g. 1000 = 10%, 2500 = 25%).
+    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        monitoring::set_large_payout_threshold_bps(&env, threshold_bps);
     }
 }
 
@@ -3150,12 +3630,180 @@ mod integration_tests {
 
         client.update_rate_limit_config(&3600, &10, &30);
     }
+
+    // ========================================================================
+    // list_programs() 0-or-1 boundary
+    //
+    // `list_programs` collapses to a 0-or-1-element "list" today: it returns an
+    // empty Vec unless PROGRAM_DATA exists, in which case it returns a single
+    // entry built from `get_program_info`. Both sides of that boundary are
+    // pinned down here so a future refactor to multiple programs cannot silently
+    // start returning stale, duplicated, or missing entries.
+    // ========================================================================
+
+    /// Before any program is initialized, `list_programs` must return an empty
+    /// Vec (the zero side of the boundary), not a defaulted/placeholder entry.
+    #[test]
+    fn test_list_programs_empty_before_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let programs = client.list_programs();
+        assert_eq!(programs.len(), 0);
+        assert!(programs.is_empty());
+
+        // Cross-check the sibling counter agrees on the empty boundary.
+        assert_eq!(client.get_program_count(), 0);
+    }
+
+    /// After initialization, `list_programs` must return exactly one entry, and
+    /// that entry must match `get_program_info` field for field (the one side of
+    /// the boundary).
+    #[test]
+    fn test_list_programs_single_after_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let token = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+
+        env.mock_all_auths();
+        client.initialize_program(&program_id, &authorized_key, &token);
+
+        let programs = client.list_programs();
+        assert_eq!(programs.len(), 1);
+
+        // The single listed entry must be identical to what get_program_info
+        // reports directly — no drift, duplication, or field mismatch.
+        let listed = programs.get(0).unwrap();
+        let info = client.get_program_info();
+        assert_eq!(listed, info);
+        assert_eq!(listed.program_id, program_id);
+        assert_eq!(listed.authorized_payout_key, authorized_key);
+        assert_eq!(listed.token_address, token);
+        assert_eq!(listed.total_funds, 0);
+        assert_eq!(listed.remaining_balance, 0);
+        assert_eq!(listed.payout_history.len(), 0);
+
+        // The counter must agree that exactly one program now exists.
+        assert_eq!(client.get_program_count(), 1);
+    }
+
+    // ========================================================================
+    // get_program_release_schedule() not-found panic
+    //
+    // `get_program_release_schedule` linearly scans the schedule list and either
+    // returns the matching entry or `panic!("Schedule not found")`. Every other
+    // call site passes an id known to exist, so the panic branch was never
+    // exercised. These tests lock in the fail-closed behavior and the exact
+    // panic wording: if the scan were ever refactored (e.g. to an indexed
+    // lookup) and started returning a defaulted/zeroed schedule on a miss,
+    // callers could silently act on bogus schedule data instead of failing.
+    // ========================================================================
+
+    /// Requesting a `schedule_id` that does not exist on a program that *does*
+    /// have schedules must panic with exactly "Schedule not found".
+    #[test]
+    #[should_panic(expected = "Schedule not found")]
+    fn test_get_program_release_schedule_nonexistent_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let winner = Address::generate(&env);
+        let token = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+        let amount = 1000_0000000;
+
+        env.mock_all_auths();
+
+        // One schedule (id 1) exists; ask for a wholly unrelated id.
+        setup_program_with_schedule(
+            &env,
+            &client,
+            &contract_id,
+            &authorized_key,
+            &token,
+            &program_id,
+            amount,
+            &winner,
+            1000,
+        );
+
+        client.get_program_release_schedule(&999);
+    }
+
+    /// A program with zero configured schedules must panic on any lookup rather
+    /// than returning a default/empty struct.
+    #[test]
+    #[should_panic(expected = "Schedule not found")]
+    fn test_get_program_release_schedule_zero_schedules_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let token = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+
+        env.mock_all_auths();
+
+        // Initialize a program but never create any release schedule.
+        client.initialize_program(&program_id, &authorized_key, &token);
+        assert_eq!(client.get_program_release_schedules().len(), 0);
+
+        client.get_program_release_schedule(&1);
+    }
+
+    /// A `schedule_id` exactly one past the highest configured id must be
+    /// treated as not-found, not accidentally matched to the last entry.
+    #[test]
+    #[should_panic(expected = "Schedule not found")]
+    fn test_get_program_release_schedule_one_past_highest_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let winner1 = Address::generate(&env);
+        let winner2 = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+        let amount1 = 600_0000000;
+        let amount2 = 400_0000000;
+        let total_amount = amount1 + amount2;
+
+        env.mock_all_auths();
+
+        let token_client = create_token_contract(&env, &authorized_key);
+        client.initialize_program(&program_id, &authorized_key, &token_client.address);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
+
+        // Highest configured id is 2 after creating two schedules.
+        client.create_program_release_schedule(&amount1, &1000, &winner1);
+        client.create_program_release_schedule(&amount2, &2000, &winner2);
+
+        // Sanity: the highest configured id resolves before we probe past it.
+        assert_eq!(client.get_program_release_schedule(&2).schedule_id, 2);
+
+        // One past the highest must not be treated as a valid match.
+        client.get_program_release_schedule(&3);
+    }
 }
 #[cfg(test)]
 mod rbac_tests;
+#[cfg(test)]
 mod test;
 #[cfg(test)]
 mod test_circuit_breaker_integration;
 
 #[cfg(test)]
 mod test_balance_invariant;
+
+#[cfg(test)]
+mod test_whitelist;

@@ -6,6 +6,7 @@
 // - Initial state validation
 // - Failure threshold behavior
 // - State transitions (Closed -> Open -> HalfOpen -> Closed)
+// - Manual-only reset behavior (no auto-reset cooldown)
 // - Admin controls
 // - Circuit breaker integration with escrow operations
 // - Error logging
@@ -254,6 +255,87 @@ fn test_reset_from_half_open_to_closed() {
         reset_circuit_breaker(&env, &admin);
         assert_eq!(get_state(&env), CircuitState::Closed);
         assert_eq!(get_failure_count(&env), 0);
+    });
+}
+
+#[test]
+fn test_open_circuit_does_not_auto_reset_after_elapsed_time() {
+    let (env, _admin, contract_id) = setup_with_admin(1);
+    let opened_at = 2_000u64;
+
+    env.ledger().set_timestamp(opened_at);
+    simulate_failures(&env, &contract_id, 1);
+
+    env.as_contract(&contract_id, || {
+        let status = get_status(&env);
+        assert_eq!(status.state, CircuitState::Open);
+        assert_eq!(status.opened_at, opened_at);
+        assert_eq!(check_and_allow(&env), Err(ERR_CIRCUIT_OPEN));
+    });
+
+    env.ledger().set_timestamp(opened_at + 1);
+    env.as_contract(&contract_id, || {
+        let status = get_status(&env);
+        assert_eq!(
+            status.state,
+            CircuitState::Open,
+            "Circuit breaker has no before-cooldown auto reset path"
+        );
+        assert_eq!(status.opened_at, opened_at);
+        assert_eq!(check_and_allow(&env), Err(ERR_CIRCUIT_OPEN));
+    });
+
+    env.ledger().set_timestamp(opened_at + 86_400);
+    env.as_contract(&contract_id, || {
+        let status = get_status(&env);
+        assert_eq!(
+            status.state,
+            CircuitState::Open,
+            "Circuit breaker remains open after elapsed time until admin reset"
+        );
+        assert_eq!(status.opened_at, opened_at);
+        assert_eq!(check_and_allow(&env), Err(ERR_CIRCUIT_OPEN));
+    });
+}
+
+#[test]
+fn test_repeated_trip_while_open_refreshes_failure_window() {
+    let (env, _admin, contract_id) = setup_with_admin(1);
+    let first_trip_at = 2_000u64;
+    let second_trip_at = 2_030u64;
+
+    env.ledger().set_timestamp(first_trip_at);
+    simulate_failures(&env, &contract_id, 1);
+
+    env.as_contract(&contract_id, || {
+        let status = get_status(&env);
+        assert_eq!(status.state, CircuitState::Open);
+        assert_eq!(status.failure_count, 1);
+        assert_eq!(status.last_failure_timestamp, first_trip_at);
+        assert_eq!(status.opened_at, first_trip_at);
+    });
+
+    env.ledger().set_timestamp(second_trip_at);
+    env.as_contract(&contract_id, || {
+        record_failure(&env, 99, symbol_short!("retry"), ERR_TRANSFER_FAILED);
+
+        let status = get_status(&env);
+        assert_eq!(status.state, CircuitState::Open);
+        assert_eq!(
+            status.failure_count, 2,
+            "A new recorded trip while open must not be ignored"
+        );
+        assert_eq!(status.last_failure_timestamp, second_trip_at);
+        assert_eq!(
+            status.opened_at, second_trip_at,
+            "The open timestamp refreshes on a new trip while already open"
+        );
+
+        let log = get_error_log(&env);
+        assert_eq!(log.len(), 2);
+        let latest = log.get(1).unwrap();
+        assert_eq!(latest.bounty_id, 99);
+        assert_eq!(latest.timestamp, second_trip_at);
     });
 }
 

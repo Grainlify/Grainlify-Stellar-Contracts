@@ -303,6 +303,7 @@ describe('Cross-layer consistency', () => {
       [21, 'CircuitBreakerOpen'],
       [22, 'ClaimExpired'],
       [23, 'Bounty GovernanceVersionTooLow'],
+      [25, 'Bounty GovernanceProposalNotExecutable'],
     ];
 
     for (const [code, message] of numericToString) {
@@ -334,20 +335,20 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 11 program-escrow + 22 bounty-escrow + 14 governance + 3 circuit-breaker = 50
-    expect(count).toBe(50);
+    // 11 program-escrow + 23 bounty-escrow + 15 governance + 3 circuit-breaker = 52
+    expect(count).toBe(52);
   });
 
   it('PROGRAM_ESCROW_ERROR_MAP has 1 entry', () => {
     expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(1);
   });
 
-  it('BOUNTY_ESCROW_ERROR_MAP has 22 entries', () => {
-    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(22);
+  it('BOUNTY_ESCROW_ERROR_MAP has 23 entries', () => {
+    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(23);
   });
 
-  it('GOVERNANCE_ERROR_MAP has 14 entries', () => {
-    expect(Object.keys(GOVERNANCE_ERROR_MAP).length).toBe(14);
+  it('GOVERNANCE_ERROR_MAP has 15 entries', () => {
+    expect(Object.keys(GOVERNANCE_ERROR_MAP).length).toBe(15);
   });
 
   it('CIRCUIT_BREAKER_ERROR_MAP has 3 entries', () => {

@@ -6,7 +6,7 @@
 
 # Class: NetworkError
 
-Defined in: [src/errors.ts:26](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L26)
+Defined in: [src/errors.ts:26](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L26)
 
 Network and transport-related errors
 
@@ -20,7 +20,7 @@ Network and transport-related errors
 
 > **new NetworkError**(`message`, `statusCode?`, `cause?`): `NetworkError`
 
-Defined in: [src/errors.ts:27](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L27)
+Defined in: [src/errors.ts:27](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L27)
 
 #### Parameters
 
@@ -50,7 +50,7 @@ Defined in: [src/errors.ts:27](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > `readonly` `optional` **cause?**: `Error`
 
-Defined in: [src/errors.ts:27](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L27)
+Defined in: [src/errors.ts:27](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L27)
 
 ***
 
@@ -58,7 +58,7 @@ Defined in: [src/errors.ts:27](https://github.com/Grainlify/Grainlify-Stellar-Co
 
 > `readonly` **code**: `string`
 
-Defined in: [src/errors.ts:5](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L5)
+Defined in: [src/errors.ts:5](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L5)
 
 #### Inherited from
 
@@ -106,7 +106,7 @@ Defined in: node\_modules/typescript/lib/lib.es5.d.ts:1078
 
 > `readonly` `optional` **statusCode?**: `number`
 
-Defined in: [src/errors.ts:27](https://github.com/Grainlify/Grainlify-Stellar-Contracts/blob/6f3c3b734f3968e8d999ddcb9f7b52e0fd13ce9f/sdk/src/errors.ts#L27)
+Defined in: [src/errors.ts:27](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L27)
 
 ***
 

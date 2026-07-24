@@ -9,11 +9,13 @@ This document outlines the security measures implemented in the Bounty Escrow co
 - **Mechanism**: A boolean flag `ReentrancyGuard` is stored in the contract instance storage.
 - **Acquisition Timing**: To prevent the contract from being bricked, the guard is acquired *after* non-mutating validation checks (e.g., existence and status checks). This ensures that early `Err` returns (which commit state in Soroban) do not leak the guard into storage.
 - **Coverage (Bounty Escrow)**: All mutating entry points are protected, including `release_funds`, `partial_release`, `claim`, and `batch_release_funds`.
+- **Claim/partial-release transfer mitigation**: `claim` and `partial_release` acquire the same guard immediately before the external token transfer and clear it after the state/event updates complete. This blocks nested claim or release attempts during a hostile token callback.
+- **Hostile-token coverage**: `bounty_escrow/contracts/escrow/src/test_reentrancy.rs` includes a test-only SEP-41-compatible hostile token that attempts to re-enter both `claim()` and `partial_release()` from inside `transfer`. The tests assert that the attack is attempted, the nested call is blocked, and only one escrow-to-recipient transfer is executed.
 - **Coverage (Program Escrow)**: Core state-modifying functions (`lock_program_funds`, `batch_payout`, `single_payout`) are reviewed for reentrancy risks and follow checks-effects-interactions with no internal callbacks.
 - **Behavior**: If reentrancy is detected, the contract panics, reverting the transaction.
 
 ### 2. Checks-Effects-Interactions Pattern
-- **Bounty Escrow**: State updates (e.g., setting status to `Released`, `Refunded`, or `PartiallyRefunded`) are performed *before* any external token transfers in both single and batch flows.
+- **Bounty Escrow**: Value-moving paths are reviewed for external token calls. Where a path performs an external token transfer before final state/event persistence, it holds `ReentrancyGuard` across the transfer so a callback cannot consume the same escrow or claim twice. Paths that can update state before transfer should continue to prefer checks-effects-interactions when it does not break existing transaction semantics.
 - **Program Escrow**: State updates to `ProgramData` (balances and payout history) are performed before token transfers; batch flows are atomic within a single transaction.
 - **Goal**: Prevent reentrancy attacks where an external call calls back into the contract before the state is updated.
 
@@ -32,6 +34,14 @@ This document outlines the security measures implemented in the Bounty Escrow co
 - **Bounty Escrow**:
   - Admin-only release and approval flows, depositor-guarded locking, and permissionless-but-safe refunds.
 
+### 5. Emergency Global Pause
+- **Mechanism**: `PauseFlags.global_paused` is an admin-gated kill switch controlled by `set_emergency_pause(bool)`.
+- **Authorization**: Only the current bounty escrow admin can set or clear the switch, and the call follows the same governance-version checks as granular pause updates.
+- **Coverage**: When enabled, the contract returns `Error::FundsPaused` before value-moving escrow operations proceed, including `lock_funds`, `release_funds`, `authorize_claim`, `claim`, `partial_release`, `refund`, `sweep_expired_refunds`, `batch_lock_funds`, and `batch_release_funds`.
+- **Granular pause interaction**: `global_paused` takes precedence over the existing `lock_paused`, `release_paused`, and `refund_paused` flags. Clearing the global switch does not clear granular flags; admins must explicitly clear any operation-specific pause that should be resumed.
+- **Read availability**: Query functions such as `get_pause_flags`, `get_escrow_info`, and `get_balance` remain callable during emergency pause so operators and dashboards can inspect incident state.
+- **Eventing**: Each emergency set/clear publishes the existing pause-state event with operation `global`, the new pause value, and the authenticated admin.
+
 ## Known Risks and Limitations
 
 ### Permissionless Refund (Bounty Escrow)
@@ -47,10 +57,42 @@ This document outlines the security measures implemented in the Bounty Escrow co
 - **Risk**: If a privileged key is compromised, funds can be misdirected or upgrades abused.
 - **Mitigation**: All privileged keys should be backed by multi-sig or secure backend services, and upgrade hashes should be audited before use.
 
+### Two-Step Admin Handover (Bounty Escrow)
+- **Description**: The bounty escrow contract implements a secure two-step admin handover mechanism to prevent accidental admin transfer to incorrect addresses.
+- **Implementation**:
+  1. **propose_new_admin(new_admin)** - Current admin only
+     - Stores the proposed admin in `DataKey::PendingAdmin`
+     - Emits `AdminProposed` event with version, current_admin, proposed_admin, timestamp
+     - Requires current admin authentication
+     - Checks governance version requirements
+  2. **accept_admin()** - Pending admin only
+     - Replaces the current admin with the pending admin
+     - Clears the `DataKey::PendingAdmin` storage
+     - Emits `AdminAccepted` event with version, new_admin, previous_admin, timestamp
+     - Requires pending admin authentication
+     - Returns error if no pending admin exists
+  3. **cancel_admin_transfer()** - Current admin only
+     - Clears the `DataKey::PendingAdmin` storage
+     - Emits `AdminCancelled` event with version, current_admin, cancelled_proposed_admin, timestamp
+     - Requires current admin authentication
+     - Returns error if no pending admin exists
+- **Security Benefits**:
+  - **Prevents accidental transfer**: A one-step transfer to a wrong address would permanently brick admin operations
+  - **Confirmation handshake**: The pending admin must explicitly accept, confirming they control the address
+  - **Cancellable**: Current admin can cancel if they made a mistake or change their mind
+  - **Audit trail**: All steps emit events for complete transparency
+- **Test Coverage**: Comprehensive tests in `bounty_escrow/contracts/escrow/src/test_rbac.rs` covering all authorization checks and edge cases
+- **Storage Keys**:
+  - `DataKey::Admin` - Current admin address
+  - `DataKey::PendingAdmin` - Proposed admin address (None if no pending transfer)
+
 ## Audit Checklist (Bounty Escrow)
 
-- [ ] Verify Reentrancy Guards on all state-modifying paths (`lock_funds`, `release_funds`, `refund`, `batch_lock_funds`, `batch_release_funds`).
-- [ ] Confirm Checks-Effects-Interactions pattern is strictly followed (state update before token transfers).
+- [ ] Verify Reentrancy Guards on all value-moving external-transfer paths (`release_funds`, `claim`, `partial_release`, `refund`, `batch_release_funds`).
+- [ ] Verify `set_emergency_pause` is admin-gated, emits a pause event, and can both enable and clear the global pause.
+- [ ] Confirm `global_paused` blocks every value-moving path while query functions remain callable.
+- [ ] Confirm `partial_release`, claim flows, and batch variants honor the relevant granular pause flag in addition to the global pause.
+- [ ] Confirm each external token-transfer path either follows checks-effects-interactions or holds `ReentrancyGuard` across the transfer.
 - [ ] Review Access Control logic for `release_funds` and `approve_refund` (admin only).
 - [ ] Review Access Control logic for `lock_funds` and batch locking (depositor signatures and auth aggregation).
 - [ ] Verify Arithmetic safety (overflow/underflow protection via Rust/Soroban defaults and bounds checks on remaining amounts).
@@ -59,7 +101,7 @@ This document outlines the security measures implemented in the Bounty Escrow co
    - Past deadline
    - Double release
    - Double/over-refund
-   - Reentrancy attempts across single and batch flows
+   - Reentrancy attempts across single, claim, partial release, and batch flows
 
 ## Audit Checklist (Program Escrow)
 

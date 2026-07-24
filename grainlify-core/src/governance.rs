@@ -3,12 +3,13 @@ use soroban_sdk::{contracttype, symbol_short, token, Address, BytesN, Env, Map, 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum ProposalStatus {
-    Pending,
+    Pending, 
     Active,
     Approved,
     Rejected,
     Executed,
     Expired,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +102,8 @@ pub enum Error {
     ProposalExpired = 14,
     ZeroVotingPower = 15,
     InvalidTotalVotingPower = 16,
+    Unauthorized = 17,
+    VoteWeightOverflow = 18,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), soroban_sdk::contract)]
@@ -179,6 +182,13 @@ impl GovernanceContract {
         Ok(proposal_id)
     }
 
+    /// Casts a vote on an active proposal.
+    ///
+    /// # Tallying & Bounds
+    /// Vote weights (derived from token balance or 1 for OnePersonOneVote) are accumulated
+    /// in `i128`. Summing vote weights across all voters must not exceed `i128::MAX`. If a
+    /// single vote pushes any of the tallies (for, against, abstain) beyond `i128::MAX`,
+    /// the transaction will safely fail with `VoteWeightOverflow`.
     pub fn cast_vote(
         env: Env,
         voter: Address,
@@ -222,9 +232,9 @@ impl GovernanceContract {
         }
 
         match vote_type {
-            VoteType::For => proposal.votes_for += voting_power,
-            VoteType::Against => proposal.votes_against += voting_power,
-            VoteType::Abstain => proposal.votes_abstain += voting_power,
+            VoteType::For => proposal.votes_for = proposal.votes_for.checked_add(voting_power).ok_or(Error::VoteWeightOverflow)?,
+            VoteType::Against => proposal.votes_against = proposal.votes_against.checked_add(voting_power).ok_or(Error::VoteWeightOverflow)?,
+            VoteType::Abstain => proposal.votes_abstain = proposal.votes_abstain.checked_add(voting_power).ok_or(Error::VoteWeightOverflow)?,
         }
         proposal.total_votes += 1;
 
@@ -262,7 +272,9 @@ impl GovernanceContract {
             return Err(Error::VotingStillActive);
         }
 
-        let total_cast = proposal.votes_for + proposal.votes_against + proposal.votes_abstain;
+        let total_cast = proposal.votes_for
+            .checked_add(proposal.votes_against).ok_or(Error::VoteWeightOverflow)?
+            .checked_add(proposal.votes_abstain).ok_or(Error::VoteWeightOverflow)?;
         let total_power = total_voting_power(&config);
         if total_power <= 0 {
             return Err(Error::InvalidTotalVotingPower);
@@ -276,7 +288,7 @@ impl GovernanceContract {
             return Ok(proposal.status);
         }
 
-        let approval_votes = proposal.votes_for + proposal.votes_against;
+        let approval_votes = proposal.votes_for.checked_add(proposal.votes_against).ok_or(Error::VoteWeightOverflow)?;
         if approval_votes == 0 {
             proposal.status = ProposalStatus::Rejected;
         } else {
@@ -342,6 +354,113 @@ impl GovernanceContract {
 
         false
     }
+
+    /// Get the status of a proposal by ID
+    pub fn get_proposal_status(env: Env, proposal_id: u32) -> Result<ProposalStatus, Error> {
+        let proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&PROPOSALS)
+            .ok_or(Error::ProposalsNotFound)?;
+        let proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+        Ok(proposal.status)
+    }
+
+    /// Cancel a proposal before it is finalized
+    pub fn cancel_proposal(env: Env, caller: Address, proposal_id: u32) -> Result<(), Error> {
+        caller.require_auth();
+
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&PROPOSALS)
+            .ok_or(Error::ProposalsNotFound)?;
+        let mut proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+
+        if proposal.status != ProposalStatus::Active {
+            return Err(Error::ProposalNotActive);
+        }
+
+        if caller != proposal.proposer {
+            return Err(Error::Unauthorized);
+        }
+
+        proposal.status = ProposalStatus::Cancelled;
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&PROPOSALS, &proposals);
+
+        env.events().publish(
+            (symbol_short!("PropCanc"), proposal_id),
+            caller,
+        );
+
+        Ok(())
+    }
+
+    /// Sweep expired proposals (those that never reached a final state)
+    ///
+    /// # Storage Strategy: Flag-Not-Delete
+    ///
+    /// This function uses a **flag-not-delete** approach for expired proposals.
+    /// 
+    /// ## Why flag instead of delete?
+    /// - **Auditability**: Preserves historical records for governance audits
+    /// - **Transparency**: Allows off-chain indexers to see all proposals ever created
+    /// - **Accountability**: Provides a complete on-chain record of governance activity
+    /// - **Simplicity**: No complex deletion logic or cascading cleanup needed
+    ///
+    /// ## Soroban Storage TTL Considerations
+    /// - Proposal data has a configurable TTL that can be extended via Soroban's
+    ///   storage rent mechanism
+    /// - The `Expired` flag allows off-chain consumers to filter without recomputing
+    ///   expiry logic
+    /// - If storage costs become prohibitive in the future, a batch deletion function
+    ///   could be added
+    ///
+    /// ## Permissionless Access
+    /// This function is permissionless because it only marks known-expired state
+    /// and doesn't affect any active governance processes.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `proposal_id` - ID of the proposal to sweep
+    /// * `current_time` - Current ledger timestamp (passed in for testability)
+    ///
+    /// # Errors
+    /// * `ProposalsNotFound` - No proposals exist in storage
+    /// * `ProposalNotFound` - The specified proposal ID doesn't exist
+    /// * `ProposalNotActive` - The proposal is not in Active status
+    /// * `VotingStillActive` - The voting period hasn't ended yet
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Sweep an expired proposal after voting ended
+    /// let current_time = env.ledger().timestamp();
+    /// client.sweep_expired_proposal(&proposal_id, &current_time);
+    /// ```
+    pub fn sweep_expired_proposal(env: Env, proposal_id: u32, current_time: u64) -> Result<(), Error> {
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&PROPOSALS)
+            .ok_or(Error::ProposalsNotFound)?;
+        let mut proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+
+        // Only sweep proposals that are still active and past their voting end
+        if proposal.status != ProposalStatus::Active {
+            return Err(Error::ProposalNotActive);
+        }
+
+        if current_time <= proposal.voting_end {
+            return Err(Error::VotingStillActive);
+        }
+
+        // Mark as expired
+        proposal.status = ProposalStatus::Expired;
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&PROPOSALS, &proposals);
+        Ok(())
+    }
 }
 
 /// Derives voting power for the configured scheme.
@@ -354,6 +473,10 @@ fn derive_voting_power(env: &Env, config: &GovernanceConfig, voter: &Address) ->
     match config.voting_scheme {
         VotingScheme::OnePersonOneVote => 1,
         VotingScheme::TokenWeighted => {
+            // SECURITY NOTE: Cross-contract call to the governance token.
+            // This is a read-only `balance` query and inherently requires no authorization.
+            // The caller's intent is already secured by `voter.require_auth()` in `cast_vote`.
+            // There is no over-broad use of `authorize_as_current_contract`.
             token::Client::new(env, &config.governance_token).balance(voter)
         }
     }
@@ -375,6 +498,10 @@ fn enforce_min_proposal_stake(
         return Ok(());
     }
 
+    // SECURITY NOTE: Cross-contract call to the governance token.
+    // This is a read-only `balance` query and inherently requires no authorization.
+    // The proposer's intent is already secured by `proposer.require_auth()` in `create_proposal`.
+    // There is no over-broad use of `authorize_as_current_contract`.
     let balance = token::Client::new(env, &config.governance_token).balance(proposer);
     if balance < config.min_proposal_stake {
         return Err(Error::InsufficientStake);
@@ -385,7 +512,8 @@ fn enforce_min_proposal_stake(
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
+    use soroban_sdk::TryFromVal;
 
     fn setup_test(
         env: &Env,
@@ -396,6 +524,7 @@ mod test {
     ) -> (
         GovernanceContractClient<'_>,
         Option<token::StellarAssetClient<'_>>,
+        Address,
         Address,
     ) {
         let contract_id = env.register_contract(None, GovernanceContract);
@@ -431,7 +560,7 @@ mod test {
 
         env.mock_all_auths();
         client.init_governance(&admin, &config);
-        (client, token_admin_client, user)
+        (client, token_admin_client, user, contract_id)
     }
 
     fn create_test_proposal(
@@ -449,7 +578,8 @@ mod test {
     #[test]
     fn test_edge_case_double_voting() {
         let env = Env::default();
-        let (client, _, user) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, user, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &user);
 
         client.cast_vote(&user, &prop_id, &VoteType::For);
@@ -461,7 +591,8 @@ mod test {
     #[test]
     fn test_edge_case_voting_after_expiration() {
         let env = Env::default();
-        let (client, _, user) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, user, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &user);
 
         env.ledger().with_mut(|li| li.timestamp = 200);
@@ -473,7 +604,8 @@ mod test {
     #[test]
     fn test_edge_case_exact_threshold() {
         let env = Env::default();
-        let (client, _, user1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
+        let (client, _, user1, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
         let user2 = Address::generate(&env);
         let prop_id = create_test_proposal(&env, &client, &user1);
 
@@ -489,7 +621,8 @@ mod test {
     #[test]
     fn test_edge_case_below_threshold() {
         let env = Env::default();
-        let (client, _, user1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
+        let (client, _, user1, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
         let user2 = Address::generate(&env);
         let user3 = Address::generate(&env);
         let prop_id = create_test_proposal(&env, &client, &user1);
@@ -507,7 +640,7 @@ mod test {
     #[test]
     fn test_token_weighted_derives_power_from_balance() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let voter_for = Address::generate(&env);
@@ -527,21 +660,63 @@ mod test {
     }
 
     #[test]
-    fn test_token_weighted_rejects_zero_balance_voter() {
+    fn test_token_weighted_zero_balance_voter_rejected_and_state_not_mutated() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
-        let zero_balance_voter = Address::generate(&env);
+        let (client, _, proposer, contract_id) =
+            setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
+        let voter = Address::generate(&env);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
-        let result = client.try_cast_vote(&zero_balance_voter, &prop_id, &VoteType::For);
-
+        let result = client.try_cast_vote(&voter, &prop_id, &VoteType::For);
         assert_eq!(result, Err(Ok(Error::ZeroVotingPower)));
+
+        env.as_contract(&contract_id, || {
+            let votes: Map<(u32, Address), Vote> = env
+                .storage()
+                .instance()
+                .get(&VOTES)
+                .unwrap_or(Map::new(&env));
+            assert!(!votes.contains_key((prop_id, voter)));
+
+            let proposals: Map<u32, Proposal> = env.storage().instance().get(&PROPOSALS).unwrap();
+            let proposal = proposals.get(prop_id).unwrap();
+            assert_eq!(proposal.total_votes, 0);
+            assert_eq!(proposal.votes_for, 0);
+        });
+    }
+
+    #[test]
+    fn test_token_weighted_voter_with_balance_records_correct_power() {
+        let env = Env::default();
+        let (client, token_admin_client, proposer, contract_id) =
+            setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
+        let token_admin_client = token_admin_client.unwrap();
+        let voter = Address::generate(&env);
+        let balance: i128 = 75;
+
+        token_admin_client.mint(&voter, &balance);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        client.cast_vote(&voter, &prop_id, &VoteType::For);
+
+        env.as_contract(&contract_id, || {
+            let votes: Map<(u32, Address), Vote> = env.storage().instance().get(&VOTES).unwrap();
+            let vote = votes.get((prop_id, voter.clone())).unwrap();
+            assert_eq!(vote.voting_power, balance);
+            assert_eq!(vote.vote_type, VoteType::For);
+            assert_eq!(vote.voter, voter);
+
+            let proposals: Map<u32, Proposal> = env.storage().instance().get(&PROPOSALS).unwrap();
+            let proposal = proposals.get(prop_id).unwrap();
+            assert_eq!(proposal.total_votes, 1);
+            assert_eq!(proposal.votes_for, balance);
+        });
     }
 
     #[test]
     fn test_token_weighted_quorum_just_met() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let voter = Address::generate(&env);
@@ -560,7 +735,7 @@ mod test {
     #[test]
     fn test_token_weighted_quorum_just_missed_rejects() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let voter = Address::generate(&env);
@@ -581,7 +756,7 @@ mod test {
     #[test]
     fn test_one_person_and_token_weighted_can_diverge() {
         let env = Env::default();
-        let (one_person_client, _, one_person_proposer) =
+        let (one_person_client, _, one_person_proposer, _) =
             setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
         let heavy_against = Address::generate(&env);
 
@@ -596,7 +771,7 @@ mod test {
         );
 
         let env = Env::default();
-        let (token_client, token_admin_client, token_proposer) =
+        let (token_client, token_admin_client, token_proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let heavy_against = Address::generate(&env);
@@ -618,7 +793,7 @@ mod test {
     #[test]
     fn test_create_proposal_enforces_minimum_stake() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
         let token_admin_client = token_admin_client.unwrap();
 
@@ -676,8 +851,309 @@ mod test {
 
         env.ledger().with_mut(|li| li.timestamp = 150);
         client.execute_proposal(&proposal_id);
-
         assert!(client.is_upgrade_approved(&approved_hash));
         assert!(!client.is_upgrade_approved(&other_hash));
     }
+
+    #[test]
+    fn test_sweep_expired_proposal_strictly_before_voting_end_rejected() {
+        let env = Env::default();
+        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        // Proposal voting_end is created_at (0) + voting_period (100) = 100.
+        // Test current_time strictly before proposal.voting_end (99 < 100)
+        let current_time = 99;
+
+        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        assert_eq!(result, Err(Ok(Error::VotingStillActive)));
+
+        // Verify proposal status remains Active and unchanged after rejected sweep attempt
+        let status = client.get_proposal_status(&prop_id);
+        assert_eq!(status, ProposalStatus::Active);
+    }
+
+    #[test]
+    fn test_sweep_expired_proposal_exact_voting_end_boundary_rejected() {
+        let env = Env::default();
+        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        // Proposal voting_end is created_at (0) + voting_period (100) = 100.
+        // Test boundary case current_time == proposal.voting_end (100 == 100)
+        let current_time = 100;
+
+        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        assert_eq!(result, Err(Ok(Error::VotingStillActive)));
+
+        // Verify proposal status remains Active and unchanged after exact-at-end rejected sweep attempt
+        let status = client.get_proposal_status(&prop_id);
+        assert_eq!(status, ProposalStatus::Active);
+    }
+
+    #[test]
+    fn test_sweep_expired_proposal_one_second_past_voting_end_succeeds() {
+        let env = Env::default();
+        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        // Proposal voting_end is created_at (0) + voting_period (100) = 100.
+        // Test current_time == proposal.voting_end + 1 (101 > 100)
+        let current_time = 101;
+
+        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        assert!(result.is_ok());
+
+        // Verify proposal status is updated to Expired after successful sweep
+        let status = client.get_proposal_status(&prop_id);
+        assert_eq!(status, ProposalStatus::Expired);
+    }
+
+#[test]
+fn test_sweep_expired_proposal_nonexistent_fails() {
+    let env = Env::default();
+    let (client, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let non_existent_id = 999;
+
+    let result = client.try_sweep_expired_proposal(&non_existent_id, &150);
+    assert_eq!(result, Err(Ok(Error::ProposalsNotFound)));  // Changed from ProposalNotFound to ProposalsNotFound
+}
+
+#[test]
+fn test_sweep_expired_proposal_already_expired_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // First sweep after expiry
+    let current_time = 150;
+    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+    assert!(result.is_ok());
+
+    // Verify status is Expired - no unwrap needed
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Expired);
+
+    // Try to sweep again - should fail because proposal is no longer Active
+    let result2 = client.try_sweep_expired_proposal(&prop_id, &200);
+    assert_eq!(result2, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_sweep_expired_proposal_already_finalized_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Vote and finalize the proposal
+    let voter2 = Address::generate(&env);
+    client.cast_vote(&proposer, &prop_id, &VoteType::For);
+    client.cast_vote(&voter2, &prop_id, &VoteType::Against);
+
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Approved);
+
+    // Try to sweep - should fail because proposal is not Active
+    let result = client.try_sweep_expired_proposal(&prop_id, &200);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_success() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert!(result.is_ok());
+
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Cancelled);
+
+    let contract_id = client.address.clone();
+    let events = env.events().all();
+    let mut found_prop_canc = false;
+    for event in events.iter() {
+        if event.0 == contract_id
+            && event.1.len() >= 2
+            && soroban_sdk::Symbol::try_from_val(&env, &event.1.get(0).unwrap())
+                == Ok(symbol_short!("PropCanc"))
+        {
+            let event_proposal_id: u32 =
+                soroban_sdk::TryFromVal::try_from_val(&env, &event.1.get(1).unwrap())
+                    .unwrap();
+            assert_eq!(event_proposal_id, prop_id);
+            found_prop_canc = true;
+        }
+    }
+    assert!(found_prop_canc, "PropCanc event should have been emitted");
+}
+
+#[test]
+fn test_cancel_proposal_unauthorized() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    let unauthorized = Address::generate(&env);
+
+    let events_before = env.events().all().len();
+    let result = client.try_cancel_proposal(&unauthorized, &prop_id);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Active);
+    assert_eq!(env.events().all().len(), events_before);
+}
+
+#[test]
+fn test_cancel_proposal_after_passing_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    client.cast_vote(&proposer, &prop_id, &VoteType::For);
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Approved);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_already_cancelled_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    client.cancel_proposal(&proposer, &prop_id);
+    
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_wrong_proposal_id_returns_unauthorized() {
+    let env = Env::default();
+    let (client, _, proposer1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let proposer2 = Address::generate(&env);
+    let _prop1 = create_test_proposal(&env, &client, &proposer1);
+    let prop2 = create_test_proposal(&env, &client, &proposer2);
+
+    let result = client.try_cancel_proposal(&proposer1, &prop2);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+
+    let status = client.get_proposal_status(&prop2);
+    assert_eq!(status, ProposalStatus::Active);
+}
+
+#[test]
+fn test_cancel_proposal_after_rejection_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    client.cast_vote(&proposer, &prop_id, &VoteType::Against);
+    client.cast_vote(&voter2, &prop_id, &VoteType::Against);
+    client.cast_vote(&voter3, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let status = client.finalize_proposal(&prop_id);
+    assert_eq!(status, ProposalStatus::Rejected);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cancel_proposal_after_sweep_expired_fails() {
+    let env = Env::default();
+    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    let current_time = 150;
+    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+    assert!(result.is_ok());
+
+    let status = client.get_proposal_status(&prop_id);
+    assert_eq!(status, ProposalStatus::Expired);
+
+    let result = client.try_cancel_proposal(&proposer, &prop_id);
+    assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
+}
+
+#[test]
+fn test_cross_contract_auth_scope_minimal() {
+    let env = Env::default();
+    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let token_admin_client = token_admin_client.unwrap();
+
+    token_admin_client.mint(&proposer, &50);
+
+    env.mock_all_auths();
+
+    // This will call `enforce_min_proposal_stake` which does a cross-contract call
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Verify that only the `proposer.require_auth()` was used
+    let auths = env.auths();
+
+    // We expect `proposer` to have authorized `create_proposal`.
+    // If the contract had broadly used `authorize_as_current_contract`, we would see
+    // an authorization from the contract itself for the token balance call.
+    let mut contract_authorized = false;
+    let contract_id = client.address.clone();
+    for (addr, _) in auths.iter() {
+        if addr == &contract_id {
+            contract_authorized = true;
+        }
+    }
+    assert!(!contract_authorized, "Contract should not broadly authorize cross-contract read calls");
+
+    // Now test cast_vote which calls `derive_voting_power` (also a cross-contract call)
+    env.mock_all_auths();
+    let voter = Address::generate(&env);
+    token_admin_client.mint(&voter, &100);
+    client.cast_vote(&voter, &prop_id, &VoteType::For);
+
+    let mut vote_contract_authorized = false;
+    for (addr, _) in env.auths().iter() {
+        if addr == &contract_id {
+            vote_contract_authorized = true;
+        }
+    }
+    assert!(!vote_contract_authorized, "Contract should not broadly authorize cross-contract read calls in cast_vote");
+}
+
+#[test]
+fn test_edge_case_vote_weight_overflow() {
+    let env = Env::default();
+    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let token_admin_client = token_admin_client.unwrap();
+
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+
+    // Give voter1 a balance near i128::MAX
+    token_admin_client.mint(&voter1, &(i128::MAX - 50));
+    // Give voter2 enough to overflow when added
+    token_admin_client.mint(&voter2, &100);
+    
+    // Give proposer enough stake to create a proposal
+    token_admin_client.mint(&proposer, &10);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Voter1 casts a For vote, successfully tallying i128::MAX - 50
+    let res1 = client.try_cast_vote(&voter1, &prop_id, &VoteType::For);
+    assert!(res1.is_ok());
+
+    // Voter2 casts a For vote, which would push the total to i128::MAX + 50
+    // This must trigger the typed overflow error, not a panic
+    let res2 = client.try_cast_vote(&voter2, &prop_id, &VoteType::For);
+    assert_eq!(res2, Err(Ok(Error::VoteWeightOverflow)));
+}
 }

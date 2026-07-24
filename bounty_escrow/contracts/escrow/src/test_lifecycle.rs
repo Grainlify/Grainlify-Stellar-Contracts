@@ -260,3 +260,280 @@ fn test_refund_after_deadline_no_approval_needed() {
     assert_eq!(info.status, EscrowStatus::Refunded);
     assert_eq!(token_client.balance(&depositor), 1000);
 }
+
+#[test]
+fn test_lifecycle_dispute_resolution_missing_signer_rejected() {
+    let env = Env::default();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    // 1. Init contract
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "init",
+            args: (&admin, &token_client.address).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    escrow_client.init(&admin, &token_client.address);
+
+    // 2. Mint tokens to depositor
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &token_client.address,
+            fn_name: "mint",
+            args: (depositor.clone(), 10000i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    token_admin.mint(&depositor, &10000);
+
+    // 3. Lock funds for a bounty
+    let bounty_id = 301u64;
+    let amount = 5000i128;
+    let deadline = env.ledger().timestamp() + 86400;
+
+    env.mock_auths(&[MockAuth {
+        address: &depositor,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "lock_funds",
+            args: (depositor.clone(), bounty_id, amount, deadline).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &token_client.address,
+                fn_name: "transfer",
+                args: (
+                    depositor.clone(),
+                    escrow_client.address.clone(),
+                    amount,
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    escrow_client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    // 4. Attempt dispute resolution call (authorize_claim) with ONLY depositor's signature
+    // (the required admin/arbiter signature is absent from the mock auth list)
+    env.mock_auths(&[MockAuth {
+        address: &depositor,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "authorize_claim",
+            args: (bounty_id, contributor.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = escrow_client.try_authorize_claim(&bounty_id, &contributor);
+    assert!(
+        res.is_err(),
+        "Dispute resolution call missing required admin auth must be rejected"
+    );
+
+    // Verify escrow status remains Locked and funds remain untouched
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::Locked);
+    assert_eq!(escrow_client.get_balance(), amount);
+}
+
+#[test]
+fn test_lifecycle_dispute_resolution_wrong_address_signer_rejected() {
+    let env = Env::default();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let wrong_address = Address::generate(&env);
+
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    // 1. Init contract
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "init",
+            args: (&admin, &token_client.address).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    escrow_client.init(&admin, &token_client.address);
+
+    // 2. Mint tokens to depositor
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &token_client.address,
+            fn_name: "mint",
+            args: (depositor.clone(), 10000i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    token_admin.mint(&depositor, &10000);
+
+    // 3. Lock funds
+    let bounty_id = 302u64;
+    let amount = 5000i128;
+    let deadline = env.ledger().timestamp() + 86400;
+
+    env.mock_auths(&[MockAuth {
+        address: &depositor,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "lock_funds",
+            args: (depositor.clone(), bounty_id, amount, deadline).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &token_client.address,
+                fn_name: "transfer",
+                args: (
+                    depositor.clone(),
+                    escrow_client.address.clone(),
+                    amount,
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    escrow_client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    // 4. Attempt dispute resolution call with auth signature for the wrong address
+    env.mock_auths(&[MockAuth {
+        address: &wrong_address,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "authorize_claim",
+            args: (bounty_id, contributor.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = escrow_client.try_authorize_claim(&bounty_id, &contributor);
+    assert!(
+        res.is_err(),
+        "Dispute resolution call signed by wrong address must be rejected"
+    );
+
+    // Confirm state remains unchanged
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::Locked);
+    assert_eq!(escrow_client.get_balance(), amount);
+}
+
+#[test]
+fn test_lifecycle_dispute_resolution_positive_control_full_auth() {
+    let env = Env::default();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    let claim_window = 3600u64;
+
+    // 1. Init contract
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "init",
+            args: (&admin, &token_client.address).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    escrow_client.init(&admin, &token_client.address);
+
+    // 2. Set claim window
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "set_claim_window",
+            args: (claim_window,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    escrow_client.set_claim_window(&claim_window);
+
+    // 3. Mint tokens to depositor
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &token_client.address,
+            fn_name: "mint",
+            args: (depositor.clone(), 10000i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    token_admin.mint(&depositor, &10000);
+
+    // 4. Lock funds
+    let bounty_id = 303u64;
+    let amount = 5000i128;
+    let deadline = env.ledger().timestamp() + 86400;
+
+    env.mock_auths(&[MockAuth {
+        address: &depositor,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "lock_funds",
+            args: (depositor.clone(), bounty_id, amount, deadline).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &token_client.address,
+                fn_name: "transfer",
+                args: (
+                    depositor.clone(),
+                    escrow_client.address.clone(),
+                    amount,
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    escrow_client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    // 5. Positive control: Dispute resolution with correct admin auth succeeds
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "authorize_claim",
+            args: (bounty_id, contributor.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    escrow_client.authorize_claim(&bounty_id, &contributor);
+
+    // 6. Beneficiary claims with correct contributor auth
+    env.mock_auths(&[MockAuth {
+        address: &contributor,
+        invoke: &MockAuthInvoke {
+            contract: &escrow_client.address,
+            fn_name: "claim",
+            args: (bounty_id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    escrow_client.claim(&bounty_id);
+
+    // Verify successful resolution and fund release
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::Released);
+    assert_eq!(token_client.balance(&contributor), amount);
+    assert_eq!(escrow_client.get_balance(), 0);
+}
+

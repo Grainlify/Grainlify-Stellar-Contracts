@@ -22,7 +22,10 @@ where
 fn test_guard_initially_not_set() {
     let env = Env::default();
     let contract_id = env.register_contract(None, crate::ProgramEscrowContract);
-    assert!(!env.as_contract(&contract_id, || is_entered(&env)), "Guard should not be set initially");
+    assert!(
+        !env.as_contract(&contract_id, || is_entered(&env)),
+        "Guard should not be set initially"
+    );
 }
 
 #[test]

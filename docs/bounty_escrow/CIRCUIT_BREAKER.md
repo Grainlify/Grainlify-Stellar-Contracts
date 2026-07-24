@@ -95,6 +95,18 @@ Transitions:
 - `Open` -> `HalfOpen` (first reset)
 - `HalfOpen` -> `Closed` (second reset or sufficient successes)
 
+### Auto-Reset and Cooldown Behavior
+
+The Bounty Escrow circuit breaker is manual-reset-only. It does not define a
+cooldown duration and does not automatically transition out of `Open` based on
+elapsed ledger time. The `opened_at` and `last_failure_timestamp` values are
+diagnostic status fields; protected operations remain rejected while the circuit
+is `Open` until the registered circuit breaker admin calls `reset_circuit`.
+
+If another failure is recorded while the circuit is already `Open`, the trip is
+not silently ignored: the failure count and last failure timestamp are updated,
+and the open timestamp is refreshed to the latest trip time.
+
 ## Default Configuration
 
 ```rust
@@ -118,13 +130,16 @@ The circuit breaker maintains an error log with:
 2. **State Transitions**: Circuit can only be reset by the registered admin.
 3. **Automatic Opening**: Circuit opens automatically when failure threshold is reached.
 4. **Manual Reset**: Circuit requires manual admin intervention to transition from Open.
+5. **No Time-Based Auto Reset**: Elapsed ledger time alone cannot reopen fund-moving operations after a trip.
 
 ## Testing
 
-The circuit breaker includes 33 comprehensive tests covering:
+The circuit breaker includes 35 comprehensive tests covering:
 - Initial state validation
 - Failure threshold behavior
 - State transitions (Closed -> Open -> HalfOpen -> Closed)
+- Manual-only reset behavior and lack of auto-reset cooldown
+- Repeated trip handling while already Open
 - Admin controls (set admin, update admin, unauthorized access)
 - Configuration management
 - Error logging
