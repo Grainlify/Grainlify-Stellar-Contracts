@@ -515,6 +515,7 @@ mod test {
         GovernanceContractClient<'_>,
         Option<token::StellarAssetClient<'_>>,
         Address,
+        Address,
     ) {
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(env, &contract_id);
@@ -549,7 +550,7 @@ mod test {
 
         env.mock_all_auths();
         client.init_governance(&admin, &config);
-        (client, token_admin_client, user)
+        (client, token_admin_client, user, contract_id)
     }
 
     fn create_test_proposal(
@@ -567,7 +568,8 @@ mod test {
     #[test]
     fn test_edge_case_double_voting() {
         let env = Env::default();
-        let (client, _, user) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, user, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &user);
 
         client.cast_vote(&user, &prop_id, &VoteType::For);
@@ -579,7 +581,8 @@ mod test {
     #[test]
     fn test_edge_case_voting_after_expiration() {
         let env = Env::default();
-        let (client, _, user) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, user, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &user);
 
         env.ledger().with_mut(|li| li.timestamp = 200);
@@ -591,7 +594,8 @@ mod test {
     #[test]
     fn test_edge_case_exact_threshold() {
         let env = Env::default();
-        let (client, _, user1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
+        let (client, _, user1, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
         let user2 = Address::generate(&env);
         let prop_id = create_test_proposal(&env, &client, &user1);
 
@@ -607,7 +611,8 @@ mod test {
     #[test]
     fn test_edge_case_below_threshold() {
         let env = Env::default();
-        let (client, _, user1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
+        let (client, _, user1, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
         let user2 = Address::generate(&env);
         let user3 = Address::generate(&env);
         let prop_id = create_test_proposal(&env, &client, &user1);
@@ -625,7 +630,7 @@ mod test {
     #[test]
     fn test_token_weighted_derives_power_from_balance() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let voter_for = Address::generate(&env);
@@ -645,21 +650,63 @@ mod test {
     }
 
     #[test]
-    fn test_token_weighted_rejects_zero_balance_voter() {
+    fn test_token_weighted_zero_balance_voter_rejected_and_state_not_mutated() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
-        let zero_balance_voter = Address::generate(&env);
+        let (client, _, proposer, contract_id) =
+            setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
+        let voter = Address::generate(&env);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
-        let result = client.try_cast_vote(&zero_balance_voter, &prop_id, &VoteType::For);
-
+        let result = client.try_cast_vote(&voter, &prop_id, &VoteType::For);
         assert_eq!(result, Err(Ok(Error::ZeroVotingPower)));
+
+        env.as_contract(&contract_id, || {
+            let votes: Map<(u32, Address), Vote> = env
+                .storage()
+                .instance()
+                .get(&VOTES)
+                .unwrap_or(Map::new(&env));
+            assert!(!votes.contains_key((prop_id, voter)));
+
+            let proposals: Map<u32, Proposal> = env.storage().instance().get(&PROPOSALS).unwrap();
+            let proposal = proposals.get(prop_id).unwrap();
+            assert_eq!(proposal.total_votes, 0);
+            assert_eq!(proposal.votes_for, 0);
+        });
+    }
+
+    #[test]
+    fn test_token_weighted_voter_with_balance_records_correct_power() {
+        let env = Env::default();
+        let (client, token_admin_client, proposer, contract_id) =
+            setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
+        let token_admin_client = token_admin_client.unwrap();
+        let voter = Address::generate(&env);
+        let balance: i128 = 75;
+
+        token_admin_client.mint(&voter, &balance);
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        client.cast_vote(&voter, &prop_id, &VoteType::For);
+
+        env.as_contract(&contract_id, || {
+            let votes: Map<(u32, Address), Vote> = env.storage().instance().get(&VOTES).unwrap();
+            let vote = votes.get((prop_id, voter.clone())).unwrap();
+            assert_eq!(vote.voting_power, balance);
+            assert_eq!(vote.vote_type, VoteType::For);
+            assert_eq!(vote.voter, voter);
+
+            let proposals: Map<u32, Proposal> = env.storage().instance().get(&PROPOSALS).unwrap();
+            let proposal = proposals.get(prop_id).unwrap();
+            assert_eq!(proposal.total_votes, 1);
+            assert_eq!(proposal.votes_for, balance);
+        });
     }
 
     #[test]
     fn test_token_weighted_quorum_just_met() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let voter = Address::generate(&env);
@@ -678,7 +725,7 @@ mod test {
     #[test]
     fn test_token_weighted_quorum_just_missed_rejects() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 5000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let voter = Address::generate(&env);
@@ -699,7 +746,7 @@ mod test {
     #[test]
     fn test_one_person_and_token_weighted_can_diverge() {
         let env = Env::default();
-        let (one_person_client, _, one_person_proposer) =
+        let (one_person_client, _, one_person_proposer, _) =
             setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
         let heavy_against = Address::generate(&env);
 
@@ -714,7 +761,7 @@ mod test {
         );
 
         let env = Env::default();
-        let (token_client, token_admin_client, token_proposer) =
+        let (token_client, token_admin_client, token_proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
         let token_admin_client = token_admin_client.unwrap();
         let heavy_against = Address::generate(&env);
@@ -736,7 +783,7 @@ mod test {
     #[test]
     fn test_create_proposal_enforces_minimum_stake() {
         let env = Env::default();
-        let (client, token_admin_client, proposer) =
+        let (client, token_admin_client, proposer, _) =
             setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
         let token_admin_client = token_admin_client.unwrap();
 
