@@ -115,6 +115,7 @@ export enum ContractErrorCode {
   GOV_PROPOSAL_NOT_APPROVED  = 'GOV_PROPOSAL_NOT_APPROVED',    // 12
   GOV_EXECUTION_DELAY_NOT_MET = 'GOV_EXECUTION_DELAY_NOT_MET', // 13
   GOV_PROPOSAL_EXPIRED       = 'GOV_PROPOSAL_EXPIRED',         // 14
+  GOV_VOTE_WEIGHT_OVERFLOW   = 'GOV_VOTE_WEIGHT_OVERFLOW',     // 18
 
   // ── Circuit-Breaker / Error-Recovery ────────────────────────────────────
   CIRCUIT_OPEN               = 'CIRCUIT_OPEN',                 // 1001
@@ -180,6 +181,7 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.GOV_PROPOSAL_NOT_APPROVED]:  'Proposal has not been approved',
   [ContractErrorCode.GOV_EXECUTION_DELAY_NOT_MET]: 'Execution delay period has not elapsed yet',
   [ContractErrorCode.GOV_PROPOSAL_EXPIRED]:       'Proposal has expired',
+  [ContractErrorCode.GOV_VOTE_WEIGHT_OVERFLOW]:   'Vote weight overflow',
 
   // Circuit-Breaker
   [ContractErrorCode.CIRCUIT_OPEN]:               'Circuit breaker is open; operation rejected without attempting',
@@ -239,6 +241,7 @@ export const GOVERNANCE_ERROR_MAP: Record<number, ContractErrorCode> = {
   12: ContractErrorCode.GOV_PROPOSAL_NOT_APPROVED,
   13: ContractErrorCode.GOV_EXECUTION_DELAY_NOT_MET,
   14: ContractErrorCode.GOV_PROPOSAL_EXPIRED,
+  18: ContractErrorCode.GOV_VOTE_WEIGHT_OVERFLOW,
 };
 
 /** Circuit-breaker u32 error constants → SDK code */
