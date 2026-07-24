@@ -1320,9 +1320,213 @@ mod test {
         assert!(events.len() > 0);
     }
 
+    // =====================================================================
+    // rotate_signers rollback-atomicity tests (issue #259)
+    // =====================================================================
+
     #[test]
-    #[should_panic(expected = "RemovalWouldBreakThreshold")]
-    fn test_rotate_signers_rejected_no_events() {
+    fn rotate_signers_rollback_atomicity_removals_alone() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        let pre_config = setup.env.as_contract(&setup.contract_id, || MultiSig::get_config(&setup.env));
+        let pre_events_len = setup.env.events().all().len();
+
+        let add_vec = Vec::new(&setup.env);
+        let mut rm_vec = Vec::new(&setup.env);
+        rm_vec.push_back(setup.signer_b.clone());
+
+        // Attempting to remove signer_b without changing threshold (2) leaves 1 signer,
+        // which breaks the threshold. Must panic.
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            setup.env.as_contract(&setup.contract_id, || {
+                MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
+            });
+        }));
+
+        assert!(result.is_err(), "rotate_signers must panic on invalid threshold");
+
+        setup.env.as_contract(&setup.contract_id, || {
+            let post_config = MultiSig::get_config(&setup.env);
+            assert_eq!(post_config.signers.len(), pre_config.signers.len());
+            assert_eq!(post_config.threshold, pre_config.threshold);
+            for i in 0..pre_config.signers.len() {
+                assert_eq!(pre_config.signers.get(i).unwrap(), post_config.signers.get(i).unwrap());
+            }
+        });
+
+        // No new events should be observed
+        let post_events_len = setup.env.events().all().len();
+        assert_eq!(post_events_len, pre_events_len, "no events should be emitted for a rejected call");
+    }
+
+    #[test]
+    fn rotate_signers_rollback_atomicity_additions_alone() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        let pre_config = setup.env.as_contract(&setup.contract_id, || MultiSig::get_config(&setup.env));
+        let pre_events_len = setup.env.events().all().len();
+
+        let mut add_vec = Vec::new(&setup.env);
+        let new_signer = Address::generate(&setup.env);
+        add_vec.push_back(new_signer.clone());
+        let rm_vec = Vec::new(&setup.env);
+
+        // Attempting to add a signer but passing an invalid new threshold (e.g., 0)
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            setup.env.as_contract(&setup.contract_id, || {
+                MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, Some(0));
+            });
+        }));
+
+        assert!(result.is_err(), "rotate_signers must panic on threshold 0");
+
+        setup.env.as_contract(&setup.contract_id, || {
+            let post_config = MultiSig::get_config(&setup.env);
+            assert_eq!(post_config.signers.len(), pre_config.signers.len());
+            assert_eq!(post_config.threshold, pre_config.threshold);
+            for i in 0..pre_config.signers.len() {
+                assert_eq!(pre_config.signers.get(i).unwrap(), post_config.signers.get(i).unwrap());
+            }
+        });
+
+        let post_events_len = setup.env.events().all().len();
+        assert_eq!(post_events_len, pre_events_len, "no events should be emitted for a rejected call");
+    }
+
+    #[test]
+    fn rotate_signers_rollback_atomicity_combined() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            let mut signers_vec = Vec::new(&setup.env);
+            signers_vec.push_back(setup.signer_a.clone());
+            signers_vec.push_back(setup.signer_b.clone());
+            signers_vec.push_back(setup.signer_c.clone());
+            MultiSig::init(&setup.env, signers_vec, 3);
+        });
+
+        let pre_config = setup.env.as_contract(&setup.contract_id, || MultiSig::get_config(&setup.env));
+        let pre_events_len = setup.env.events().all().len();
+
+        let mut add_vec = Vec::new(&setup.env);
+        let new_signer = Address::generate(&setup.env);
+        add_vec.push_back(new_signer.clone()); // 1 added
+
+        let mut rm_vec = Vec::new(&setup.env);
+        rm_vec.push_back(setup.signer_b.clone());
+        rm_vec.push_back(setup.signer_c.clone()); // 2 removed
+
+        // Start with 3, +1, -2 = 2 signers left. Threshold is 3. This breaks threshold.
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            setup.env.as_contract(&setup.contract_id, || {
+                MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
+            });
+        }));
+
+        assert!(result.is_err(), "rotate_signers must panic on combined invalid threshold");
+
+        setup.env.as_contract(&setup.contract_id, || {
+            let post_config = MultiSig::get_config(&setup.env);
+            assert_eq!(post_config.signers.len(), pre_config.signers.len());
+            assert_eq!(post_config.threshold, pre_config.threshold);
+            for i in 0..pre_config.signers.len() {
+                assert_eq!(pre_config.signers.get(i).unwrap(), post_config.signers.get(i).unwrap());
+            }
+        });
+
+        let post_events_len = setup.env.events().all().len();
+        assert_eq!(post_events_len, pre_events_len, "no events should be emitted for a rejected call");
+    }
+
+    #[test]
+    fn rotate_signers_exact_boundary_succeeds() {
+        let setup = setup();
+        setup.env.as_contract(&setup.contract_id, || {
+            let mut signers_vec = Vec::new(&setup.env);
+            signers_vec.push_back(setup.signer_a.clone());
+            signers_vec.push_back(setup.signer_b.clone());
+            signers_vec.push_back(setup.signer_c.clone());
+            MultiSig::init(&setup.env, signers_vec, 3);
+        });
+
+        let add_vec = Vec::new(&setup.env);
+        let mut rm_vec = Vec::new(&setup.env);
+        rm_vec.push_back(setup.signer_c.clone());
+
+        // 3 signers, remove 1, set new threshold to 2. Remaining signers (2) == threshold (2).
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, Some(2));
+            
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(config.signers.len(), 2);
+            assert_eq!(config.threshold, 2);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_rotate_signers_rejects_duplicate_add_entries() {
+        let setup = setup();
+        let new_signer = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            let mut add_vec = Vec::new(&setup.env);
+            add_vec.push_back(new_signer.clone());
+            add_vec.push_back(new_signer.clone()); // Duplicate
+
+            let rm_vec = Vec::new(&setup.env);
+
+            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
+        });
+    }
+
+    #[test]
+    fn test_rotate_signers_overlapping_add_and_remove() {
+        let setup = setup();
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            let mut add_vec = Vec::new(&setup.env);
+            add_vec.push_back(setup.signer_b.clone());
+
+            let mut rm_vec = Vec::new(&setup.env);
+            rm_vec.push_back(setup.signer_b.clone());
+
+            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
+
+            let config = MultiSig::get_config(&setup.env);
+            assert!(config.signers.contains(&setup.signer_b));
+            assert_eq!(config.signers.len(), 2);
+            assert_eq!(config.threshold, 2);
+        });
+    }
+
+    #[test]
+    fn test_rotate_signers_threshold_only() {
         let setup = setup();
 
         setup.env.as_contract(&setup.contract_id, || {
@@ -1333,11 +1537,16 @@ mod test {
             );
 
             let add_vec = Vec::new(&setup.env);
-            let mut rm_vec = Vec::new(&setup.env);
-            rm_vec.push_back(setup.signer_b.clone());
+            let rm_vec = Vec::new(&setup.env);
 
-            // Remove signer_b with threshold=2 (guard should block and panic, no events emitted)
-            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, None);
+            MultiSig::rotate_signers(&setup.env, setup.signer_a.clone(), add_vec, rm_vec, Some(1));
+
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(config.signers.len(), 2);
+            assert_eq!(config.threshold, 1);
         });
+
+        let events = setup.env.events().all();
+        assert!(events.len() > 0);
     }
 }

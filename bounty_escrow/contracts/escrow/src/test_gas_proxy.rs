@@ -232,6 +232,43 @@ fn test_fee_estimation_under_contention_not_applicable() {
     assert!(!is_network_fee_observable, "Contract must not observe or pay network fees");
 }
 
+#[test]
+fn test_fee_calculation_precision_boundaries() {
+    // 1. Non-evenly-dividing amounts (Rounding/truncation behavior)
+    // 10000 basis points = 100%. If fee rate is 333 (3.33%) and amount is 1_000_001,
+    // exact fee is 33300.0333. Integer math should truncate to 33300.
+    let rate = 333i128;
+    let fee1 = crate::BountyEscrowContract::calculate_fee(1_000_001, rate);
+    assert_eq!(fee1, 33300, "Truncation at non-evenly-dividing amount failed");
+
+    // amount = 99, rate = 100 (1%) -> fee = 9900 / 10000 = 0
+    let fee2 = crate::BountyEscrowContract::calculate_fee(99, 100);
+    assert_eq!(fee2, 0, "Expected truncation to 0 for small non-dividing amount");
+
+    // amount = 100, rate = 100 (1%) -> fee = 10000 / 10000 = 1
+    let fee3 = crate::BountyEscrowContract::calculate_fee(100, 100);
+    assert_eq!(fee3, 1, "Expected exact division");
+
+    // 2. Near-zero amounts don't panic or zero out unexpectedly
+    let fee_zero = crate::BountyEscrowContract::calculate_fee(0, 500);
+    assert_eq!(fee_zero, 0, "Zero amount should yield zero fee without panic");
+
+    let fee_low_rate = crate::BountyEscrowContract::calculate_fee(10_000, 1); // 0.01%
+    assert_eq!(fee_low_rate, 1, "Near zero fee rate failed");
+
+    // 3. Very large amounts (overflow in intermediate fee calculation)
+    // BASIS_POINTS is 10000.
+    // Using i128, max value is ~3.4e38.
+    // We should be able to handle amount up to i128::MAX / 5000 without overflow.
+    let max_safe_amount = i128::MAX / 5000;
+    let large_fee = crate::BountyEscrowContract::calculate_fee(max_safe_amount, 5000);
+    assert_eq!(large_fee, max_safe_amount / 2, "Large amount safely calculated without overflow");
+
+    // Test overflow safety (checked math in calculate_fee should yield 0)
+    let overflow_amount = (i128::MAX / 5000) + 1;
+    let overflow_fee = crate::BountyEscrowContract::calculate_fee(overflow_amount, 5000);
+    assert_eq!(overflow_fee, 0, "Overflow should safely default to 0 due to checked_math");
+}
 // ═════════════════════════════════════════════════════════════════════════════
 // 2. BATCH LOCK — SIZE SCALING
 // ═════════════════════════════════════════════════════════════════════════════
