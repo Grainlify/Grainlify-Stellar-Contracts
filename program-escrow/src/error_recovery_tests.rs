@@ -1519,3 +1519,252 @@ fn test_retry_counter_reset_after_mid_sequence_recovery() {
         assert_eq!(mock_state_val, 100);
     });
 }
+
+// ─────────────────────────────────────────────────────────
+// 38. Non-default success_threshold: circuit stays HalfOpen
+//     until the threshold is reached
+// ─────────────────────────────────────────────────────────
+// Acceptance criterion #1:
+//   Circuit stays HalfOpen until success_threshold consecutive
+//   successes are recorded (tested with success_threshold = 3).
+
+#[test]
+fn test_halfopen_stays_halfopen_after_one_success_with_threshold_3() {
+    // Arrange: configure a circuit with success_threshold = 3
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 2,
+                success_threshold: 3,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    // Drive the circuit to Open, then admin resets to HalfOpen
+    simulate_failures(&env, &contract_id, 2);
+    env.as_contract(&contract_id, || {
+        reset_circuit_breaker(&env, &admin);
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+
+        // Act: record the first success
+        record_success(&env);
+
+        // Assert: still HalfOpen — one success is not enough
+        assert_eq!(
+            get_state(&env),
+            CircuitState::HalfOpen,
+            "Circuit must remain HalfOpen after only 1 of 3 required successes"
+        );
+        assert_eq!(
+            get_success_count(&env),
+            1,
+            "SuccessCount must be 1 after one success in HalfOpen"
+        );
+    });
+}
+
+#[test]
+fn test_halfopen_stays_halfopen_after_two_successes_with_threshold_3() {
+    // Arrange: configure a circuit with success_threshold = 3
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 2,
+                success_threshold: 3,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    // Drive the circuit to Open, then admin resets to HalfOpen
+    simulate_failures(&env, &contract_id, 2);
+    env.as_contract(&contract_id, || {
+        reset_circuit_breaker(&env, &admin);
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+
+        // Act: record two consecutive successes
+        record_success(&env);
+        record_success(&env);
+
+        // Assert: still HalfOpen — two successes are not enough for threshold = 3
+        assert_eq!(
+            get_state(&env),
+            CircuitState::HalfOpen,
+            "Circuit must remain HalfOpen after only 2 of 3 required successes"
+        );
+        assert_eq!(
+            get_success_count(&env),
+            2,
+            "SuccessCount must be 2 after two successes in HalfOpen"
+        );
+    });
+}
+
+#[test]
+fn test_halfopen_closes_only_on_third_success_with_threshold_3() {
+    // Arrange: configure a circuit with success_threshold = 3
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 2,
+                success_threshold: 3,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    // Drive the circuit to Open, then admin resets to HalfOpen
+    simulate_failures(&env, &contract_id, 2);
+    env.as_contract(&contract_id, || {
+        reset_circuit_breaker(&env, &admin);
+
+        // Act: record exactly three consecutive successes
+        record_success(&env); // 1st — still HalfOpen
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+
+        record_success(&env); // 2nd — still HalfOpen
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+
+        record_success(&env); // 3rd — should close
+
+        // Assert: circuit is now Closed
+        assert_eq!(
+            get_state(&env),
+            CircuitState::Closed,
+            "Circuit must close after exactly 3 successes with success_threshold = 3"
+        );
+    });
+}
+
+// ─────────────────────────────────────────────────────────
+// 39. Failure mid-streak in HalfOpen re-opens the circuit
+//     and resets the success counter to zero
+// ─────────────────────────────────────────────────────────
+// Acceptance criterion #2:
+//   A failure while in HalfOpen (before reaching the success
+//   threshold) immediately re-opens the circuit and resets
+//   the success counter to zero.
+
+#[test]
+fn test_halfopen_failure_midstreak_reopens_and_resets_success_counter() {
+    // Arrange: configure a circuit with success_threshold = 3
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 2,
+                success_threshold: 3,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    // Drive the circuit to Open, then admin resets to HalfOpen
+    simulate_failures(&env, &contract_id, 2);
+    env.as_contract(&contract_id, || {
+        reset_circuit_breaker(&env, &admin);
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+
+        // Build a partial success streak (2 of 3 needed)
+        record_success(&env);
+        record_success(&env);
+        assert_eq!(get_success_count(&env), 2);
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+
+        // Act: inject a failure mid-streak
+        let prog = String::from_str(&env, "TestProg");
+        record_failure(&env, prog, symbol_short!("op"), ERR_TRANSFER_FAILED);
+
+        // Assert 1: circuit has re-opened
+        assert_eq!(
+            get_state(&env),
+            CircuitState::Open,
+            "A failure mid-streak in HalfOpen must immediately re-open the circuit"
+        );
+
+        // Assert 2: success counter is reset to zero by open_circuit()
+        assert_eq!(
+            get_success_count(&env),
+            0,
+            "SuccessCount must be reset to zero when the circuit re-opens from HalfOpen"
+        );
+    });
+}
+
+// ─────────────────────────────────────────────────────────
+// 40. SuccessCount storage is reset to zero on close
+// ─────────────────────────────────────────────────────────
+// Acceptance criterion #3:
+//   SuccessCount storage is correctly reset to zero once the
+//   circuit actually closes (i.e. after reaching success_threshold
+//   consecutive successes in HalfOpen).
+
+#[test]
+fn test_success_count_reset_to_zero_when_circuit_closes() {
+    // Arrange: configure a circuit with success_threshold = 3
+    let (env, contract_id) = setup_env();
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        set_circuitadmin(&env, admin.clone(), None);
+        set_config(
+            &env,
+            CircuitBreakerConfig {
+                failure_threshold: 2,
+                success_threshold: 3,
+                max_error_log: 10,
+            },
+        );
+    });
+
+    // Drive the circuit to Open, then admin resets to HalfOpen
+    simulate_failures(&env, &contract_id, 2);
+    env.as_contract(&contract_id, || {
+        reset_circuit_breaker(&env, &admin);
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+        assert_eq!(get_success_count(&env), 0);
+
+        // Build up a non-zero SuccessCount (2) before the closing success
+        record_success(&env);
+        record_success(&env);
+        assert_eq!(get_success_count(&env), 2);
+        assert_eq!(get_state(&env), CircuitState::HalfOpen);
+
+        // Act: third success triggers close_circuit()
+        record_success(&env);
+
+        // Assert: state is Closed AND SuccessCount is exactly 0
+        assert_eq!(
+            get_state(&env),
+            CircuitState::Closed,
+            "Circuit must be Closed after reaching success_threshold"
+        );
+        assert_eq!(
+            get_success_count(&env),
+            0,
+            "SuccessCount must be reset to 0 by close_circuit() — not left at the threshold value"
+        );
+
+        // Bonus: failure count must also be cleared by close_circuit()
+        assert_eq!(
+            get_failure_count(&env),
+            0,
+            "FailureCount must also be reset to 0 when the circuit closes"
+        );
+    });
+}
