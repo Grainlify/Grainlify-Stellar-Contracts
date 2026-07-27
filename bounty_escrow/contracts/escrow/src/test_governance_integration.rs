@@ -889,3 +889,185 @@ fn test_upgrade_approval_numeric_encoded_version_gate() {
         ));
     });
 }
+
+// =============================================================================
+// Encoded-version branch coverage
+// =============================================================================
+// These tests exercise the get_version_numeric_encoded() path and the
+// 9_999 / 10_000 boundary that controls branch selection in
+// check_governance_version.
+//
+// mock_governance returns contrasting values:
+//   get_ver()                  = 2       (plain / low)
+//   get_version_numeric_encoded() = 20_000 (encoded / high)
+//
+// This contrast lets us infer which branch was taken from the result alone.
+
+/// Ensures the encoded-version branch succeeds when min_version is set to a
+/// numeric-encoded value that the governance contract meets.
+#[test]
+fn test_encoded_version_matching_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+
+    // Encoded version = 20_000, min = 10_050 → 20_000 >= 10_050 → passes.
+    // At >= 10_000 the encoded path is used, so this demonstrates the
+    // get_version_numeric_encoded() branch returning true.
+    client.set_min_governance_version(&10_050);
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_governance_version(&env));
+    });
+}
+
+/// Ensures the encoded-version branch rejects when the governance contract's
+/// encoded version is below the required minimum.
+#[test]
+fn test_encoded_version_too_low_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+
+    // Encoded version = 20_000, min = 25_000 → 20_000 >= 25_000 → fails.
+    client.set_min_governance_version(&25_000);
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_governance_version(&env));
+    });
+}
+
+/// Verifies the branch selection boundary: at min_version = 9_999 the plain
+/// path (get_ver) is used, at min_version = 10_000 the encoded path
+/// (get_version_numeric_encoded) is used. The contrasting mock values prove
+/// which method the branch selected.
+#[test]
+fn test_version_branch_selection_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+
+    // At 9_999 the plain path is used: get_ver() = 2 >= 9_999 → false.
+    // If the encoded path were erroneously taken here, get_version_numeric_encoded() = 20_000
+    // would return true — so false confirms the plain path was used.
+    client.set_min_governance_version(&9_999);
+    env.as_contract(&contract_id, || {
+        assert!(
+            !governance_integration::check_governance_version(&env),
+            "at min 9_999 the plain path (get_ver = 2) must be taken, result must be false"
+        );
+    });
+
+    // At 10_000 the encoded path is used: get_version_numeric_encoded() = 20_000 >= 10_000 → true.
+    // If the plain path were erroneously taken here, get_ver() = 2 >= 10_000 would be false.
+    client.set_min_governance_version(&10_000);
+    env.as_contract(&contract_id, || {
+        assert!(
+            governance_integration::check_governance_version(&env),
+            "at min 10_000 the encoded path (numeric = 20_000) must be taken, result must be true"
+        );
+    });
+}
+
+/// Tests the numeric comparison edge cases on the encoded-version branch:
+///   - encoded version exactly equal to minimum
+///   - encoded version one below minimum
+///   - encoded version above minimum
+#[test]
+fn test_encoded_version_edge_cases() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+
+    // Encoded version = 20_000, minimum = 20_000 → exactly equal → passes.
+    client.set_min_governance_version(&20_000);
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_governance_version(&env));
+    });
+
+    // Encoded version = 20_000, minimum = 20_001 → one below → fails.
+    client.set_min_governance_version(&20_001);
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_governance_version(&env));
+    });
+
+    // Encoded version = 20_000, minimum = 10_050 → above minimum → passes.
+    client.set_min_governance_version(&10_050);
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_governance_version(&env));
+    });
+}
+
+/// Exercises check_upgrade_approval through the encoded-version path,
+/// ensuring it correctly delegates through get_version_numeric_encoded
+/// when min_version >= 10_000.
+#[test]
+fn test_upgrade_approval_through_encoded_version_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+
+    let matching_hash = BytesN::from_array(&env, &[7u8; 32]);
+    let wrong_hash = BytesN::from_array(&env, &[9u8; 32]);
+
+    // Version check passes via encoded path (20_000 >= 10_000), hash matches → accept.
+    client.set_min_governance_version(&10_000);
+    env.as_contract(&contract_id, || {
+        assert!(governance_integration::check_upgrade_approval(
+            &env,
+            &matching_hash
+        ));
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &wrong_hash
+        ));
+    });
+
+    // Raise minimum above encoded version → version check fails via encoded path,
+    // short-circuiting check_upgrade_approval to false even for matching hash.
+    client.set_min_governance_version(&25_000);
+    env.as_contract(&contract_id, || {
+        assert!(!governance_integration::check_upgrade_approval(
+            &env,
+            &matching_hash
+        ));
+    });
+}
