@@ -16,6 +16,8 @@
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
+use crate::Error;
+
 /// Analytics version
 pub const ANALYTICS_VERSION_V1: u32 = 1;
 
@@ -139,7 +141,11 @@ pub enum AnalyticsKey {
     BountyMetrics(u64),
 }
 
-/// Initialize bounty analytics on lock
+/// Initialize bounty analytics on lock.
+///
+/// `amount` is stored without arithmetic and may span the full `i128` range;
+/// later updates must keep every monetary total within `i128` and each partial
+/// operation count within `u32`.
 pub fn init_bounty_analytics(env: &Env, bounty_id: u64, amount: i128, timestamp: u64) {
     let analytics = BountyAnalytics {
         total_amount_locked: amount,
@@ -157,50 +163,88 @@ pub fn init_bounty_analytics(env: &Env, bounty_id: u64, amount: i128, timestamp:
         .set(&AnalyticsKey::BountyMetrics(bounty_id), &analytics);
 }
 
-/// Update analytics on release
+/// Update analytics on release.
+///
+/// The existing released total plus `release_amount`, the remaining amount
+/// minus `release_amount`, and the partial-release count plus one must fit in
+/// `i128`, `i128`, and `u32`, respectively.
 pub fn update_analytics_on_release(
     env: &Env,
     bounty_id: u64,
     release_amount: i128,
     timestamp: u64,
-) {
+) -> Result<(), Error> {
     if let Some(mut analytics) = env
         .storage()
         .persistent()
         .get::<AnalyticsKey, BountyAnalytics>(&AnalyticsKey::BountyMetrics(bounty_id))
     {
-        analytics.total_amount_released += release_amount;
-        analytics.remaining_amount = analytics.remaining_amount.saturating_sub(release_amount);
+        let total_amount_released = analytics
+            .total_amount_released
+            .checked_add(release_amount)
+            .ok_or(Error::AnalyticsOverflow)?;
+        let remaining_amount = analytics
+            .remaining_amount
+            .checked_sub(release_amount)
+            .ok_or(Error::AnalyticsOverflow)?;
+        let partial_releases_count = analytics
+            .partial_releases_count
+            .checked_add(1)
+            .ok_or(Error::AnalyticsOverflow)?;
+
+        analytics.total_amount_released = total_amount_released;
+        analytics.remaining_amount = remaining_amount;
         analytics.last_updated = timestamp;
-        analytics.partial_releases_count += 1;
+        analytics.partial_releases_count = partial_releases_count;
 
         env.storage()
             .persistent()
             .set(&AnalyticsKey::BountyMetrics(bounty_id), &analytics);
     }
+
+    Ok(())
 }
 
-/// Update analytics on refund
+/// Update analytics on refund.
+///
+/// The existing refunded total plus `refund_amount`, the remaining amount
+/// minus `refund_amount`, and the partial-refund count plus one must fit in
+/// `i128`, `i128`, and `u32`, respectively.
 pub fn update_analytics_on_refund(
     env: &Env,
     bounty_id: u64,
     refund_amount: i128,
     timestamp: u64,
-) {
+) -> Result<(), Error> {
     if let Some(mut analytics) = env
         .storage()
         .persistent()
         .get::<AnalyticsKey, BountyAnalytics>(&AnalyticsKey::BountyMetrics(bounty_id))
     {
-        analytics.total_amount_refunded += refund_amount;
-        analytics.remaining_amount = analytics.remaining_amount.saturating_sub(refund_amount);
+        let total_amount_refunded = analytics
+            .total_amount_refunded
+            .checked_add(refund_amount)
+            .ok_or(Error::AnalyticsOverflow)?;
+        let remaining_amount = analytics
+            .remaining_amount
+            .checked_sub(refund_amount)
+            .ok_or(Error::AnalyticsOverflow)?;
+        let partial_refunds_count = analytics
+            .partial_refunds_count
+            .checked_add(1)
+            .ok_or(Error::AnalyticsOverflow)?;
+
+        analytics.total_amount_refunded = total_amount_refunded;
+        analytics.remaining_amount = remaining_amount;
         analytics.last_updated = timestamp;
-        analytics.partial_refunds_count += 1;
+        analytics.partial_refunds_count = partial_refunds_count;
 
         env.storage()
             .persistent()
             .set(&AnalyticsKey::BountyMetrics(bounty_id), &analytics);
     }
+
+    Ok(())
 }
 
 /// Get per-bounty analytics
@@ -332,6 +376,50 @@ mod tests {
         env.as_contract(&contract_id, || {
             let analytics = get_bounty_analytics(&env, 999u64);
             assert!(analytics.is_none());
+        });
+    }
+
+    #[test]
+    fn release_overflow_returns_typed_error_without_mutating_analytics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 5u64;
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 100);
+            assert_eq!(
+                update_analytics_on_release(&env, bounty_id, i128::MAX, 200),
+                Ok(())
+            );
+
+            let before = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(
+                update_analytics_on_release(&env, bounty_id, 1, 300),
+                Err(Error::AnalyticsOverflow)
+            );
+            assert_eq!(get_bounty_analytics(&env, bounty_id).unwrap(), before);
+        });
+    }
+
+    #[test]
+    fn refund_overflow_returns_typed_error_without_mutating_analytics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 6u64;
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 100);
+            assert_eq!(
+                update_analytics_on_refund(&env, bounty_id, i128::MAX, 200),
+                Ok(())
+            );
+
+            let before = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(
+                update_analytics_on_refund(&env, bounty_id, 1, 300),
+                Err(Error::AnalyticsOverflow)
+            );
+            assert_eq!(get_bounty_analytics(&env, bounty_id).unwrap(), before);
         });
     }
 }

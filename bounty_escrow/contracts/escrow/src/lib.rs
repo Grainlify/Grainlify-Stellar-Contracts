@@ -406,6 +406,8 @@ pub enum Error {
     PendingClaimExists = 24,
     /// Returned when a governance proposal is missing, unapproved, delayed, rejected, or already executed
     GovernanceProposalNotExecutable = 25,
+    /// Returned when an analytics accumulator exceeds its numeric bounds
+    AnalyticsOverflow = 26,
 }
 
 #[contracttype]
@@ -1421,7 +1423,7 @@ impl BountyEscrowContract {
         let timestamp = env.ledger().timestamp();
 
         // Update analytics
-        update_analytics_on_release(&env, bounty_id, release_amount, timestamp);
+        update_analytics_on_release(&env, bounty_id, release_amount, timestamp)?;
 
         // Update incremental aggregate counters
         Self::transition_locked_to_released(&env, release_amount);
@@ -2010,7 +2012,7 @@ impl BountyEscrowContract {
         Self::bump_escrow_ttl(&env, bounty_id);
 
         // Update analytics
-        update_analytics_on_refund(&env, bounty_id, refund_amount, now);
+        update_analytics_on_refund(&env, bounty_id, refund_amount, now)?;
 
         // Update incremental aggregate counters
         match (original_status, escrow.status.clone()) {
@@ -2182,7 +2184,7 @@ impl BountyEscrowContract {
                 .set(&DataKey::Escrow(bounty_id), &escrow);
             Self::bump_escrow_ttl(&env, bounty_id);
 
-            update_analytics_on_refund(&env, bounty_id, refund_amount, now);
+            update_analytics_on_refund(&env, bounty_id, refund_amount, now)?;
 
             emit_bounty_state_transitioned(
                 &env,
