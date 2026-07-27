@@ -3628,3 +3628,5 @@ mod test_multisig_approval_authz;
 mod test_admin_audit_views;
 #[cfg(test)]
 mod test_depositor_stats;
+#[cfg(test)]
+mod test_analytics_statistics;
