@@ -33,7 +33,7 @@ use error_recovery::{
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
-    Symbol, Vec,
+    Map, Symbol, Vec,
 };
 
 // ==================== MONITORING MODULE ====================
@@ -1913,17 +1913,14 @@ impl BountyEscrowContract {
         Ok(escrow)
     }
 
-    fn validate_unique_bounty_ids(bounty_ids: &Vec<u64>) -> Result<(), Error> {
+    /// Validate bounty IDs in O(n) time using a single pass over the batch.
+    fn validate_unique_bounty_ids(env: &Env, bounty_ids: &Vec<u64>) -> Result<(), Error> {
+        let mut seen: Map<u64, bool> = Map::new(env);
         for bounty_id in bounty_ids.iter() {
-            let mut count = 0u32;
-            for other_id in bounty_ids.iter() {
-                if other_id == bounty_id {
-                    count += 1;
-                }
-            }
-            if count > 1 {
+            if seen.contains_key(bounty_id) {
                 return Err(Error::DuplicateBountyId);
             }
+            seen.set(bounty_id, true);
         }
         Ok(())
     }
@@ -2115,7 +2112,7 @@ impl BountyEscrowContract {
         if batch_size == 0 || batch_size > MAX_BATCH_SIZE {
             return Err(Error::InvalidBatchSize);
         }
-        Self::validate_unique_bounty_ids(&bounty_ids)?;
+        Self::validate_unique_bounty_ids(&env, &bounty_ids)?;
 
         let now = env.ledger().timestamp();
         for bounty_id in bounty_ids.iter() {
@@ -2891,6 +2888,12 @@ impl BountyEscrowContract {
             return Err(Error::NotInitialized);
         }
 
+        let mut bounty_ids: Vec<u64> = Vec::new(&env);
+        for item in items.iter() {
+            bounty_ids.push_back(item.bounty_id);
+        }
+        Self::validate_unique_bounty_ids(&env, &bounty_ids)?;
+
         // Every transfer below is a lock, so one check up front covers the
         // whole batch — same gate the single-item lock_funds() goes through
         // via execute_token_transfer.
@@ -2917,17 +2920,6 @@ impl BountyEscrowContract {
             // Validate amount
             if item.amount <= 0 {
                 return Err(Error::InvalidAmount);
-            }
-
-            // Check for duplicate bounty_ids in the batch
-            let mut count = 0u32;
-            for other_item in items.iter() {
-                if other_item.bounty_id == item.bounty_id {
-                    count += 1;
-                }
-            }
-            if count > 1 {
-                return Err(Error::DuplicateBountyId);
             }
         }
 
@@ -3070,6 +3062,12 @@ impl BountyEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        let mut bounty_ids: Vec<u64> = Vec::new(&env);
+        for item in items.iter() {
+            bounty_ids.push_back(item.bounty_id);
+        }
+        Self::validate_unique_bounty_ids(&env, &bounty_ids)?;
+
         // Every transfer below is a release, so one check up front covers the
         // whole batch — same gate the single-item release_funds() goes
         // through via execute_token_transfer.
@@ -3113,18 +3111,6 @@ impl BountyEscrowContract {
             {
                 return Err(Error::RefundNotApproved);
             }
-
-            // Check for duplicate bounty_ids in the batch
-            let mut count = 0u32;
-            for other_item in items.iter() {
-                if other_item.bounty_id == item.bounty_id {
-                    count += 1;
-                }
-            }
-            if count > 1 {
-                return Err(Error::DuplicateBountyId);
-            }
-
             total_amount = total_amount
                 .checked_add(escrow.amount)
                 .ok_or(Error::InvalidAmount)?;
