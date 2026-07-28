@@ -150,4 +150,175 @@ fn test_state_lifecycle_cross_period() {
         assert_eq!(analytics.total_amount_refunded, 800);
         assert_eq!(analytics.remaining_amount, 0);
     });
+
+}
+
+// ============================================================
+// Direct unit tests for analytics helper functions
+// ============================================================
+
+/// Test init_bounty_analytics directly with full field assertions
+#[test]
+fn test_direct_init_bounty_analytics_full_assertions() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, DummyContract);
+
+    env.as_contract(&contract_id, || {
+        let bounty_id = 10u64;
+        let amount = 5000i128;
+        let timestamp = 12345678u64;
+
+        // Call the function directly
+        init_bounty_analytics(&env, bounty_id, amount, timestamp);
+
+        // Retrieve and assert every field
+        let analytics = get_bounty_analytics(&env, bounty_id).expect("should exist");
+        assert_eq!(analytics.total_amount_locked, amount, "total_amount_locked mismatch");
+        assert_eq!(analytics.total_amount_released, 0, "total_amount_released should be 0");
+        assert_eq!(analytics.total_amount_refunded, 0, "total_amount_refunded should be 0");
+        assert_eq!(analytics.remaining_amount, amount, "remaining_amount should equal locked amount");
+        assert_eq!(analytics.created_at, timestamp, "created_at mismatch");
+        assert_eq!(analytics.last_updated, timestamp, "last_updated mismatch");
+        assert_eq!(analytics.partial_releases_count, 0, "partial_releases_count should be 0");
+        assert_eq!(analytics.partial_refunds_count, 0, "partial_refunds_count should be 0");
+    });
+}
+
+/// Test multiple sequential releases update counters and remaining_amount correctly
+#[test]
+fn test_direct_sequential_releases() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, DummyContract);
+
+    env.as_contract(&contract_id, || {
+        let bounty_id = 11u64;
+        let amount = 1000i128;
+
+        init_bounty_analytics(&env, bounty_id, amount, 100);
+
+        // First partial release
+        update_analytics_on_release(&env, bounty_id, 200, 200);
+        let a = get_bounty_analytics(&env, bounty_id).unwrap();
+        assert_eq!(a.total_amount_released, 200);
+        assert_eq!(a.remaining_amount, 800);
+        assert_eq!(a.partial_releases_count, 1);
+
+        // Second partial release
+        update_analytics_on_release(&env, bounty_id, 300, 300);
+        let a = get_bounty_analytics(&env, bounty_id).unwrap();
+        assert_eq!(a.total_amount_released, 500);
+        assert_eq!(a.remaining_amount, 500);
+        assert_eq!(a.partial_releases_count, 2);
+
+        // Third partial release
+        update_analytics_on_release(&env, bounty_id, 100, 400);
+        let a = get_bounty_analytics(&env, bounty_id).unwrap();
+        assert_eq!(a.total_amount_released, 600);
+        assert_eq!(a.remaining_amount, 400);
+        assert_eq!(a.partial_releases_count, 3);
+
+        // Refund count should remain untouched
+        assert_eq!(a.partial_refunds_count, 0);
+        assert_eq!(a.total_amount_refunded, 0);
+    });
+}
+
+/// Test multiple sequential refunds update counters and remaining_amount correctly
+#[test]
+fn test_direct_sequential_refunds() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, DummyContract);
+
+    env.as_contract(&contract_id, || {
+        let bounty_id = 12u64;
+        let amount = 1000i128;
+
+        init_bounty_analytics(&env, bounty_id, amount, 100);
+
+        // First partial refund
+        update_analytics_on_refund(&env, bounty_id, 150, 200);
+        let a = get_bounty_analytics(&env, bounty_id).unwrap();
+        assert_eq!(a.total_amount_refunded, 150);
+        assert_eq!(a.remaining_amount, 850);
+        assert_eq!(a.partial_refunds_count, 1);
+
+        // Second partial refund
+        update_analytics_on_refund(&env, bounty_id, 250, 300);
+        let a = get_bounty_analytics(&env, bounty_id).unwrap();
+        assert_eq!(a.total_amount_refunded, 400);
+        assert_eq!(a.remaining_amount, 600);
+        assert_eq!(a.partial_refunds_count, 2);
+
+        // Release count should remain untouched
+        assert_eq!(a.partial_releases_count, 0);
+        assert_eq!(a.total_amount_released, 0);
+    });
+}
+
+/// Test saturating_sub boundary — release/refund exceeding remaining can go negative
+/// because saturating_sub on i128 prevents integer overflow (not negative balances).
+/// remaining_amount going negative is a known quirk worth surfacing.
+#[test]
+fn test_direct_saturating_sub_boundary() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, DummyContract);
+
+    env.as_contract(&contract_id, || {
+        let bounty_id = 13u64;
+        let amount = 100i128;
+
+        // Release more than remaining — saturating_sub prevents overflow but NOT underflow below 0
+        init_bounty_analytics(&env, bounty_id, amount, 100);
+        update_analytics_on_release(&env, bounty_id, 200, 200);
+        let a = get_bounty_analytics(&env, bounty_id).unwrap();
+        // saturating_sub(100, 200) on i128 = -100 — does NOT floor at zero
+        assert_eq!(a.remaining_amount, -100, "saturating_sub on i128 allows negative values");
+        assert_eq!(a.total_amount_released, 200, "total_released accumulates via raw +=");
+        assert_eq!(a.partial_releases_count, 1);
+
+        // Refund on a different bounty — refund more than remaining
+        let bounty_id2 = 14u64;
+        init_bounty_analytics(&env, bounty_id2, 50, 100);
+        update_analytics_on_refund(&env, bounty_id2, 500, 200);
+        let a2 = get_bounty_analytics(&env, bounty_id2).unwrap();
+        assert_eq!(a2.remaining_amount, -450, "refund excess goes negative via saturating_sub");
+        assert_eq!(a2.total_amount_refunded, 500, "total_refunded accumulates via raw +=");
+        assert_eq!(a2.partial_refunds_count, 1);
+    });
+}
+
+/// Test that calling update_analytics_on_release on uninitialized bounty is a silent no-op
+#[test]
+fn test_direct_release_on_uninitialized_bounty() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, DummyContract);
+
+    env.as_contract(&contract_id, || {
+        let bounty_id = 9999u64;
+
+        // This should not panic — just silent no-op
+        update_analytics_on_release(&env, bounty_id, 100, 200);
+
+        // Verify no record was created
+        let result = get_bounty_analytics(&env, bounty_id);
+        assert!(result.is_none(), "no analytics record should exist for uninitialized bounty");
+    });
+}
+
+/// Test that calling update_analytics_on_refund on uninitialized bounty is a silent no-op
+#[test]
+fn test_direct_refund_on_uninitialized_bounty() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, DummyContract);
+
+    env.as_contract(&contract_id, || {
+        let bounty_id = 9998u64;
+
+        // This should not panic — just silent no-op
+        update_analytics_on_refund(&env, bounty_id, 100, 200);
+
+        // Verify no record was created
+        let result = get_bounty_analytics(&env, bounty_id);
+        assert!(result.is_none(), "no analytics record should exist for uninitialized bounty");
+    });
 }
