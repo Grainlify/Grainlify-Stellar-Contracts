@@ -858,7 +858,7 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_strictly_before_voting_end_rejected() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -876,7 +876,7 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_exact_voting_end_boundary_rejected() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -894,7 +894,7 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_one_second_past_voting_end_succeeds() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -912,7 +912,7 @@ mod test {
 #[test]
 fn test_sweep_expired_proposal_nonexistent_fails() {
     let env = Env::default();
-    let (client, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let non_existent_id = 999;
 
     let result = client.try_sweep_expired_proposal(&non_existent_id, &150);
@@ -922,7 +922,7 @@ fn test_sweep_expired_proposal_nonexistent_fails() {
 #[test]
 fn test_sweep_expired_proposal_already_expired_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     // First sweep after expiry
@@ -942,7 +942,7 @@ fn test_sweep_expired_proposal_already_expired_fails() {
 #[test]
 fn test_sweep_expired_proposal_already_finalized_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     // Vote and finalize the proposal
@@ -962,7 +962,7 @@ fn test_sweep_expired_proposal_already_finalized_fails() {
 #[test]
 fn test_cancel_proposal_success() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     let result = client.try_cancel_proposal(&proposer, &prop_id);
@@ -993,7 +993,7 @@ fn test_cancel_proposal_success() {
 #[test]
 fn test_cancel_proposal_unauthorized() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
     let unauthorized = Address::generate(&env);
 
@@ -1009,7 +1009,7 @@ fn test_cancel_proposal_unauthorized() {
 #[test]
 fn test_cancel_proposal_after_passing_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     client.cast_vote(&proposer, &prop_id, &VoteType::For);
@@ -1024,7 +1024,7 @@ fn test_cancel_proposal_after_passing_fails() {
 #[test]
 fn test_cancel_proposal_already_cancelled_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     client.cancel_proposal(&proposer, &prop_id);
@@ -1036,7 +1036,7 @@ fn test_cancel_proposal_already_cancelled_fails() {
 #[test]
 fn test_cancel_proposal_wrong_proposal_id_returns_unauthorized() {
     let env = Env::default();
-    let (client, _, proposer1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer1, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let proposer2 = Address::generate(&env);
     let _prop1 = create_test_proposal(&env, &client, &proposer1);
     let prop2 = create_test_proposal(&env, &client, &proposer2);
@@ -1051,7 +1051,7 @@ fn test_cancel_proposal_wrong_proposal_id_returns_unauthorized() {
 #[test]
 fn test_cancel_proposal_after_rejection_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
     let voter2 = Address::generate(&env);
     let voter3 = Address::generate(&env);
     let prop_id = create_test_proposal(&env, &client, &proposer);
@@ -1071,7 +1071,7 @@ fn test_cancel_proposal_after_rejection_fails() {
 #[test]
 fn test_cancel_proposal_after_sweep_expired_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     let current_time = 150;
@@ -1088,7 +1088,7 @@ fn test_cancel_proposal_after_sweep_expired_fails() {
 #[test]
 fn test_cross_contract_auth_scope_minimal() {
     let env = Env::default();
-    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let (client, token_admin_client, proposer, _) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
     let token_admin_client = token_admin_client.unwrap();
 
     token_admin_client.mint(&proposer, &50);
@@ -1131,7 +1131,7 @@ fn test_cross_contract_auth_scope_minimal() {
 #[test]
 fn test_edge_case_vote_weight_overflow() {
     let env = Env::default();
-    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let (client, token_admin_client, proposer, _) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
     let token_admin_client = token_admin_client.unwrap();
 
     let voter1 = Address::generate(&env);
