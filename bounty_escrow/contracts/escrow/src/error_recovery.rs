@@ -30,21 +30,22 @@
 //   underlying operation may succeed if attempted again — a transient token
 //   transfer failure, for example. Callers following the retry pattern
 //   should retry these, subject to the bound below.
-// - **Terminal** (`ERR_CIRCUIT_OPEN`): retrying will not help. The circuit
-//   breaker has already tripped from accumulated failures across *all*
-//   callers and is rejecting every attempt until an admin resets it (see
-//   `docs/bounty_escrow/CIRCUIT_BREAKER.md`).
+// - **Terminal** (`ERR_CIRCUIT_OPEN`, `ERR_RETRIES_EXHAUSTED`): retrying
+//   will not help. `ERR_CIRCUIT_OPEN` means the circuit breaker has already
+//   tripped from accumulated failures across *all* callers and is rejecting
+//   every attempt until an admin resets it (see
+//   `docs/bounty_escrow/CIRCUIT_BREAKER.md`). `ERR_RETRIES_EXHAUSTED` means
+//   *this specific* `execute_with_retry` call used up its configured
+//   attempt budget (`RetryConfig::max_attempts`,
+//   `DEFAULT_MAX_RETRY_ATTEMPTS` by default) without success; the caller
+//   must stop, not loop again.
 //
 // `execute_with_retry` bounds the number of attempts via
-// `RetryConfig::max_attempts` (default 3). **Current limitation**: when the
-// loop exhausts `max_attempts` without success, `RetryResult::final_error`
-// is set to whatever the *last attempt's* underlying error code was (e.g.
-// `ERR_TRANSFER_FAILED`) — the same recoverable-looking code a caller would
-// see on attempt 1. There is no distinct "attempts exhausted" signal today;
-// a caller must compare `RetryResult::attempts` against the `max_attempts`
-// it passed in to detect exhaustion itself. This is the gap tracked by the
-// companion issue that adds an explicit `ERR_RETRIES_EXHAUSTED` terminal
-// code.
+// `RetryConfig::max_attempts`. When the loop exhausts that budget without
+// success, `RetryResult::final_error` is set to `ERR_RETRIES_EXHAUSTED` —
+// distinct from the recoverable code the underlying operation was actually
+// failing with — so a caller can match on it directly instead of comparing
+// `RetryResult::attempts` against the config it passed in.
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String};
 
@@ -145,6 +146,10 @@ pub const ERR_TRANSFER_FAILED: u32 = 1002;
 /// **Recoverable.** Insufficient contract balance at the time of the
 /// attempt — may resolve if funds arrive before a later retry.
 pub const ERR_INSUFFICIENT_BALANCE: u32 = 1003;
+/// **Terminal.** `execute_with_retry` exhausted `RetryConfig::max_attempts`
+/// without success. Distinct from the recoverable code the last attempt
+/// actually failed with — do not retry again with the same config.
+pub const ERR_RETRIES_EXHAUSTED: u32 = 1004;
 /// Operation succeeded — for logging.
 pub const ERR_NONE: u32 = 0;
 
@@ -420,7 +425,13 @@ pub fn get_error_log(env: &Env) -> soroban_sdk::Vec<ErrorEntry> {
 // Retry logic
 // ─────────────────────────────────────────────────────────
 
-/// Bounds how many attempts `execute_with_retry` makes before giving up.
+/// Default `RetryConfig::max_attempts` when not otherwise configured. A
+/// named constant so the cap is explicit and easy to audit, rather than a
+/// magic number repeated at call sites.
+pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 3;
+
+/// Bounds how many attempts `execute_with_retry` makes before giving up and
+/// returning `ERR_RETRIES_EXHAUSTED`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryConfig {
@@ -430,17 +441,20 @@ pub struct RetryConfig {
 
 impl RetryConfig {
     pub fn default() -> Self {
-        RetryConfig { max_attempts: 3 }
+        RetryConfig {
+            max_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+        }
     }
 }
 
 /// Outcome of an `execute_with_retry` call.
 ///
 /// When `succeeded` is `false`, `attempts` reports how many were actually
-/// made (bounded by the `RetryConfig::max_attempts` passed in), and
-/// `final_error` carries the error code — see the module-level docs above
-/// for why `final_error` does not yet distinguish "exhausted the attempt
-/// budget" from "failed on the most recent attempt".
+/// made (bounded by `RetryConfig::max_attempts`). `final_error` is either
+/// the terminal error that stopped the loop early (`ERR_CIRCUIT_OPEN`), or
+/// `ERR_RETRIES_EXHAUSTED` if every attempt in the budget ran and failed —
+/// never the underlying recoverable error code of the last attempt itself;
+/// that remains available via `get_error_log` if needed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryResult {
@@ -480,7 +494,6 @@ where
     F: FnMut() -> Result<(), u32>,
 {
     let mut attempts = 0u32;
-    let mut last_error = ERR_NONE;
 
     for _ in 0..config.max_attempts {
         // Check circuit before each attempt
@@ -503,16 +516,23 @@ where
                 };
             }
             Err(code) => {
-                last_error = code;
+                // The underlying (recoverable) error code is preserved in
+                // the circuit breaker's error log via record_failure, so it
+                // remains discoverable via get_error_log even though the
+                // terminal RetryResult below reports ERR_RETRIES_EXHAUSTED.
                 record_failure(env, bounty_id, operation.clone(), code);
             }
         }
     }
 
+    // Every attempt in the budget was made and none succeeded: this is a
+    // distinct terminal outcome from any single attempt's recoverable
+    // error, so callers can match on it directly instead of comparing
+    // `attempts` against the config they passed in.
     RetryResult {
         succeeded: false,
         attempts,
-        final_error: last_error,
+        final_error: ERR_RETRIES_EXHAUSTED,
     }
 }
 

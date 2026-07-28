@@ -114,6 +114,10 @@ fn circuit_breaker_retry_branches() {
     });
     assert!(!fail.succeeded);
     assert_eq!(fail.attempts, 2);
+    // Exhausting the attempt budget is a distinct terminal outcome, not the
+    // last attempt's own (recoverable-looking) error code.
+    assert_eq!(fail.final_error, error_recovery::ERR_RETRIES_EXHAUSTED);
+    assert_ne!(fail.final_error, 1u32);
 
     // Success closure -> record_success + immediate return.
     let ok = s.env.as_contract(&s.contract_id, || {
@@ -126,4 +130,66 @@ fn circuit_breaker_retry_branches() {
         )
     });
     assert!(ok.succeeded);
+}
+
+#[test]
+fn circuit_breaker_retry_exhausted_uses_default_cap_and_distinct_terminal_error() {
+    let s = Boost::new();
+    s.client.set_circuit_breaker_config(&100u32, &1u32, &5u32);
+    s.client.set_circuit_breaker_admin(&s.admin.clone());
+
+    // A high failure_threshold keeps the circuit Closed throughout, so this
+    // exercises retry-budget exhaustion specifically, not a circuit trip.
+    let config = error_recovery::RetryConfig::default();
+    assert_eq!(config.max_attempts, error_recovery::DEFAULT_MAX_RETRY_ATTEMPTS);
+
+    let result = s.env.as_contract(&s.contract_id, || {
+        error_recovery::execute_with_retry(
+            &s.env,
+            &config,
+            3u64,
+            Symbol::new(&s.env, "always_fails"),
+            || Err(error_recovery::ERR_TRANSFER_FAILED),
+        )
+    });
+
+    assert!(!result.succeeded);
+    assert_eq!(result.attempts, error_recovery::DEFAULT_MAX_RETRY_ATTEMPTS);
+    assert_eq!(result.final_error, error_recovery::ERR_RETRIES_EXHAUSTED);
+    // The distinct terminal code is never confused with the recoverable
+    // code every individual attempt actually failed with.
+    assert_ne!(result.final_error, error_recovery::ERR_TRANSFER_FAILED);
+
+    // The underlying per-attempt error remains discoverable via the error
+    // log even though the RetryResult itself now reports the terminal code.
+    let log = s.env.as_contract(&s.contract_id, || error_recovery::get_error_log(&s.env));
+    assert_eq!(log.len(), error_recovery::DEFAULT_MAX_RETRY_ATTEMPTS);
+    assert_eq!(log.get(0).unwrap().error_code, error_recovery::ERR_TRANSFER_FAILED);
+}
+
+#[test]
+fn circuit_breaker_open_short_circuits_retry_with_its_own_terminal_error() {
+    let s = Boost::new();
+    // A low failure_threshold means the circuit opens after the 1st failure,
+    // so the 2nd configured attempt never runs.
+    s.client.set_circuit_breaker_config(&1u32, &1u32, &5u32);
+    s.client.set_circuit_breaker_admin(&s.admin.clone());
+
+    let result = s.env.as_contract(&s.contract_id, || {
+        error_recovery::execute_with_retry(
+            &s.env,
+            &error_recovery::RetryConfig { max_attempts: 5 },
+            4u64,
+            Symbol::new(&s.env, "trips_breaker"),
+            || Err(error_recovery::ERR_TRANSFER_FAILED),
+        )
+    });
+
+    assert!(!result.succeeded);
+    assert_eq!(result.attempts, 1);
+    // Circuit-open is its own terminal error, distinct from exhausting the
+    // retry budget — the loop stopped early, not because it ran out of
+    // configured attempts.
+    assert_eq!(result.final_error, error_recovery::ERR_CIRCUIT_OPEN);
+    assert_ne!(result.final_error, error_recovery::ERR_RETRIES_EXHAUSTED);
 }

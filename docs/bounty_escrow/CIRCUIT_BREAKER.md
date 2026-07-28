@@ -188,13 +188,14 @@ primitives (e.g. the backend's `internal/soroban` client).
 | `ERR_TRANSFER_FAILED` (1002) | Recoverable | Transient token transfer failure; safe to retry. |
 | `ERR_INSUFFICIENT_BALANCE` (1003) | Recoverable | May resolve once funds arrive; safe to retry. |
 | `ERR_CIRCUIT_OPEN` (1001) | Terminal | The breaker has tripped from accumulated failures (from any caller); stop until an admin resets it. |
+| `ERR_RETRIES_EXHAUSTED` (1004) | Terminal | `execute_with_retry` used up its configured `max_attempts` budget without success; stop, don't retry again with the same config. |
 
 ### `execute_with_retry`
 
 ```rust
 pub fn execute_with_retry<F>(
     env: &Env,
-    config: &RetryConfig,   // { max_attempts: u32 }, default 3
+    config: &RetryConfig,   // { max_attempts: u32 }, default DEFAULT_MAX_RETRY_ATTEMPTS (3)
     bounty_id: u64,
     operation: Symbol,
     op: F,
@@ -208,13 +209,15 @@ mid-loop (from this call's own failures or any other caller's) short-circuits
 the remaining attempts with `ERR_CIRCUIT_OPEN` rather than burning the full
 `max_attempts` budget.
 
-**Current limitation**: when the loop exhausts `max_attempts` without
-success, `RetryResult.final_error` is the *last attempt's* underlying
-recoverable error code (e.g. `ERR_TRANSFER_FAILED`) — indistinguishable from
-a first-attempt failure by error code alone. A caller must compare
-`RetryResult.attempts` against the `max_attempts` it configured to detect
-exhaustion. Adding a distinct terminal `ERR_RETRIES_EXHAUSTED` code so this
-is signalled explicitly is tracked separately.
+When the loop instead exhausts `max_attempts` without success,
+`RetryResult.final_error` is set to the distinct terminal code
+`ERR_RETRIES_EXHAUSTED` — not the last attempt's underlying recoverable
+error code. A caller can match on `final_error` directly to tell "circuit
+tripped" apart from "ran out of attempts" without also comparing
+`RetryResult.attempts` against the config it passed in. The last attempt's
+actual recoverable error code (e.g. `ERR_TRANSFER_FAILED`) remains
+available via `get_error_log`, which `record_failure` populates on every
+failed attempt.
 
 ## Future Enhancements
 
