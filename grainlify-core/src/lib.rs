@@ -863,30 +863,18 @@ impl GrainlifyContract {
     /// Returns `true` when the governance proposal identified by `proposal_id`
     /// has been vetoed or cancelled and must not be executed.
     ///
-    /// The current governance module (`governance.rs`) does not yet have a
-    /// native Vetoed/Cancelled [`ProposalStatus`] variant (tracked in issue
-    /// #236).  This stub satisfies the cross-contract interface declared in
-    /// `governance_integration.rs` (`GovernanceInterface::is_vetoed`) so that
-    /// escrow contracts can call it via `GovernanceClient` without a compile
-    /// error or a panic at the cross-contract dispatch layer.
-    ///
-    /// Until a real veto mechanism is implemented on-chain, this method always
-    /// returns `false` (no proposals are ever vetoed), which is the safe
-    /// default: it allows approved proposals to proceed rather than silently
-    /// blocking all upgrades.  A follow-up task should:
-    ///
-    /// 1. Add a `Vetoed` / `Cancelled` variant to `governance::ProposalStatus`.
-    /// 2. Add a permissioned `veto_proposal(admin, proposal_id)` entrypoint.
-    /// 3. Update this stub to query the real veto flag from persistent storage.
+    /// Queries the real proposal status via `governance::GovernanceContract`:
+    /// `true` when it is `ProposalStatus::Cancelled` (set by `cancel_proposal`,
+    /// the only cancellation/veto path this module currently exposes), `false`
+    /// for every other status, including a nonexistent `proposal_id` — the
+    /// same safe default as before, but now backed by real state instead of
+    /// an unconditional stub.
     ///
     /// # Arguments
-    /// * `_proposal_id` - The governance proposal ID to check.
-    ///
-    /// # Returns
-    /// `false` (stub — veto mechanism not yet implemented).
-    pub fn is_vetoed(_env: Env, _proposal_id: u32) -> bool {
-        // TODO(#236): query real veto storage once veto mechanism is implemented.
-        false
+    /// * `proposal_id` - The governance proposal ID to check.
+    pub fn is_vetoed(env: Env, proposal_id: u32) -> bool {
+        governance::GovernanceContract::get_proposal_status(env, proposal_id)
+            == Ok(governance::ProposalStatus::Cancelled)
     }
 
     /// Initializes the contract with a single admin address.
@@ -2849,6 +2837,40 @@ mod test {
         
         // After this second upgrade, it is None again
         assert!(client.get_scheduled_upgrade().is_none());
+    }
+
+    /// is_vetoed must reflect real proposal state (Issue #386): false for a
+    /// proposal that was never cancelled, true once cancel_proposal actually
+    /// cancels it — not an unconditional stub.
+    #[test]
+    fn test_is_vetoed_reflects_real_cancellation_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        let prop_id = client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+
+        assert!(
+            !client.is_vetoed(&prop_id),
+            "a freshly created proposal is never vetoed"
+        );
+
+        env.as_contract(&contract_id, || {
+            governance::GovernanceContract::cancel_proposal(env.clone(), proposer, prop_id)
+                .unwrap();
+        });
+
+        assert!(
+            client.is_vetoed(&prop_id),
+            "a cancelled proposal must report as vetoed"
+        );
     }
 }
 
