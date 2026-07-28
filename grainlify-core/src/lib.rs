@@ -2811,5 +2811,117 @@ mod test {
         // After this second upgrade, it is None again
         assert!(client.get_scheduled_upgrade().is_none());
     }
+
+    // ============================================================
+    // health_check() wrapper tests
+    // ============================================================
+
+    /// Test that health_check returns healthy by default through the contract client.
+    /// Note: the current implementation always returns is_healthy = true regardless
+    /// of error rate. Rolling-window error-tracking semantics described in the
+    /// monitoring module doc do not exist yet — this test documents the actual
+    /// behaviour so that when those semantics are implemented, this test will
+    /// need to be updated with error-injection + time-decay assertions.
+    #[test]
+    fn test_health_check_through_client() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let status = client.health_check();
+        assert!(status.is_healthy);
+        assert!(status.total_operations > 0);
+        assert!(status.contract_version.len() > 0);
+    }
+
+    /// Test health_check returns consistent data across multiple calls
+    #[test]
+    fn test_health_check_idempotent() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let s1 = client.health_check();
+        let s2 = client.health_check();
+        assert_eq!(s1.is_healthy, s2.is_healthy);
+        assert_eq!(s1.contract_version, s2.contract_version);
+    }
+
+    // ============================================================
+    // get_performance_stats() wrapper tests
+    // ============================================================
+
+    /// Test that get_performance_stats returns zeroed stats for a function that
+    /// was never tracked (rather than panicking).
+    #[test]
+    fn test_performance_stats_untracked_function() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let stats = client.get_performance_stats(&symbol_short!("noexist"));
+        assert_eq!(stats.call_count, 0);
+        assert_eq!(stats.total_time, 0);
+        assert_eq!(stats.avg_time, 0);
+        assert_eq!(stats.last_called, 0);
+        assert_eq!(stats.function_name, symbol_short!("noexist"));
+    }
+
+    /// Test that get_performance_stats returns correct avg_time after several
+    /// emit_performance-driving operations. init_admin → tracks "init", 
+    /// set_version → tracks "set_ver". Call each once; verify stats.
+    #[test]
+    fn test_performance_stats_avg_time_computation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        // init_admin calls emit_performance("init", duration)
+        client.init_admin(&admin);
+        // set_version calls emit_performance("set_ver", duration)
+        client.set_version(&5);
+
+        let stats = client.get_performance_stats(&symbol_short!("init"));
+        assert_eq!(stats.call_count, 1);
+        // In test env, operations can complete in zero ledger time, so total_time may be 0
+        assert_eq!(stats.avg_time, if stats.call_count > 0 { stats.total_time / stats.call_count } else { 0 });
+        assert_eq!(stats.function_name, symbol_short!("init"));
+
+        let stats2 = client.get_performance_stats(&symbol_short!("set_ver"));
+        assert_eq!(stats2.call_count, 1);
+        assert_eq!(stats2.avg_time, if stats2.call_count > 0 { stats2.total_time / stats2.call_count } else { 0 });
+    }
+
+    /// Test average time computation with multiple calls — total / count integer division
+    #[test]
+    fn test_performance_stats_avg_with_multiple_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        // Call set_version multiple times — each triggers emit_performance("set_ver", ...)
+        client.init_admin(&admin);
+        client.set_version(&5);
+        client.set_version(&6);
+        client.set_version(&7);
+
+        let stats = client.get_performance_stats(&symbol_short!("set_ver"));
+        assert_eq!(stats.call_count, 3, "three set_version calls");
+        // avg_time should be integer division: total / 3
+        assert_eq!(stats.avg_time, if stats.call_count > 0 { stats.total_time / stats.call_count } else { 0 });
+    }
 }
 
