@@ -644,3 +644,57 @@ fn test_veto_after_execution_does_not_retroactively_revoke_approval() {
         assert!(vetoed, "vetoed must be true to block the late-veto scenario");
     });
 }
+
+/// Issue #386: grainlify-core's is_vetoed used to be a hardcoded stub that
+/// always returned false. This exercises check_proposal_vetoed against a
+/// *real* GrainlifyContract (not the mock above) via an actual
+/// cross-contract call, proving a non-cancelled proposal correctly reports
+/// as not-vetoed through the real implementation.
+///
+/// Note: proving the true (cancelled) branch against the real contract isn't
+/// currently possible from outside grainlify-core — cancel_proposal has no
+/// #[contractimpl] wrapper on GrainlifyContract (only the internal
+/// governance module sets ProposalStatus::Cancelled), so that branch remains
+/// covered by the mock-based tests above.
+#[test]
+fn test_check_proposal_vetoed_false_against_real_grainlify_core_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let grainlify_id = env.register_contract(None, grainlify_core::GrainlifyContract);
+    let grainlify = grainlify_core::GrainlifyContractClient::new(&env, &grainlify_id);
+
+    let proposer = Address::generate(&env);
+    let config = grainlify_core::GovernanceConfig {
+        voting_period: 100,
+        execution_delay: 0,
+        quorum_percentage: 1000,
+        approval_threshold: 5000,
+        min_proposal_stake: 0,
+        voting_scheme: grainlify_core::VotingScheme::OnePersonOneVote,
+        governance_token: Address::generate(&env),
+        one_person_total_voters: 1,
+        token_total_voting_power: 100,
+        snapshot_ledger: None,
+    };
+    grainlify.init_governance(&admin, &config);
+    let prop_id = grainlify.create_proposal(
+        &proposer,
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &soroban_sdk::symbol_short!("p1"),
+    );
+
+    client.set_governance_contract(&grainlify_id);
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !governance_integration::check_proposal_vetoed(&env, prop_id),
+            "a freshly created, never-cancelled proposal must not be reported as vetoed"
+        );
+    });
+}

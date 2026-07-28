@@ -1,7 +1,8 @@
 #![cfg(test)]
-use crate::{BountyEscrowContract, BountyEscrowContractClient, Error as ContractError};
+use crate::{events, BountyEscrowContract, BountyEscrowContractClient, Error as ContractError};
 use soroban_sdk::testutils::Events;
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger},
     token, vec, Address, Env, Map, Symbol, TryFromVal, Val,
 };
@@ -57,6 +58,29 @@ fn assert_current_call_has_versioned_contract_event(env: &Env, contract_id: &Add
         }
     }
     assert!(found);
+}
+
+/// Locate the first event published by `contract_id` whose first topic
+/// equals `topic0`, returning its topics and raw payload for field-by-field
+/// assertions. Panics if no matching event was emitted.
+fn find_contract_event(
+    env: &Env,
+    contract_id: &Address,
+    topic0: Symbol,
+) -> (soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    for i in 0..events.len() {
+        let (contract, topics, data) = events.get(i).unwrap();
+        if contract != *contract_id || topics.len() == 0 {
+            continue;
+        }
+        if let Ok(sym) = Symbol::try_from_val(env, &topics.get(0).unwrap()) {
+            if sym == topic0 {
+                return (topics, data);
+            }
+        }
+    }
+    panic!("no event with the expected topic was emitted");
 }
 
 #[test]
@@ -1767,4 +1791,264 @@ fn test_emit_bounty_expired_topic_and_payload() {
         found,
         "no b_exp event with the expected topic was published"
     );
+}
+
+// ---------------------------------------------------------------------
+// Payload-level coverage for emit_funds_released, emit_funds_refunded and
+// emit_batch_funds_locked (bounty_escrow/src/events.rs).
+// ---------------------------------------------------------------------
+
+/// release_funds() must emit FundsReleased with a `("f_rel", bounty_id)`
+/// topic pair and a payload whose amount/recipient match the full locked
+/// amount and the release_funds() call arguments.
+#[test]
+fn test_release_funds_emits_funds_released_event_full_amount() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let bounty_id = 42u64;
+    let amount = 7_500i128;
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    client.release_funds(&bounty_id, &contributor);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_rel"));
+    assert_eq!(topics.len(), 2);
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsReleased =
+        events::FundsReleased::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.version, events::EVENT_VERSION_V2);
+    assert_eq!(payload.bounty_id, bounty_id);
+    assert_eq!(payload.amount, amount);
+    assert_eq!(payload.recipient, contributor);
+    assert_eq!(payload.timestamp, env.ledger().timestamp());
+}
+
+/// Edge case: partial_release() also emits FundsReleased through the same
+/// emitter. A partial payout must be recorded as the payout amount, not the
+/// bounty's full locked amount.
+#[test]
+fn test_partial_release_emits_funds_released_event_with_partial_amount() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let bounty_id = 43u64;
+    let amount = 10_000i128;
+    let payout_amount = 4_000i128;
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    client.partial_release(&bounty_id, &contributor, &payout_amount);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_rel"));
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsReleased =
+        events::FundsReleased::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.amount, payout_amount);
+    assert_ne!(payload.amount, amount);
+    assert_eq!(payload.recipient, contributor);
+
+    let escrow = client.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.remaining_amount, amount - payout_amount);
+}
+
+/// refund() must emit FundsRefunded with a `("f_ref", bounty_id)` topic
+/// pair and a payload whose amount/refund_to match a standard post-deadline
+/// full refund back to the original depositor.
+#[test]
+fn test_refund_emits_funds_refunded_event_full_amount() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let bounty_id = 44u64;
+    let amount = 3_000i128;
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    env.ledger().set_timestamp(deadline + 1);
+    client.refund(&bounty_id);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_ref"));
+    assert_eq!(topics.len(), 2);
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsRefunded =
+        events::FundsRefunded::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.version, events::EVENT_VERSION_V2);
+    assert_eq!(payload.bounty_id, bounty_id);
+    assert_eq!(payload.amount, amount);
+    assert_eq!(payload.refund_to, depositor);
+}
+
+/// Edge case: an admin-approved partial refund to a custom recipient must
+/// be recorded with the approved partial amount, not the full locked
+/// amount, and refund_to must be the approved recipient rather than the
+/// original depositor.
+#[test]
+fn test_refund_emits_funds_refunded_event_partial_amount_custom_recipient() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let refund_recipient = Address::generate(&env);
+    let bounty_id = 45u64;
+    let amount = 10_000i128;
+    let partial_amount = 3_500i128;
+    let deadline = env.ledger().timestamp() + 1000;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    client.approve_refund(
+        &bounty_id,
+        &partial_amount,
+        &refund_recipient,
+        &crate::RefundMode::Partial,
+    );
+    client.refund(&bounty_id);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_ref"));
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsRefunded =
+        events::FundsRefunded::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.amount, partial_amount);
+    assert_ne!(payload.amount, amount);
+    assert_eq!(payload.refund_to, refund_recipient);
+    assert_ne!(payload.refund_to, depositor);
+
+    let escrow = client.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, crate::EscrowStatus::PartiallyRefunded);
+    assert_eq!(escrow.remaining_amount, amount - partial_amount);
+}
+
+/// batch_lock_funds() must emit a single BatchFundsLocked summarising the
+/// whole batch. For a single-item batch, count must be 1 and total_amount
+/// must equal that one item's amount.
+#[test]
+fn test_batch_lock_funds_emits_batch_event_single_item() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &5_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("b_lock"));
+    // BatchFundsLocked carries no per-bounty topic, only the event symbol.
+    assert_eq!(topics.len(), 1);
+
+    let payload: events::BatchFundsLocked =
+        events::BatchFundsLocked::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.version, events::EVENT_VERSION_V2);
+    assert_eq!(payload.count, 1);
+    assert_eq!(payload.total_amount, 5_000);
+}
+
+/// Edge case: for a multi-item batch with non-uniform amounts, the emitted
+/// count must equal the batch size and total_amount must equal the exact
+/// sum of the individual item amounts (guards against accumulation drift,
+/// ordering bugs, or truncation in the aggregation logic).
+#[test]
+fn test_batch_lock_funds_emits_batch_event_aggregated_multi_item() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+
+    let amounts: [i128; 4] = [1_000, 2_500, 3_500, 5_000];
+    let expected_total: i128 = amounts.iter().sum();
+    let expected_count = amounts.len() as u32;
+    token_admin_client.mint(&depositor, &expected_total);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 10,
+            depositor: depositor.clone(),
+            amount: amounts[0],
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 11,
+            depositor: depositor.clone(),
+            amount: amounts[1],
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 12,
+            depositor: depositor.clone(),
+            amount: amounts[2],
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 13,
+            depositor: depositor.clone(),
+            amount: amounts[3],
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+
+    let (_topics, data) = find_contract_event(&env, &contract_id, symbol_short!("b_lock"));
+    let payload: events::BatchFundsLocked =
+        events::BatchFundsLocked::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.count, expected_count);
+    assert_eq!(payload.total_amount, expected_total);
 }
