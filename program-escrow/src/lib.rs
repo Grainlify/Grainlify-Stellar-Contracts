@@ -543,6 +543,8 @@ pub enum BatchError {
 pub enum Error {
     /// Governance contract version is below the minimum required for admin operations.
     GovernanceVersionTooLow = 4,
+    /// large-payout threshold_bps exceeds 10_000 (100%).
+    InvalidThresholdBps = 5,
 }
 
 #[contracttype]
@@ -2866,14 +2868,19 @@ impl ProgramEscrowContract {
 
     /// Update the large-payout alert threshold (admin only).
     /// `threshold_bps` is expressed in basis points (e.g. 1000 = 10%, 2500 = 25%).
-    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) {
+    /// Returns `Err(Error::InvalidThresholdBps)` if `threshold_bps` exceeds 10_000 (100%).
+    pub fn set_large_payout_threshold(env: Env, threshold_bps: u32) -> Result<(), Error> {
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("Admin not set");
         admin.require_auth();
+        if threshold_bps > 10_000 {
+            return Err(Error::InvalidThresholdBps);
+        }
         monitoring::set_large_payout_threshold_bps(&env, threshold_bps);
+        Ok(())
     }
 }
 

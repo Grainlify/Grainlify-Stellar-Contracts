@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::{ProgramEscrowContract, ProgramEscrowContractClient};
+use crate::{Error, ProgramEscrowContract, ProgramEscrowContractClient};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
@@ -96,6 +96,52 @@ fn test_admin_can_update_large_payout_threshold() {
     assert_eq!(client.get_large_payout_threshold(), 2000);
 }
 
+#[test]
+fn test_set_large_payout_threshold_accepts_boundary_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+    client.try_set_large_payout_threshold(&10_000).unwrap().unwrap();
+    assert_eq!(client.get_large_payout_threshold(), 10_000);
+}
+#[test]
+fn test_set_large_payout_threshold_accepts_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+    client.try_set_large_payout_threshold(&0).unwrap().unwrap();
+    assert_eq!(client.get_large_payout_threshold(), 0);
+}
+#[test]
+fn test_set_large_payout_threshold_rejects_above_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+    let result = client.try_set_large_payout_threshold(&10_001);
+    assert_eq!(result, Err(Ok(Error::InvalidThresholdBps)));
+    assert_eq!(client.get_large_payout_threshold(), 1000);
+}
+#[test]
+fn test_set_large_payout_threshold_rejects_u32_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+    let result = client.try_set_large_payout_threshold(&u32::MAX);
+    assert_eq!(result, Err(Ok(Error::InvalidThresholdBps)));
+    assert_eq!(client.get_large_payout_threshold(), 1000);
+}
 #[test]
 #[should_panic]
 fn test_non_admin_cannot_update_large_payout_threshold() {
