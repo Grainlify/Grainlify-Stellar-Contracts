@@ -98,7 +98,7 @@
 //! | `MultiSig::nonce(env)` | Returns the next expected execution nonce (replay protection). |
 //! | `MultiSig::execute(env, proposal_id, expected_action, expected_nonce, closure)` | Atomically verifies threshold, payload, and nonce, runs the provided closure (the WASM update), marks the proposal executed, and increments the nonce. |
 //! | `MultiSig::get_action(env, proposal_id)` | Returns the `ProposalAction` bound to a proposal. |
-//! | `MultiSig::remove_signer(env, caller, signer_to_remove)` | Removes a signer; rejected if `(signer_count - 1) < threshold` to prevent permanent lockout. |
+//! | `MultiSig::remove_signer(env, caller, signer_to_remove)` | Removes a signer; `caller` must itself be a current signer (self-governing set, same rule as `propose`/`approve`), and the removal is rejected if `(signer_count - 1) < threshold` to prevent permanent lockout. |
 //!
 //! ### Key properties
 //!
@@ -947,7 +947,9 @@ impl GrainlifyContract {
     ///
     /// # Arguments
     /// * `env` - The contract environment
-    /// * `caller` - Address authorising the removal (must sign the transaction)
+    /// * `caller` - Address authorising the removal. Must both sign the
+    ///   transaction *and* be a current member of the signer set — this is a
+    ///   self-governing multisig, not admin-gated.
     /// * `signer_to_remove` - The signer address to remove from the set
     pub fn remove_signer(env: Env, caller: Address, signer_to_remove: Address) {
         MultiSig::remove_signer(&env, caller, signer_to_remove);
