@@ -6,6 +6,8 @@ mod error_recovery;
 
 #[cfg(test)]
 mod test_rbac;
+#[cfg(test)]
+mod test_dispute_events;
 mod test_admin_authz;
 mod test_coverage_boost;
 mod test_coverage_boost_small;
@@ -15,9 +17,9 @@ mod test_serialization;
 use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
     emit_bounty_initialized, emit_funds_locked, emit_funds_refunded, emit_funds_released,
-    emit_claim_created, emit_claim_executed, emit_claim_cancelled,
+    emit_claim_created, emit_claim_executed, emit_claim_cancelled, emit_dispute_resolved,
     BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized, BountyExpired,
-    ClaimCancelled, ClaimCreated, ClaimExecuted,
+    ClaimCancelled, ClaimCreated, ClaimExecuted, DisputeOutcome, DisputeResolved,
     FundsLocked, FundsRefunded, FundsReleased, EVENT_VERSION_V2,
 };
 use analytics::{
@@ -1699,6 +1701,18 @@ impl BountyEscrowContract {
                 claimed_at: now,
             },
         );
+        emit_dispute_resolved(
+            &env,
+            DisputeResolved {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                outcome: DisputeOutcome::Claimed,
+                resolver: claim.recipient.clone(),
+                recipient: claim.recipient.clone(),
+                amount: claim_amount,
+                resolved_at: now,
+            },
+        );
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
         Ok(())
     }
@@ -1744,11 +1758,27 @@ impl BountyEscrowContract {
             ClaimCancelled {
                 version: EVENT_VERSION_V2,
                 bounty_id,
-                recipient: claim.recipient,
+                recipient: claim.recipient.clone(),
                 amount: claim.amount,
                 cancelled_at,
-                cancelled_by: admin,
-                reason,
+                cancelled_by: admin.clone(),
+                reason: reason.clone(),
+            },
+        );
+        emit_dispute_resolved(
+            &env,
+            DisputeResolved {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                outcome: if reason == symbol_short!("expired") {
+                    DisputeOutcome::Expired
+                } else {
+                    DisputeOutcome::Cancelled
+                },
+                resolver: admin,
+                recipient: claim.recipient,
+                amount: claim.amount,
+                resolved_at: cancelled_at,
             },
         );
         Ok(())
