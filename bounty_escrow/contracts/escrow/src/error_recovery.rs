@@ -20,6 +20,31 @@
 // ## Storage Keys
 // All circuit breaker state is stored in persistent storage keyed by
 // `CircuitBreakerKey::*`.
+//
+// ## Retry Semantics
+//
+// This module classifies every error code as either **recoverable** or
+// **terminal**:
+//
+// - **Recoverable** (`ERR_TRANSFER_FAILED`, `ERR_INSUFFICIENT_BALANCE`): the
+//   underlying operation may succeed if attempted again — a transient token
+//   transfer failure, for example. Callers following the retry pattern
+//   should retry these, subject to the bound below.
+// - **Terminal** (`ERR_CIRCUIT_OPEN`): retrying will not help. The circuit
+//   breaker has already tripped from accumulated failures across *all*
+//   callers and is rejecting every attempt until an admin resets it (see
+//   `docs/bounty_escrow/CIRCUIT_BREAKER.md`).
+//
+// `execute_with_retry` bounds the number of attempts via
+// `RetryConfig::max_attempts` (default 3). **Current limitation**: when the
+// loop exhausts `max_attempts` without success, `RetryResult::final_error`
+// is set to whatever the *last attempt's* underlying error code was (e.g.
+// `ERR_TRANSFER_FAILED`) — the same recoverable-looking code a caller would
+// see on attempt 1. There is no distinct "attempts exhausted" signal today;
+// a caller must compare `RetryResult::attempts` against the `max_attempts`
+// it passed in to detect exhaustion itself. This is the gap tracked by the
+// companion issue that adds an explicit `ERR_RETRIES_EXHAUSTED` terminal
+// code.
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String};
 
@@ -111,11 +136,14 @@ pub struct CircuitBreakerStatus {
 // Error codes (u32 — no_std compatible)
 // ─────────────────────────────────────────────────────────
 
-/// Circuit is open; operation rejected without attempting.
+/// **Terminal.** Circuit is open; operation rejected without attempting.
+/// Do not retry until the registered circuit breaker admin resets it.
 pub const ERR_CIRCUIT_OPEN: u32 = 1001;
-/// Token transfer failed (transient).
+/// **Recoverable.** Token transfer failed (transient) — safe to retry, up
+/// to the caller's own retry budget.
 pub const ERR_TRANSFER_FAILED: u32 = 1002;
-/// Insufficient contract balance.
+/// **Recoverable.** Insufficient contract balance at the time of the
+/// attempt — may resolve if funds arrive before a later retry.
 pub const ERR_INSUFFICIENT_BALANCE: u32 = 1003;
 /// Operation succeeded — for logging.
 pub const ERR_NONE: u32 = 0;
@@ -392,7 +420,7 @@ pub fn get_error_log(env: &Env) -> soroban_sdk::Vec<ErrorEntry> {
 // Retry logic
 // ─────────────────────────────────────────────────────────
 
-/// Retry configuration.
+/// Bounds how many attempts `execute_with_retry` makes before giving up.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryConfig {
@@ -406,7 +434,13 @@ impl RetryConfig {
     }
 }
 
-/// Result of a retry operation.
+/// Outcome of an `execute_with_retry` call.
+///
+/// When `succeeded` is `false`, `attempts` reports how many were actually
+/// made (bounded by the `RetryConfig::max_attempts` passed in), and
+/// `final_error` carries the error code — see the module-level docs above
+/// for why `final_error` does not yet distinguish "exhausted the attempt
+/// budget" from "failed on the most recent attempt".
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryResult {
@@ -418,7 +452,13 @@ pub struct RetryResult {
 /// Execute a fallible operation with retry, integrated with the circuit breaker.
 ///
 /// `op` is a closure that returns `Ok(())` on success or `Err(error_code)` on
-/// transient failure. A non-zero error triggers a `record_failure` call.
+/// transient (recoverable) failure. A non-zero error triggers a
+/// `record_failure` call, which counts toward the circuit breaker's
+/// `failure_threshold` in addition to this call's own `max_attempts` bound —
+/// so a caller can still see `ERR_CIRCUIT_OPEN` cut a retry loop short before
+/// `max_attempts` is reached, if enough failures (from this loop or any
+/// other caller) have already tripped the breaker. Each attempt is preceded
+/// by a `check_and_allow` call for exactly this reason.
 ///
 /// Returns a `RetryResult` describing the outcome.
 ///

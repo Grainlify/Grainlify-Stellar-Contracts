@@ -171,6 +171,51 @@ The circuit breaker emits events for state changes:
 - `cb_close` - When circuit closes
 - `cb_reject` - When operation is rejected due to open circuit
 
+## Retry Logic
+
+`error_recovery.rs` also defines `execute_with_retry`, a bounded-retry helper
+that integrates with the circuit breaker above. It is not currently wired
+into any contract entrypoint — production code (`lib.rs`) calls
+`check_and_allow` / `record_success` / `record_failure` directly — so today
+it's primarily useful for test scenarios, simulation, and as a reference
+implementation for integrators building their own retry loop against those
+primitives (e.g. the backend's `internal/soroban` client).
+
+### Error classification
+
+| Error | Classification | Meaning |
+| --- | --- | --- |
+| `ERR_TRANSFER_FAILED` (1002) | Recoverable | Transient token transfer failure; safe to retry. |
+| `ERR_INSUFFICIENT_BALANCE` (1003) | Recoverable | May resolve once funds arrive; safe to retry. |
+| `ERR_CIRCUIT_OPEN` (1001) | Terminal | The breaker has tripped from accumulated failures (from any caller); stop until an admin resets it. |
+
+### `execute_with_retry`
+
+```rust
+pub fn execute_with_retry<F>(
+    env: &Env,
+    config: &RetryConfig,   // { max_attempts: u32 }, default 3
+    bounty_id: u64,
+    operation: Symbol,
+    op: F,
+) -> RetryResult             // { succeeded: bool, attempts: u32, final_error: u32 }
+where
+    F: FnMut() -> Result<(), u32>;
+```
+
+Before each attempt it calls `check_and_allow`, so a circuit that opens
+mid-loop (from this call's own failures or any other caller's) short-circuits
+the remaining attempts with `ERR_CIRCUIT_OPEN` rather than burning the full
+`max_attempts` budget.
+
+**Current limitation**: when the loop exhausts `max_attempts` without
+success, `RetryResult.final_error` is the *last attempt's* underlying
+recoverable error code (e.g. `ERR_TRANSFER_FAILED`) — indistinguishable from
+a first-attempt failure by error code alone. A caller must compare
+`RetryResult.attempts` against the `max_attempts` it configured to detect
+exhaustion. Adding a distinct terminal `ERR_RETRIES_EXHAUSTED` code so this
+is signalled explicitly is tracked separately.
+
 ## Future Enhancements
 
 Potential improvements could include:
