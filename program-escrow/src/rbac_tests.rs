@@ -32,7 +32,14 @@ impl<'a> RbacSetup<'a> {
 
         let program_id = String::from_str(&env, "RBAC-Test");
 
-        // Initialize contract with admin
+        // Initialize contract with admin.
+        // As of #491 `initialize_contract` requires the incoming admin's own
+        // auth, so the bootstrap is authorized here and the mock is cleared
+        // right after with `mock_auths(&[])`. The negative tests below
+        // (`test_random_cannot_pause`, `testadmin_cannot_trigger_releases`)
+        // rely on the env being unauthenticated; leaving `mock_all_auths()`
+        // active would make every `require_auth()` succeed and void them.
+        env.mock_all_auths();
         client.initialize_contract(&admin);
 
         // Initialize program with operator
@@ -42,6 +49,8 @@ impl<'a> RbacSetup<'a> {
         // Initialize circuit breaker with pauser
         // caller is None for first setting
         client.set_circuitadmin(&pauser, &None);
+
+        env.mock_auths(&[]);
 
         Self {
             env,

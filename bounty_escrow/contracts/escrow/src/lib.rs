@@ -7,6 +7,8 @@ mod error_recovery;
 #[cfg(test)]
 mod test_rbac;
 mod test_admin_authz;
+#[cfg(test)]
+mod test_admin_bootstrap;
 mod test_coverage_boost;
 mod test_coverage_boost_small;
 mod test_coverage_comprehensive;
@@ -767,10 +769,28 @@ impl BountyEscrowContract {
     // ==================== END INCREMENTAL AGGREGATE COUNTERS ====================
 
     /// Initialize the contract with the admin address and the token address (XLM).
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from `admin` — the address being installed as
+    /// the permanent contract admin must authorize its own installation. The
+    /// check runs *after* the already-initialized guard so a second call still
+    /// reports `AlreadyInitialized` rather than an authorization failure.
+    ///
+    /// Note this does not fully close the deploy-then-initialize race: an
+    /// attacker who front-runs the legitimate deployer can still self-authorize
+    /// a bootstrap call naming an address they control. It raises the bar so a
+    /// front-runner can no longer install an arbitrary third-party address, and
+    /// it is the mitigation available without deploy-time (constructor)
+    /// initialization. See `docs/DEPLOYMENT_RUNBOOK.md` for the operational
+    /// guidance that covers the remaining window.
+    ///
+    /// # Errors
+    /// `AlreadyInitialized` if an admin has already been set.
     pub fn init(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
 

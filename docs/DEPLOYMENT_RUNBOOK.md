@@ -82,6 +82,55 @@ Before a live deployment, confirm the exact `.wasm` path and record the commit S
 
 ## Deploy and initialize
 
+> ### ⚠️ Always deploy and initialize in one invocation
+>
+> **Do not deploy first and initialize as a separate step.** The admin
+> bootstrap entrypoints — `bounty_escrow::init`, `program-escrow::initialize_contract`
+> and `program-escrow::setadmin` — are guarded only by "has this already been
+> called". Between the deploy transaction and a later initialization
+> transaction there is a window in which **any observer of the public network
+> can front-run you and claim the admin role permanently**.
+>
+> Each contract requires the incoming admin address to authorize its own
+> installation, so an attacker cannot install an address *you* control. That
+> raises the bar but **does not close the race**: an attacker who names an
+> address *they* control and signs for it still wins.
+>
+> Losing the race is effectively unrecoverable:
+>
+> | Contract | Recovery |
+> | --- | --- |
+> | `bounty_escrow` | **None.** `init` is the only writer of the admin key and there is no rotation entrypoint. |
+> | `program-escrow` | Only `propose_admin` → `accept_admin`, which the **current** admin must initiate. If an attacker holds it, they must cooperate. |
+>
+> The admin gates pausing, fee configuration, rate limits, whitelists and
+> governance linkage — and in `bounty_escrow`, the token address the entire
+> contract's accounting is denominated in.
+>
+> **Do this:**
+>
+> ```bash
+> ./scripts/deploy.sh <wasm_file> -n <network> -N <name> -- --admin G... --token C...
+> ```
+>
+> **Not this:**
+>
+> ```bash
+> ./scripts/deploy.sh <wasm_file>          # deployed, admin unclaimed
+> stellar contract invoke --id <id> -- init --admin G...   # racing an attacker
+> ```
+>
+> If a contract does end up deployed but uninitialized, treat it as
+> compromised until proven otherwise: initialize immediately, then **confirm
+> the stored admin is yours** (`getadmin` on `program-escrow`,
+> `get_admin_audit_view` on `bounty_escrow`) **before funding it**. If it is
+> not yours, abandon the contract and redeploy — there is no way to evict an
+> illegitimate admin.
+>
+> A permanent fix requires deploy-time initialization (constructor arguments
+> passed at deploy rather than a separate `contract invoke -- init`), which is
+> not available on the pinned `soroban-sdk 21.0.0`. Tracked in issue #491.
+
 Preferred script:
 
 ```bash
@@ -133,6 +182,13 @@ What the script does:
 8. Appends the deployment to the configured registry.
 
 If init fails after deploy, the contract id is still printed and the deployment may already be in the registry. Record the failure, verify the deployed contract manually, and either run the correct `init` invocation manually or decide whether a fresh deploy is required.
+
+**This is exactly the race window described above.** From the moment the deploy
+succeeds until an initialization transaction lands, the admin role is unclaimed
+and an attacker can take it. Re-run `init` immediately, then verify the stored
+admin is the address you intended before funding the contract. Because the
+initialization is a separate transaction here, a fresh deploy is the safer
+choice whenever the contract has not yet been funded.
 
 ## Verify a deployment
 
@@ -388,6 +444,8 @@ Before any mainnet deploy, upgrade, or rollback:
 - Confirm `SOROBAN_NETWORK_PASSPHRASE` is `Public Global Stellar Network ; September 2015`.
 - Confirm `DEPLOYER_IDENTITY` is the mainnet identity and has enough XLM.
 - Confirm admin addresses, token addresses, oracle addresses, and fee values.
+- Confirm the init arguments are passed in the **same** `deploy.sh` invocation. Never deploy to mainnet and initialize as a separate step — see the race warning under "Deploy and initialize".
+- Immediately after deploy, confirm the stored admin is yours (`getadmin` / `get_admin_audit_view`) **before funding the contract**.
 - Back up existing registry files.
 - Capture the old WASM hash before upgrade.
 - Confirm rollback hash availability and whether the previous WASM is installed on network.
@@ -420,10 +478,11 @@ Do not use `--force` on mainnet unless an incident commander explicitly approves
 
 1. Build: `cargo build --target wasm32-unknown-unknown --release`
 2. Dry-run deploy: `./scripts/deploy.sh <wasm> -n <network> --dry-run`
-3. Deploy and optionally init: `./scripts/deploy.sh <wasm> -n <network> -N <name> -- [init args]`
-4. Verify: `./scripts/verify-deployment.sh <contract_id> -n <network>`
-5. Save registry files and deployment output.
-6. Dry-run upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> --dry-run`
-7. Upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> -s <admin_identity>`
-8. Verify again with `verify-deployment.sh`.
-9. If rollback is needed, find `old_wasm_hash`, run `rollback.sh --dry-run`, then execute rollback only after confirming state compatibility risk.
+3. Deploy **and init in the same invocation**: `./scripts/deploy.sh <wasm> -n <network> -N <name> -- <init args>` — do not split these into two transactions (see the race warning under "Deploy and initialize").
+4. Confirm the stored admin is the address you intended, before funding: `getadmin` (`program-escrow`) or `get_admin_audit_view` (`bounty_escrow`).
+5. Verify: `./scripts/verify-deployment.sh <contract_id> -n <network>`
+6. Save registry files and deployment output.
+7. Dry-run upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> --dry-run`
+8. Upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> -s <admin_identity>`
+9. Verify again with `verify-deployment.sh`.
+10. If rollback is needed, find `old_wasm_hash`, run `rollback.sh --dry-run`, then execute rollback only after confirming state compatibility risk.
