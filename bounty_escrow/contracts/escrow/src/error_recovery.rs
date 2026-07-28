@@ -20,6 +20,32 @@
 // ## Storage Keys
 // All circuit breaker state is stored in persistent storage keyed by
 // `CircuitBreakerKey::*`.
+//
+// ## Retry Semantics
+//
+// This module classifies every error code as either **recoverable** or
+// **terminal**:
+//
+// - **Recoverable** (`ERR_TRANSFER_FAILED`, `ERR_INSUFFICIENT_BALANCE`): the
+//   underlying operation may succeed if attempted again — a transient token
+//   transfer failure, for example. Callers following the retry pattern
+//   should retry these, subject to the bound below.
+// - **Terminal** (`ERR_CIRCUIT_OPEN`, `ERR_RETRIES_EXHAUSTED`): retrying
+//   will not help. `ERR_CIRCUIT_OPEN` means the circuit breaker has already
+//   tripped from accumulated failures across *all* callers and is rejecting
+//   every attempt until an admin resets it (see
+//   `docs/bounty_escrow/CIRCUIT_BREAKER.md`). `ERR_RETRIES_EXHAUSTED` means
+//   *this specific* `execute_with_retry` call used up its configured
+//   attempt budget (`RetryConfig::max_attempts`,
+//   `DEFAULT_MAX_RETRY_ATTEMPTS` by default) without success; the caller
+//   must stop, not loop again.
+//
+// `execute_with_retry` bounds the number of attempts via
+// `RetryConfig::max_attempts`. When the loop exhausts that budget without
+// success, `RetryResult::final_error` is set to `ERR_RETRIES_EXHAUSTED` —
+// distinct from the recoverable code the underlying operation was actually
+// failing with — so a caller can match on it directly instead of comparing
+// `RetryResult::attempts` against the config it passed in.
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String};
 
@@ -111,12 +137,19 @@ pub struct CircuitBreakerStatus {
 // Error codes (u32 — no_std compatible)
 // ─────────────────────────────────────────────────────────
 
-/// Circuit is open; operation rejected without attempting.
+/// **Terminal.** Circuit is open; operation rejected without attempting.
+/// Do not retry until the registered circuit breaker admin resets it.
 pub const ERR_CIRCUIT_OPEN: u32 = 1001;
-/// Token transfer failed (transient).
+/// **Recoverable.** Token transfer failed (transient) — safe to retry, up
+/// to the caller's own retry budget.
 pub const ERR_TRANSFER_FAILED: u32 = 1002;
-/// Insufficient contract balance.
+/// **Recoverable.** Insufficient contract balance at the time of the
+/// attempt — may resolve if funds arrive before a later retry.
 pub const ERR_INSUFFICIENT_BALANCE: u32 = 1003;
+/// **Terminal.** `execute_with_retry` exhausted `RetryConfig::max_attempts`
+/// without success. Distinct from the recoverable code the last attempt
+/// actually failed with — do not retry again with the same config.
+pub const ERR_RETRIES_EXHAUSTED: u32 = 1004;
 /// Operation succeeded — for logging.
 pub const ERR_NONE: u32 = 0;
 
@@ -392,7 +425,13 @@ pub fn get_error_log(env: &Env) -> soroban_sdk::Vec<ErrorEntry> {
 // Retry logic
 // ─────────────────────────────────────────────────────────
 
-/// Retry configuration.
+/// Default `RetryConfig::max_attempts` when not otherwise configured. A
+/// named constant so the cap is explicit and easy to audit, rather than a
+/// magic number repeated at call sites.
+pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 3;
+
+/// Bounds how many attempts `execute_with_retry` makes before giving up and
+/// returning `ERR_RETRIES_EXHAUSTED`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryConfig {
@@ -402,11 +441,20 @@ pub struct RetryConfig {
 
 impl RetryConfig {
     pub fn default() -> Self {
-        RetryConfig { max_attempts: 3 }
+        RetryConfig {
+            max_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+        }
     }
 }
 
-/// Result of a retry operation.
+/// Outcome of an `execute_with_retry` call.
+///
+/// When `succeeded` is `false`, `attempts` reports how many were actually
+/// made (bounded by `RetryConfig::max_attempts`). `final_error` is either
+/// the terminal error that stopped the loop early (`ERR_CIRCUIT_OPEN`), or
+/// `ERR_RETRIES_EXHAUSTED` if every attempt in the budget ran and failed —
+/// never the underlying recoverable error code of the last attempt itself;
+/// that remains available via `get_error_log` if needed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryResult {
@@ -418,7 +466,13 @@ pub struct RetryResult {
 /// Execute a fallible operation with retry, integrated with the circuit breaker.
 ///
 /// `op` is a closure that returns `Ok(())` on success or `Err(error_code)` on
-/// transient failure. A non-zero error triggers a `record_failure` call.
+/// transient (recoverable) failure. A non-zero error triggers a
+/// `record_failure` call, which counts toward the circuit breaker's
+/// `failure_threshold` in addition to this call's own `max_attempts` bound —
+/// so a caller can still see `ERR_CIRCUIT_OPEN` cut a retry loop short before
+/// `max_attempts` is reached, if enough failures (from this loop or any
+/// other caller) have already tripped the breaker. Each attempt is preceded
+/// by a `check_and_allow` call for exactly this reason.
 ///
 /// Returns a `RetryResult` describing the outcome.
 ///
@@ -440,7 +494,6 @@ where
     F: FnMut() -> Result<(), u32>,
 {
     let mut attempts = 0u32;
-    let mut last_error = ERR_NONE;
 
     for _ in 0..config.max_attempts {
         // Check circuit before each attempt
@@ -463,16 +516,23 @@ where
                 };
             }
             Err(code) => {
-                last_error = code;
+                // The underlying (recoverable) error code is preserved in
+                // the circuit breaker's error log via record_failure, so it
+                // remains discoverable via get_error_log even though the
+                // terminal RetryResult below reports ERR_RETRIES_EXHAUSTED.
                 record_failure(env, bounty_id, operation.clone(), code);
             }
         }
     }
 
+    // Every attempt in the budget was made and none succeeded: this is a
+    // distinct terminal outcome from any single attempt's recoverable
+    // error, so callers can match on it directly instead of comparing
+    // `attempts` against the config they passed in.
     RetryResult {
         succeeded: false,
         attempts,
-        final_error: last_error,
+        final_error: ERR_RETRIES_EXHAUSTED,
     }
 }
 
