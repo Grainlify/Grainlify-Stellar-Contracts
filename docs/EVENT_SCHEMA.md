@@ -54,6 +54,8 @@ Additional fields are considered additive and should be ignored by forward-compa
       - [v2 Payload Example](#v2-payload-example-9)
     - [5.13 `ClaimCancelled`](#513-claimcancelled)
       - [v2 Payload Example](#v2-payload-example-10)
+    - [5.14 Circuit breaker telemetry](#514-circuit-breaker-telemetry)
+      - [Payload (raw tuple)](#payload-raw-tuple)
   - [6. Contract: `program_escrow`](#6-contract-program_escrow)
     - [6.1 `ProgramInitialized`](#61-programinitialized)
       - [v2 Payload Example](#v2-payload-example-4)
@@ -765,6 +767,39 @@ pub struct ClaimCancelled {
 
 ---
 
+### 5.14 Circuit breaker telemetry
+
+**Emitted by:** `emit_circuit_event()` in `error_recovery.rs`
+**Topics:** `(symbol_short!("circuit"), event_type)`
+**Data:** Raw tuple `(u32, u64)` = `(value, timestamp)`
+**Lifecycle phase:** Circuit breaker rejection, failure recording, and state transitions
+
+The second topic identifies the circuit event subtype:
+
+| Topic[1] | Emitted by | `value` meaning |
+|---|---|---|
+| `cb_reject` | `check_and_allow()` | Current failure count when an open circuit rejects an operation |
+| `cb_fail` | `record_failure()` | Failure count after recording the failed protected operation |
+| `cb_open` | `open_circuit()` | Failure count that opened the circuit |
+| `cb_half` | `half_open_circuit()` | Failure count preserved when admin reset moves the circuit to HalfOpen |
+| `cb_close` | `close_circuit()` | Always `0` after the circuit closes and counters reset |
+
+#### Payload (raw tuple)
+
+```json
+[3, 1740000100]
+```
+
+| Tuple index | Rust type | Required | Description |
+|-------------|-----------|----------|-------------|
+| `0`         | `u32`     | **Yes**  | Failure count or reset value, depending on topic[1] |
+| `1`         | `u64`     | **Yes**  | Ledger timestamp when the circuit event was emitted |
+
+Circuit breaker telemetry is intentionally unversioned because it is emitted as a compact raw
+tuple from `error_recovery.rs`, not through the v2 event structs in `events.rs`.
+
+---
+
 ## 6. Contract: `program_escrow`
 
 > **Source:** `contracts/program_escrow/src/lib.rs`
@@ -1238,6 +1273,7 @@ Complete lookup table of every `env.events().publish(topics, …)` call in this 
 | `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("done"))`       | `"claim"` + `"done"`      | `ClaimExecuted`           |
 | `bounty_escrow`  | `(symbol_short!("claim"), symbol_short!("cancel"))`     | `"claim"` + `"cancel"`    | `ClaimCancelled`          |
 | `bounty_escrow`  | `(symbol_short!("pause"), event.operation.clone())`     | `"pause"` + op symbol     | `PauseStateChanged`       |
+| `bounty_escrow`  | `(symbol_short!("circuit"), event_type)`                | `"circuit"` + `cb_*`      | Tuple `(u32,u64)`         |
 | `program_escrow` | `(PROGRAM_INITIALIZED,)` = `("PrgInit",)`               | `"PrgInit"`               | `ProgramInitializedEvent` |
 | `program_escrow` | `(FUNDS_LOCKED,)` = `("FndsLock",)`                     | `"FndsLock"`              | `FundsLockedEvent`        |
 | `program_escrow` | `(BATCH_PAYOUT,)` = `("BatchPay",)`                     | `"BatchPay"`              | `BatchPayoutEvent`        |
@@ -1293,6 +1329,7 @@ All fields appearing across all three contracts:
 | `caller`                | `Address`          | `Address`   | grainlify |
 | `function`              | `Symbol`           | `Symbol`    | grainlify |
 | `duration`              | `u64`              | `U64`       | grainlify |
+| `value` (tuple index 0) | `u32`              | `U32`       | bounty circuit telemetry |
 | `signer` / `new_signer` / `signer_to_remove` | `Address` | `Address` | grainlify (SignerRot tuple index 1) |
 | `threshold` (inline)    | `u32`              | `U32`       | grainlify (SignerRot tuple index 2) |
 
@@ -1367,6 +1404,9 @@ function isBatchPayout(e: BaseEscrowEvent): boolean {
   before executing. Events are **not** emitted for calls that are rejected by the pause guard.
 - **`PauseStateChanged` is emitted for every flag individually.** A single call to
   `set_paused(lock: true, release: true, refund: false)` emits two separate events.
+- **Circuit breaker telemetry is diagnostic.** `cb_reject`, `cb_fail`, `cb_open`, `cb_half`,
+  and `cb_close` expose failure counts and ledger timestamps only. They do not include private
+  failure details, secrets, or off-chain credentials.
 - **Amount validation.** Contract logic validates `amount > 0` and balance sufficiency before
   emitting. Consuming systems should still assert defensively.
 - **`i128` overflow safety.** `program_escrow` uses `checked_add` / `checked_mul` throughout
@@ -1398,6 +1438,9 @@ Events are exercised by tests embedded in each source file. Key scenarios per co
 | `test_add_signer_emits_event` | grainlify (multisig) | `SignerRot "add"` — event emitted, signer count increments, threshold unchanged |
 | `test_rotate_signers_simultaneous_threshold_change` | grainlify (multisig) | `SignerRot "add"` + `"remove"` — both emitted; new threshold recorded in tuple index 2 |
 | `test_rotate_signers_rejected_no_events` | grainlify (multisig) | No event — `RemovalWouldBreakThreshold` panic rolls back before any publish call |
+| `test_circuit_opens_at_threshold` | bounty | `cb_fail` + `cb_open` state path via circuit failure threshold |
+| `test_circuit_breaker_blocks_lock_funds_when_open` | bounty | `cb_reject` rejection path when protected operation is blocked |
+| `test_success_in_half_open_closes_circuit` | bounty | `cb_close` transition after successful HalfOpen operation |
 
 Run all tests:
 
@@ -1430,6 +1473,11 @@ cargo tarpaulin --out Html --output-dir coverage/
 | `BatchFundsReleased` | `emit_batch_funds_released()` | `contracts/bounty_escrow/src/events.rs` line ~118 |
 | `ApprovalAdded` | `emit_approval_added()` | `contracts/bounty_escrow/src/events.rs` line ~131 |
 | `PauseStateChanged` (bounty) | `emit_pause_state_changed()` | `contracts/bounty_escrow/src/events.rs` line ~153 |
+| `cb_reject` | `emit_circuit_event()` via `check_and_allow()` | `contracts/bounty_escrow/src/error_recovery.rs` line ~195 |
+| `cb_fail` | `emit_circuit_event()` via `record_failure()` | `contracts/bounty_escrow/src/error_recovery.rs` line ~282 |
+| `cb_open` | `emit_circuit_event()` via `open_circuit()` | `contracts/bounty_escrow/src/error_recovery.rs` line ~303 |
+| `cb_half` | `emit_circuit_event()` via `half_open_circuit()` | `contracts/bounty_escrow/src/error_recovery.rs` line ~315 |
+| `cb_close` | `emit_circuit_event()` via `close_circuit()` | `contracts/bounty_escrow/src/error_recovery.rs` line ~335 |
 | `ProgramInitialized` | `initialize_program()` | `contracts/program_escrow/src/lib.rs` – end of `initialize_program` fn |
 | `FundsLocked` (program) | `lock_program_funds()` | `contracts/program_escrow/src/lib.rs` – end of `lock_program_funds` fn |
 | `BatchPayout` | `batch_payout()` | `contracts/program_escrow/src/lib.rs` – end of `batch_payout` fn |
@@ -1450,6 +1498,7 @@ cargo tarpaulin --out Html --output-dir coverage/
 
 | Date       | Doc version | Branch / Author                        | Notes |
 |------------|-------------|----------------------------------------|-------|
+| 2026-07-28 | 3.1.1       | `docs/circuit-breaker-event-schema`    | Added section 5.14 documenting circuit breaker telemetry topics `cb_reject`, `cb_fail`, `cb_open`, `cb_half`, and `cb_close` emitted by `bounty_escrow/src/error_recovery.rs`. Added topic reference, payload field reference, security note, test coverage rows, and inline source references. |
 | 2026-07-22 | 3.1.0       | `docs/event-schema-signer-rotation`    | Added §7.4–7.6 documenting `SignerRot "add"`, `"remove"`, and `"thresh"` events from `grainlify-core/src/multisig.rs`. Payload cross-checked line-by-line against `add_signer`, `remove_signer`, and `rotate_signers` publish call sites. Zero-events-on-revert guarantee explicitly noted in each subsection. Added `SignerRot` rows to §8 topic reference, §9 field reference, §13 test coverage, and §14 source references. Added versioning note to EVENT_VERSIONING.md. |
 | 2026-06-21 | 3.0.0       | `refactor/version-all-bounty-events`   | Added `version: u32` (= `EVENT_VERSION_V2`) to all 8 previously-unversioned `bounty_escrow` events: `FeeCollected`, `BatchFundsLocked`, `BatchFundsReleased`, `ApprovalAdded`, `FeeConfigUpdated`, `ClaimCreated`, `ClaimExecuted`, `ClaimCancelled`. Added emit functions for Claim events. Updated topic reference, migration guide, and test coverage notes. Removed "permanently v1" caveat. |
 | 2026-03-03 | 2.0.0       | `docs/event-schema-audit`              | Full source-grounded audit against `bounty_escrow/src/events.rs`, `program_escrow/src/lib.rs`, and `grainlify-core/src/lib.rs`. Replaced previously inferred schema with exact `#[contracttype]` struct definitions, correct topic tuples, v1/v2 versioning per-event, complete topic reference table, reentrancy/pause security notes, tarpaulin command, and forward-compatible TypeScript parser. |
