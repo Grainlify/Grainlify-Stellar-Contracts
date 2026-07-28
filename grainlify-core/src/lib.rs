@@ -99,6 +99,8 @@
 //! | `MultiSig::execute(env, proposal_id, expected_action, expected_nonce, closure)` | Atomically verifies threshold, payload, and nonce, runs the provided closure (the WASM update), marks the proposal executed, and increments the nonce. |
 //! | `MultiSig::get_action(env, proposal_id)` | Returns the `ProposalAction` bound to a proposal. |
 //! | `MultiSig::remove_signer(env, caller, signer_to_remove)` | Removes a signer; `caller` must itself be a current signer (self-governing set, same rule as `propose`/`approve`), and the removal is rejected if `(signer_count - 1) < threshold` to prevent permanent lockout. |
+//! | `MultiSig::add_signer(env, caller, new_signer)` | Adds a signer; `caller` must itself be a current signer. Rejected with `AlreadySigner` if `new_signer` is already in the set. |
+//! | `MultiSig::rotate_signers(env, caller, add, remove, new_threshold)` | Adds/removes signers and optionally updates the threshold atomically; `caller` must itself be a current signer. Rejected if the resulting threshold is `0` or exceeds the resulting signer count. |
 //!
 //! ### Key properties
 //!
@@ -953,6 +955,43 @@ impl GrainlifyContract {
     /// * `signer_to_remove` - The signer address to remove from the set
     pub fn remove_signer(env: Env, caller: Address, signer_to_remove: Address) {
         MultiSig::remove_signer(&env, caller, signer_to_remove);
+    }
+
+    /// Add a new signer to the multisig configuration.
+    ///
+    /// Same self-governing access model as `remove_signer`: `caller` must
+    /// both sign the transaction and be a current member of the signer set.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the addition; must be a current signer
+    /// * `new_signer` - The signer address to add to the set
+    pub fn add_signer(env: Env, caller: Address, new_signer: Address) {
+        MultiSig::add_signer(&env, caller, new_signer);
+    }
+
+    /// Rotate signers and/or change the approval threshold in one call.
+    ///
+    /// Same self-governing access model as `remove_signer`/`add_signer`:
+    /// `caller` must both sign the transaction and be a current member of the
+    /// signer set. Removals are applied before additions; the resulting
+    /// threshold (after an optional `new_threshold` override) must be nonzero
+    /// and not exceed the resulting signer count.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the rotation; must be a current signer
+    /// * `add` - Signer addresses to add
+    /// * `remove` - Signer addresses to remove
+    /// * `new_threshold` - If `Some`, replaces the current approval threshold
+    pub fn rotate_signers(
+        env: Env,
+        caller: Address,
+        add: Vec<Address>,
+        remove: Vec<Address>,
+        new_threshold: Option<u32>,
+    ) {
+        MultiSig::rotate_signers(&env, caller, add, remove, new_threshold);
     }
 
     /// Returns the configured single-admin upgrade delay in seconds.
