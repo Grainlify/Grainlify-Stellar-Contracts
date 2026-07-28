@@ -1863,6 +1863,11 @@ impl BountyEscrowContract {
             .set(&DataKey::Escrow(bounty_id), &escrow);
         Self::bump_escrow_ttl(&env, bounty_id);
 
+        // Update per-bounty analytics (mirrors release_funds/refund) so
+        // total_amount_released/remaining_amount never drift out of sync
+        // with the escrow's own remaining_amount after a partial release.
+        update_analytics_on_release(&env, bounty_id, payout_amount, env.ledger().timestamp());
+
         // Update incremental aggregate counters
         Self::partial_release_from_locked(&env, payout_amount);
         if transitioned_to_released {
