@@ -1671,6 +1671,128 @@ fn test_batch_release_funds_all_unique_succeeds() {
     assert_eq!(result, 3);
 }
 
+// =============================================================================
+// Payload assertions for emit_bounty_initialized / emit_funds_locked /
+// emit_bounty_expired (Issue #393)
+// =============================================================================
+// Existing tests only assert *that* a versioned event was published
+// (assert_event_data_has_v2_tag); these assert the actual topic value and
+// every payload field, field-by-field.
+
+#[test]
+fn test_emit_bounty_initialized_topic_and_payload() {
+    use crate::events::BountyEscrowInitialized;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let (token, _, _) = create_token_contract(&env, &admin);
+
+    client.init(&admin, &token);
+
+    let expected_topics: soroban_sdk::Vec<Val> = (symbol_short!("init"),).into_val(&env);
+    let mut found = false;
+    for (evt_contract_id, topics, data) in env.events().all().iter() {
+        if evt_contract_id != contract_id || topics != expected_topics {
+            continue;
+        }
+        let event = BountyEscrowInitialized::try_from_val(&env, &data)
+            .expect("init event payload must decode as BountyEscrowInitialized");
+        assert_eq!(event.version, 2);
+        assert_eq!(event.admin, admin);
+        assert_eq!(event.token, token);
+        found = true;
+    }
+    assert!(found, "no init event with the expected topic was published");
+}
+
+#[test]
+fn test_emit_funds_locked_topic_and_payload() {
+    use crate::events::FundsLocked;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &admin);
+    token_admin_client.mint(&depositor, &1_000);
+    client.init(&admin, &token);
+
+    let bounty_id = 7u64;
+    let amount = 250i128;
+    let deadline = env.ledger().timestamp() + 3600;
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    let expected_topics: soroban_sdk::Vec<Val> =
+        (symbol_short!("f_lock"), bounty_id).into_val(&env);
+    let mut found = false;
+    for (evt_contract_id, topics, data) in env.events().all().iter() {
+        if evt_contract_id != contract_id || topics != expected_topics {
+            continue;
+        }
+        let event = FundsLocked::try_from_val(&env, &data)
+            .expect("lock event payload must decode as FundsLocked");
+        assert_eq!(event.version, 2);
+        assert_eq!(event.bounty_id, bounty_id);
+        assert_eq!(event.amount, amount);
+        assert_eq!(event.depositor, depositor);
+        assert_eq!(event.deadline, deadline);
+        found = true;
+    }
+    assert!(
+        found,
+        "no f_lock event with the expected topic was published"
+    );
+}
+
+#[test]
+fn test_emit_bounty_expired_topic_and_payload() {
+    use crate::events::BountyExpired;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &admin);
+    token_admin_client.mint(&depositor, &1_000);
+    client.init(&admin, &token);
+
+    let bounty_id = 9u64;
+    let amount = 400i128;
+    let deadline = env.ledger().timestamp() + 100;
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    // Advance past the deadline and sweep — this is the call site that emits
+    // BountyExpired (see lib.rs's sweep_expired_refunds).
+    env.ledger().set_timestamp(deadline + 1);
+    let ids = vec![&env, bounty_id];
+    let swept = client.sweep_expired_refunds(&ids);
+    assert_eq!(swept, 1);
+
+    let expected_topics: soroban_sdk::Vec<Val> = (symbol_short!("b_exp"), bounty_id).into_val(&env);
+    let mut found = false;
+    for (evt_contract_id, topics, data) in env.events().all().iter() {
+        if evt_contract_id != contract_id || topics != expected_topics {
+            continue;
+        }
+        let event = BountyExpired::try_from_val(&env, &data)
+            .expect("expired event payload must decode as BountyExpired");
+        assert_eq!(event.version, 2);
+        assert_eq!(event.bounty_id, bounty_id);
+        assert_eq!(event.depositor, depositor);
+        assert_eq!(event.amount, amount);
+        assert_eq!(event.deadline, deadline);
+        assert_eq!(event.expired_at, deadline + 1);
+        found = true;
+    }
+    assert!(
+        found,
+        "no b_exp event with the expected topic was published"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Payload-level coverage for emit_funds_released, emit_funds_refunded and
 // emit_batch_funds_locked (bounty_escrow/src/events.rs).
