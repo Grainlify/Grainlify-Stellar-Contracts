@@ -120,7 +120,12 @@
 //! requires one trusted admin address and a mandatory schedule/timelock before
 //! `upgrade` can execute.
 //!
-//! The three upgrade paths are mutually exclusive at initialisation:
+//! The three upgrade paths are mutually exclusive at initialisation. This is
+//! enforced, not just documented: each initializer claims a shared
+//! `DataKey::UpgradeMode` flag (see `claim_upgrade_mode`) and rejects the
+//! call if any path — including its own — has already been claimed. Only
+//! the first of the three calls below to run against a given contract
+//! instance can ever succeed; the other two permanently fail from then on:
 //! - `init(signers, threshold)` — activates the multisig path.
 //! - `init_governance(admin, config)` — activates the governance path.
 //! - `init_admin(admin)` — activates the single-admin + timelock path.
@@ -578,6 +583,41 @@ enum DataKey {
 
     /// Pending single-admin upgrade schedule
     ScheduledUpgrade,
+
+    /// Which of the three upgrade paths (see [`UpgradeMode`]) this contract
+    /// instance activated. Set exactly once, by whichever of `init`,
+    /// `init_admin`, or `init_governance` runs first; every other path is
+    /// then permanently rejected. See `claim_upgrade_mode`.
+    UpgradeMode,
+}
+
+/// The upgrade-authorization model a deployed `grainlify-core` instance uses.
+///
+/// Exactly one of these is ever active per contract instance — see the
+/// "Single upgrade authority" note in this crate's module documentation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UpgradeMode {
+    Multisig,
+    Governance,
+    SingleAdmin,
+}
+
+/// Returns `true` if any of the three upgrade paths has already been
+/// activated on this contract instance.
+fn upgrade_mode_already_claimed(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::UpgradeMode)
+}
+
+/// Permanently claims `mode` as this contract instance's sole upgrade path.
+///
+/// Callers must have already verified (via [`upgrade_mode_already_claimed`])
+/// that no path is claimed yet, and must only call this after every other
+/// validation for their own initializer has succeeded — claiming the mode
+/// on a call that goes on to fail would permanently strand the instance
+/// with no usable upgrade path at all.
+fn claim_upgrade_mode(env: &Env, mode: UpgradeMode) {
+    env.storage().instance().set(&DataKey::UpgradeMode, &mode);
 }
 
 // ============================================================================
@@ -790,8 +830,12 @@ impl GrainlifyContract {
         if env.storage().instance().has(&DataKey::Version) {
             panic!("Already initialized");
         }
+        if upgrade_mode_already_claimed(&env) {
+            panic!("Upgrade mode already configured for this contract instance");
+        }
 
         MultiSig::init(&env, signers, threshold);
+        claim_upgrade_mode(&env, UpgradeMode::Multisig);
         env.storage().instance().set(&DataKey::Version, &VERSION);
     }
 
@@ -890,9 +934,14 @@ impl GrainlifyContract {
             monitoring::track_operation(&env, symbol_short!("init"), admin.clone(), false);
             panic!("Already initialized");
         }
+        if upgrade_mode_already_claimed(&env) {
+            monitoring::track_operation(&env, symbol_short!("init"), admin.clone(), false);
+            panic!("Upgrade mode already configured for this contract instance");
+        }
 
         // Store admin address (immutable after this point)
         env.storage().instance().set(&DataKey::Admin, &admin);
+        claim_upgrade_mode(&env, UpgradeMode::SingleAdmin);
 
         // Set initial version
         env.storage().instance().set(&DataKey::Version, &VERSION);
@@ -2235,6 +2284,105 @@ mod test {
 
         client.init_admin(&admin1);
         client.init_admin(&admin2);
+    }
+
+    // ---- Issue #471: the three upgrade paths must be mutually exclusive ----
+
+    #[test]
+    #[should_panic(expected = "Upgrade mode already configured")]
+    fn test_init_admin_rejected_after_multisig_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        client.init(&signers, &3u32);
+
+        // A single-admin key must never become layerable on top of an
+        // already-active multisig upgrade path — that would let it bypass
+        // the 3-of-3 approval requirement entirely.
+        client.init_admin(&Address::generate(&env));
+    }
+
+    #[test]
+    // init_admin already writes DataKey::Version (shared with init's own
+    // pre-existing reinit guard), so that older check fires before the new
+    // UpgradeMode check is even reached in this direction. Either message
+    // is a correct rejection; this asserts the one that actually fires.
+    #[should_panic(expected = "Already initialized")]
+    fn test_multisig_init_rejected_after_admin_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        client.init_admin(&Address::generate(&env));
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        client.init(&signers, &2u32);
+    }
+
+    #[test]
+    fn test_init_governance_rejected_after_admin_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        client.init_admin(&Address::generate(&env));
+
+        let admin = Address::generate(&env);
+        let result = client.try_init_governance(&admin, &one_person_governance_config(&env));
+        assert_eq!(result, Err(Ok(governance::Error::AlreadyInitialized)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade mode already configured")]
+    fn test_admin_init_rejected_after_governance_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        // The single-admin path must not become available once governance
+        // has claimed upgrade authority: otherwise a single admin key could
+        // unilaterally replace the WASM, bypassing quorum/threshold voting
+        // entirely — the exact bypass this issue is about.
+        client.init_admin(&Address::generate(&env));
+    }
+
+    #[test]
+    fn test_single_admin_only_deployment_unaffected_by_mutual_exclusion() {
+        // A deployment that only ever calls init_admin (never init /
+        // init_governance) must keep working exactly as before.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+        client.schedule_upgrade(&wasm_hash);
+        env.ledger()
+            .with_mut(|li| li.timestamp += DEFAULT_UPGRADE_DELAY_SECONDS);
+        client.upgrade(&wasm_hash);
     }
 
     #[test]
