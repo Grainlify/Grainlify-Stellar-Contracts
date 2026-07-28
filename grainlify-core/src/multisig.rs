@@ -249,6 +249,13 @@ impl MultiSig {
 
     /// Remove a signer from the multisig configuration.
     ///
+    /// # Access model
+    /// `MultiSigConfig` has no separate "admin" concept — it is a
+    /// self-governing signer set, the same as `propose`/`approve`. Any
+    /// *current signer* may remove any other signer (including, if they
+    /// choose, themself); `caller` must be a member of `config.signers`, not
+    /// merely an address that can authorize its own transaction.
+    ///
     /// # Pre-condition: threshold viability guard
     /// The removal is rejected with [`MultiSigError::RemovalWouldBreakThreshold`]
     /// if `(current_signer_count - 1) < threshold`.  This prevents an admin
@@ -257,14 +264,20 @@ impl MultiSig {
     /// permanently lock any funds or actions protected by the multisig.
     ///
     /// # Errors
-    /// - Panics with `NotSigner` if `signer_to_remove` is not in the current
-    ///   signer set.
+    /// - Panics with `NotSigner` if `caller` is not a current signer, or if
+    ///   `signer_to_remove` is not in the current signer set.
     /// - Panics with `RemovalWouldBreakThreshold` if the removal would leave
     ///   fewer signers than the configured threshold.
     pub fn remove_signer(env: &Env, caller: Address, signer_to_remove: Address) {
         caller.require_auth();
 
         let mut config = Self::get_config(env);
+
+        // `require_auth()` above only proves `caller` authorized this specific
+        // invocation as itself — it does not prove `caller` is a configured
+        // signer. Without this check, any outside address could evict a
+        // legitimate signer by simply calling this with itself as `caller`.
+        Self::assert_signer(&config, &caller);
 
         // Verify the address to be removed is actually a current signer.
         if !config.signers.contains(&signer_to_remove) {
@@ -1272,6 +1285,67 @@ mod test {
 
             // Removing signer_b would leave 1 signer < threshold=2 → must panic.
             MultiSig::remove_signer(&setup.env, setup.signer_a.clone(), setup.signer_b.clone());
+        });
+    }
+
+    /// A caller who is not a configured signer must not be able to remove a
+    /// signer, even though `mock_all_auths` lets it trivially authorize its
+    /// own transaction — `require_auth()` alone must not be mistaken for a
+    /// signer-membership check.
+    #[test]
+    #[should_panic(expected = "NotSigner")]
+    fn remove_signer_rejects_non_signer_caller_even_when_self_authorized() {
+        let setup = setup();
+        let attacker = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2);
+
+            // `attacker` is not in the signer set, but mock_all_auths lets it
+            // sign for itself trivially — the call must still be rejected.
+            MultiSig::remove_signer(&setup.env, attacker, setup.signer_c.clone());
+        });
+    }
+
+    /// Complementary positive case: a legitimate signer's removal call is
+    /// unaffected by the new signer-membership check, and the config is
+    /// unchanged after the non-signer attack above was rejected.
+    #[test]
+    fn remove_signer_rejects_non_signer_then_succeeds_for_legitimate_signer() {
+        let setup = setup();
+        let attacker = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2);
+
+            let attacker_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                MultiSig::remove_signer(&setup.env, attacker.clone(), setup.signer_c.clone());
+            }));
+            assert!(
+                attacker_result.is_err(),
+                "non-signer caller must be rejected"
+            );
+
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(
+                config.signers.len(),
+                3,
+                "rejected attacker call must not mutate the signer set"
+            );
+
+            // A legitimate signer performs the same removal successfully.
+            MultiSig::remove_signer(&setup.env, setup.signer_a.clone(), setup.signer_c.clone());
+            let config = MultiSig::get_config(&setup.env);
+            assert_eq!(config.signers.len(), 2);
+            assert!(!config.signers.contains(&setup.signer_c));
         });
     }
 
