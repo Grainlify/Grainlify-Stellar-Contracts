@@ -311,10 +311,20 @@ impl MultiSig {
     }
 
     /// Add a new signer to the multisig configuration.
+    ///
+    /// # Access model
+    /// Same self-governing rule as `remove_signer`/`propose`/`approve`:
+    /// `caller` must be a current member of `config.signers`, not merely an
+    /// address that can authorize its own transaction.
+    ///
+    /// # Errors
+    /// - Panics with `NotSigner` if `caller` is not a current signer.
+    /// - Panics with `AlreadySigner` if `new_signer` is already in the set.
     pub fn add_signer(env: &Env, caller: Address, new_signer: Address) {
         caller.require_auth();
 
         let mut config = Self::get_config(env);
+        Self::assert_signer(&config, &caller);
 
         if config.signers.contains(&new_signer) {
             panic!("{:?}", MultiSigError::AlreadySigner);
@@ -330,6 +340,18 @@ impl MultiSig {
     }
 
     /// Rotate signers and/or change threshold simultaneously.
+    ///
+    /// # Access model
+    /// Same self-governing rule as `remove_signer`/`add_signer`: `caller`
+    /// must be a current member of `config.signers`, not merely an address
+    /// that can authorize its own transaction.
+    ///
+    /// # Errors
+    /// - Panics with `NotSigner` if `caller` is not a current signer, or if
+    ///   any address in `remove` is not in the current signer set.
+    /// - Panics with `AlreadySigner` if any address in `add` is already a signer.
+    /// - Panics with `RemovalWouldBreakThreshold` if the resulting threshold is
+    ///   `0` or exceeds the resulting signer count.
     pub fn rotate_signers(
         env: &Env,
         caller: Address,
@@ -339,6 +361,7 @@ impl MultiSig {
     ) {
         caller.require_auth();
         let mut config = Self::get_config(env);
+        Self::assert_signer(&config, &caller);
 
         // Process removals
         for signer_to_remove in remove.clone() {
@@ -454,7 +477,7 @@ impl MultiSig {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::GrainlifyContract;
+    use crate::{GrainlifyContract, GrainlifyContractClient};
     use soroban_sdk::{testutils::Address as _, testutils::Events, Env};
     extern crate std;
     use std::panic;
@@ -1634,5 +1657,126 @@ mod test {
 
         let events = setup.env.events().all();
         assert!(events.len() > 0);
+    }
+
+    // =========================================================================
+    // add_signer / rotate_signers external reachability (Issue #384)
+    // =========================================================================
+    // Every test above calls MultiSig::add_signer / MultiSig::rotate_signers
+    // directly inside env.as_contract(...), which only proves the internal
+    // associated functions work — it does not prove a deployed contract can
+    // ever reach them. These tests go through GrainlifyContractClient, the
+    // same generated client external callers actually use, proving the two
+    // functions are now real contract entrypoints, not just internally
+    // tested dead code.
+
+    /// add_signer is now callable through the generated contract client, not
+    /// just internally via MultiSig::, and emits the same SignerRot/add event.
+    #[test]
+    fn test_add_signer_reachable_through_contract_client() {
+        let setup = setup();
+        let client = GrainlifyContractClient::new(&setup.env, &setup.contract_id);
+        let new_signer = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        client.add_signer(&setup.signer_a, &new_signer);
+
+        let config = setup
+            .env
+            .as_contract(&setup.contract_id, || MultiSig::get_config(&setup.env));
+        assert_eq!(config.signers.len(), 3);
+        assert!(config.signers.contains(&new_signer));
+
+        let events = setup.env.events().all();
+        assert!(
+            !events.is_empty(),
+            "add_signer through the client must still emit SignerRot/add"
+        );
+    }
+
+    /// rotate_signers is now callable through the generated contract client,
+    /// not just internally via MultiSig::.
+    #[test]
+    fn test_rotate_signers_reachable_through_contract_client() {
+        let setup = setup();
+        let client = GrainlifyContractClient::new(&setup.env, &setup.contract_id);
+        let new_signer = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            let three_signers = addr_vec(
+                &setup.env,
+                &[&setup.signer_a, &setup.signer_b, &setup.signer_c],
+            );
+            MultiSig::init(&setup.env, three_signers, 2);
+        });
+
+        let mut add_vec = Vec::new(&setup.env);
+        add_vec.push_back(new_signer.clone());
+        let mut rm_vec = Vec::new(&setup.env);
+        rm_vec.push_back(setup.signer_c.clone());
+
+        client.rotate_signers(&setup.signer_a, &add_vec, &rm_vec, &Some(2));
+
+        let config = setup
+            .env
+            .as_contract(&setup.contract_id, || MultiSig::get_config(&setup.env));
+        assert_eq!(
+            config.signers.len(),
+            3,
+            "removed signer_c, added new_signer: net unchanged"
+        );
+        assert!(config.signers.contains(&new_signer));
+        assert!(!config.signers.contains(&setup.signer_c));
+        assert_eq!(config.threshold, 2);
+    }
+
+    /// A caller who is not a configured signer must not be able to add a
+    /// signer, even though it can trivially self-authorize under
+    /// mock_all_auths — matching the same fix applied to remove_signer.
+    #[test]
+    #[should_panic(expected = "NotSigner")]
+    fn add_signer_rejects_non_signer_caller_even_when_self_authorized() {
+        let setup = setup();
+        let attacker = Address::generate(&setup.env);
+        let new_signer = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            MultiSig::add_signer(&setup.env, attacker, new_signer);
+        });
+    }
+
+    /// A caller who is not a configured signer must not be able to rotate
+    /// signers/threshold, even though it can trivially self-authorize under
+    /// mock_all_auths — matching the same fix applied to remove_signer.
+    #[test]
+    #[should_panic(expected = "NotSigner")]
+    fn rotate_signers_rejects_non_signer_caller_even_when_self_authorized() {
+        let setup = setup();
+        let attacker = Address::generate(&setup.env);
+
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+
+            let add_vec = Vec::new(&setup.env);
+            let rm_vec = Vec::new(&setup.env);
+            MultiSig::rotate_signers(&setup.env, attacker, add_vec, rm_vec, None);
+        });
     }
 }
