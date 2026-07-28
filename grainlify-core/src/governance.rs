@@ -280,7 +280,17 @@ impl GovernanceContract {
             return Err(Error::InvalidTotalVotingPower);
         }
 
-        let quorum_bps = (total_cast * 10000) / total_power;
+        // checked_mul: total_cast grows monotonically with votes cast and, for
+        // TokenWeighted voting, is derived from a configured token's balance()
+        // — a legitimate large token supply can make total_cast * 10000
+        // overflow i128::MAX. Since total_cast never shrinks, an unchecked
+        // panic here would make the proposal permanently un-finalizable
+        // (every retry hits the same overflow). Report it as a typed error
+        // instead, same as the additive vote tallying in cast_vote.
+        let quorum_bps = total_cast
+            .checked_mul(10000)
+            .ok_or(Error::VoteWeightOverflow)?
+            / total_power;
         if quorum_bps < config.quorum_percentage as i128 {
             proposal.status = ProposalStatus::Rejected;
             proposals.set(proposal_id, proposal.clone());
@@ -292,7 +302,11 @@ impl GovernanceContract {
         if approval_votes == 0 {
             proposal.status = ProposalStatus::Rejected;
         } else {
-            let approval_bps = (proposal.votes_for * 10000) / approval_votes;
+            let approval_bps = proposal
+                .votes_for
+                .checked_mul(10000)
+                .ok_or(Error::VoteWeightOverflow)?
+                / approval_votes;
             if approval_bps >= config.approval_threshold as i128 {
                 proposal.status = ProposalStatus::Approved;
             } else {
@@ -1158,6 +1172,30 @@ fn test_edge_case_vote_weight_overflow() {
     // This must trigger the typed overflow error, not a panic
     let res2 = client.try_cast_vote(&voter2, &prop_id, &VoteType::For);
     assert_eq!(res2, Err(Ok(Error::VoteWeightOverflow)));
+}
+
+/// A TokenWeighted voter with a legitimately large balance (well within
+/// cast_vote's own i128::MAX tally guard) can still make finalize_proposal's
+/// `total_cast * 10000` bps math overflow. This must return a typed error,
+/// not panic (Issue #385).
+#[test]
+fn test_finalize_proposal_quorum_bps_overflow_returns_typed_error() {
+    let env = Env::default();
+    let (client, token_admin_client, proposer, _) =
+        setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
+    let token_admin_client = token_admin_client.unwrap();
+    let voter = Address::generate(&env);
+
+    // i128::MAX / 5000 * 10000 overflows i128::MAX by design.
+    token_admin_client.mint(&voter, &(i128::MAX / 5000));
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    client.cast_vote(&voter, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 200);
+
+    let result = client.try_finalize_proposal(&prop_id);
+    assert_eq!(result, Err(Ok(Error::VoteWeightOverflow)));
 }
 
 // =============================================================================
