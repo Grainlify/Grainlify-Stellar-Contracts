@@ -98,7 +98,9 @@
 //! | `MultiSig::nonce(env)` | Returns the next expected execution nonce (replay protection). |
 //! | `MultiSig::execute(env, proposal_id, expected_action, expected_nonce, closure)` | Atomically verifies threshold, payload, and nonce, runs the provided closure (the WASM update), marks the proposal executed, and increments the nonce. |
 //! | `MultiSig::get_action(env, proposal_id)` | Returns the `ProposalAction` bound to a proposal. |
-//! | `MultiSig::remove_signer(env, caller, signer_to_remove)` | Removes a signer; rejected if `(signer_count - 1) < threshold` to prevent permanent lockout. |
+//! | `MultiSig::remove_signer(env, caller, signer_to_remove)` | Removes a signer; `caller` must itself be a current signer (self-governing set, same rule as `propose`/`approve`), and the removal is rejected if `(signer_count - 1) < threshold` to prevent permanent lockout. |
+//! | `MultiSig::add_signer(env, caller, new_signer)` | Adds a signer; `caller` must itself be a current signer. Rejected with `AlreadySigner` if `new_signer` is already in the set. |
+//! | `MultiSig::rotate_signers(env, caller, add, remove, new_threshold)` | Adds/removes signers and optionally updates the threshold atomically; `caller` must itself be a current signer. Rejected if the resulting threshold is `0` or exceeds the resulting signer count. |
 //!
 //! ### Key properties
 //!
@@ -861,30 +863,18 @@ impl GrainlifyContract {
     /// Returns `true` when the governance proposal identified by `proposal_id`
     /// has been vetoed or cancelled and must not be executed.
     ///
-    /// The current governance module (`governance.rs`) does not yet have a
-    /// native Vetoed/Cancelled [`ProposalStatus`] variant (tracked in issue
-    /// #236).  This stub satisfies the cross-contract interface declared in
-    /// `governance_integration.rs` (`GovernanceInterface::is_vetoed`) so that
-    /// escrow contracts can call it via `GovernanceClient` without a compile
-    /// error or a panic at the cross-contract dispatch layer.
-    ///
-    /// Until a real veto mechanism is implemented on-chain, this method always
-    /// returns `false` (no proposals are ever vetoed), which is the safe
-    /// default: it allows approved proposals to proceed rather than silently
-    /// blocking all upgrades.  A follow-up task should:
-    ///
-    /// 1. Add a `Vetoed` / `Cancelled` variant to `governance::ProposalStatus`.
-    /// 2. Add a permissioned `veto_proposal(admin, proposal_id)` entrypoint.
-    /// 3. Update this stub to query the real veto flag from persistent storage.
+    /// Queries the real proposal status via `governance::GovernanceContract`:
+    /// `true` when it is `ProposalStatus::Cancelled` (set by `cancel_proposal`,
+    /// the only cancellation/veto path this module currently exposes), `false`
+    /// for every other status, including a nonexistent `proposal_id` — the
+    /// same safe default as before, but now backed by real state instead of
+    /// an unconditional stub.
     ///
     /// # Arguments
-    /// * `_proposal_id` - The governance proposal ID to check.
-    ///
-    /// # Returns
-    /// `false` (stub — veto mechanism not yet implemented).
-    pub fn is_vetoed(_env: Env, _proposal_id: u32) -> bool {
-        // TODO(#236): query real veto storage once veto mechanism is implemented.
-        false
+    /// * `proposal_id` - The governance proposal ID to check.
+    pub fn is_vetoed(env: Env, proposal_id: u32) -> bool {
+        governance::GovernanceContract::get_proposal_status(env, proposal_id)
+            == Ok(governance::ProposalStatus::Cancelled)
     }
 
     /// Initializes the contract with a single admin address.
@@ -947,10 +937,49 @@ impl GrainlifyContract {
     ///
     /// # Arguments
     /// * `env` - The contract environment
-    /// * `caller` - Address authorising the removal (must sign the transaction)
+    /// * `caller` - Address authorising the removal. Must both sign the
+    ///   transaction *and* be a current member of the signer set — this is a
+    ///   self-governing multisig, not admin-gated.
     /// * `signer_to_remove` - The signer address to remove from the set
     pub fn remove_signer(env: Env, caller: Address, signer_to_remove: Address) {
         MultiSig::remove_signer(&env, caller, signer_to_remove);
+    }
+
+    /// Add a new signer to the multisig configuration.
+    ///
+    /// Same self-governing access model as `remove_signer`: `caller` must
+    /// both sign the transaction and be a current member of the signer set.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the addition; must be a current signer
+    /// * `new_signer` - The signer address to add to the set
+    pub fn add_signer(env: Env, caller: Address, new_signer: Address) {
+        MultiSig::add_signer(&env, caller, new_signer);
+    }
+
+    /// Rotate signers and/or change the approval threshold in one call.
+    ///
+    /// Same self-governing access model as `remove_signer`/`add_signer`:
+    /// `caller` must both sign the transaction and be a current member of the
+    /// signer set. Removals are applied before additions; the resulting
+    /// threshold (after an optional `new_threshold` override) must be nonzero
+    /// and not exceed the resulting signer count.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the rotation; must be a current signer
+    /// * `add` - Signer addresses to add
+    /// * `remove` - Signer addresses to remove
+    /// * `new_threshold` - If `Some`, replaces the current approval threshold
+    pub fn rotate_signers(
+        env: Env,
+        caller: Address,
+        add: Vec<Address>,
+        remove: Vec<Address>,
+        new_threshold: Option<u32>,
+    ) {
+        MultiSig::rotate_signers(&env, caller, add, remove, new_threshold);
     }
 
     /// Returns the configured single-admin upgrade delay in seconds.
@@ -2808,6 +2837,152 @@ mod test {
         
         // After this second upgrade, it is None again
         assert!(client.get_scheduled_upgrade().is_none());
+    }
+
+    /// is_vetoed must reflect real proposal state (Issue #386): false for a
+    /// proposal that was never cancelled, true once cancel_proposal actually
+    /// cancels it — not an unconditional stub.
+    #[test]
+    fn test_is_vetoed_reflects_real_cancellation_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        let prop_id = client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+
+        assert!(
+            !client.is_vetoed(&prop_id),
+            "a freshly created proposal is never vetoed"
+        );
+
+        env.as_contract(&contract_id, || {
+            governance::GovernanceContract::cancel_proposal(env.clone(), proposer, prop_id)
+                .unwrap();
+        });
+
+        assert!(
+            client.is_vetoed(&prop_id),
+            "a cancelled proposal must report as vetoed"
+        );
+    }
+
+    // ============================================================
+    // health_check() wrapper tests
+    // ============================================================
+
+    /// Test that health_check returns healthy by default through the contract client.
+    /// Note: the current implementation always returns is_healthy = true regardless
+    /// of error rate. Rolling-window error-tracking semantics described in the
+    /// monitoring module doc do not exist yet — this test documents the actual
+    /// behaviour so that when those semantics are implemented, this test will
+    /// need to be updated with error-injection + time-decay assertions.
+    #[test]
+    fn test_health_check_through_client() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let status = client.health_check();
+        assert!(status.is_healthy);
+        assert!(status.total_operations > 0);
+        assert!(status.contract_version.len() > 0);
+    }
+
+    /// Test health_check returns consistent data across multiple calls
+    #[test]
+    fn test_health_check_idempotent() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let s1 = client.health_check();
+        let s2 = client.health_check();
+        assert_eq!(s1.is_healthy, s2.is_healthy);
+        assert_eq!(s1.contract_version, s2.contract_version);
+    }
+
+    // ============================================================
+    // get_performance_stats() wrapper tests
+    // ============================================================
+
+    /// Test that get_performance_stats returns zeroed stats for a function that
+    /// was never tracked (rather than panicking).
+    #[test]
+    fn test_performance_stats_untracked_function() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let stats = client.get_performance_stats(&symbol_short!("noexist"));
+        assert_eq!(stats.call_count, 0);
+        assert_eq!(stats.total_time, 0);
+        assert_eq!(stats.avg_time, 0);
+        assert_eq!(stats.last_called, 0);
+        assert_eq!(stats.function_name, symbol_short!("noexist"));
+    }
+
+    /// Test that get_performance_stats returns correct avg_time after several
+    /// emit_performance-driving operations. init_admin → tracks "init", 
+    /// set_version → tracks "set_ver". Call each once; verify stats.
+    #[test]
+    fn test_performance_stats_avg_time_computation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        // init_admin calls emit_performance("init", duration)
+        client.init_admin(&admin);
+        // set_version calls emit_performance("set_ver", duration)
+        client.set_version(&5);
+
+        let stats = client.get_performance_stats(&symbol_short!("init"));
+        assert_eq!(stats.call_count, 1);
+        // In test env, operations can complete in zero ledger time, so total_time may be 0
+        assert_eq!(stats.avg_time, if stats.call_count > 0 { stats.total_time / stats.call_count } else { 0 });
+        assert_eq!(stats.function_name, symbol_short!("init"));
+
+        let stats2 = client.get_performance_stats(&symbol_short!("set_ver"));
+        assert_eq!(stats2.call_count, 1);
+        assert_eq!(stats2.avg_time, if stats2.call_count > 0 { stats2.total_time / stats2.call_count } else { 0 });
+    }
+
+    /// Test average time computation with multiple calls — total / count integer division
+    #[test]
+    fn test_performance_stats_avg_with_multiple_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        // Call set_version multiple times — each triggers emit_performance("set_ver", ...)
+        client.init_admin(&admin);
+        client.set_version(&5);
+        client.set_version(&6);
+        client.set_version(&7);
+
+        let stats = client.get_performance_stats(&symbol_short!("set_ver"));
+        assert_eq!(stats.call_count, 3, "three set_version calls");
+        // avg_time should be integer division: total / 3
+        assert_eq!(stats.avg_time, if stats.call_count > 0 { stats.total_time / stats.call_count } else { 0 });
     }
 }
 

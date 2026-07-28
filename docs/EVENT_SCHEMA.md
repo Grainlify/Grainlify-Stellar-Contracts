@@ -65,6 +65,8 @@ Additional fields are considered additive and should be ignored by forward-compa
       - [v2 Payload Example](#v2-payload-example-7)
     - [6.5 `PauseStateChanged` (program)](#65-pausestatechanged-program)
       - [Payload (raw tuple)](#payload-raw-tuple)
+    - [6.6 Circuit Breaker Events (`bounty_escrow` and `program_escrow`)](#66-circuit-breaker-events-bounty_escrow-and-program_escrow)
+      - [Payload (raw tuple)](#payload-raw-tuple-1)
   - [7. Contract: `grainlify-core`](#7-contract-grainlify-core)
     - [7.1 `MigrationEvent`](#71-migrationevent)
       - [Payload Example (success)](#payload-example-success)
@@ -968,6 +970,57 @@ env.events().publish(
 > **Compatibility note:** `bounty_escrow` publishes `PauseStateChanged` as a **named struct**
 > with fields `{ operation, paused, admin }`. `program_escrow` publishes a **raw positional
 > tuple**. Indexers must handle both representations.
+
+---
+
+### 6.6 Circuit Breaker Events (`bounty_escrow` and `program_escrow`)
+
+**Emitted by:** `error_recovery.rs`'s `emit_circuit_event()` helper, called from
+`check_and_allow()` (`cb_reject`), `record_failure()` (`cb_fail`),
+`open_circuit()` (`cb_open`), `half_open_circuit()` (`cb_half`), and
+`close_circuit()` (`cb_close`). The pattern and payload shape are byte-for-byte
+identical in both `bounty_escrow/contracts/escrow/src/error_recovery.rs` and
+`program-escrow/src/error_recovery.rs` — there is no behavioral difference
+between the two contracts' circuit breakers.
+**Topics:** `(symbol_short!("circuit"), event_type)`, where `event_type` is one
+of the five `Symbol`s below.
+**Data:** Raw tuple `(value: u32, timestamp: u64)` — **not** a named/versioned
+struct. This is the one event family in this document without a `version`
+field; see the compatibility note below.
+
+```rust
+fn emit_circuit_event(env: &Env, event_type: Symbol, value: u32) {
+    env.events().publish(
+        (symbol_short!("circuit"), event_type),
+        (value, env.ledger().timestamp()),
+    );
+}
+```
+
+| Event type (`event_type`) | Emitted from      | `value` meaning                                   |
+|----------------------------|-------------------|----------------------------------------------------|
+| `cb_reject`                 | `check_and_allow()` | Current failure count at the moment of rejection  |
+| `cb_fail`                   | `record_failure()`  | Failure count after this failure was recorded     |
+| `cb_open`                   | `open_circuit()`    | Failure count that caused the circuit to open     |
+| `cb_half`                   | `half_open_circuit()` | Failure count at the time of the half-open transition |
+| `cb_close`                  | `close_circuit()`   | Always `0` — the circuit is fully reset           |
+
+#### Payload (raw tuple)
+
+```json
+[3, 1700000000]
+```
+
+| Tuple index | Rust type | Description |
+|-------------|-----------|-------------|
+| `0`         | `u32`     | See `value` meaning per event type in the table above |
+| `1`         | `u64`     | Ledger timestamp at emission |
+
+> **Compatibility note:** unlike every other event in this document, circuit
+> breaker events carry **no `version` field and no named struct** — the
+> payload is always the raw 2-element tuple above, regardless of schema
+> version elsewhere in the contract. Indexers must key off the `event_type`
+> topic Symbol (not a payload field) to distinguish the five variants.
 
 ---
 

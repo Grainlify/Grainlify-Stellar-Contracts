@@ -25,7 +25,7 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 |----------|-------------|
 | [Bounty Escrow README](../bounty_escrow/README.md) | Overview of the bounty escrow contract |
 | [Security](bounty_escrow/SECURITY.md) | Security model, threat analysis, and mitigations |
-| [Circuit Breaker](bounty_escrow/CIRCUIT_BREAKER.md) | Circuit breaker mechanism documentation |
+| [Circuit Breaker](bounty_escrow/CIRCUIT_BREAKER.md) | Circuit breaker mechanism and retry-logic documentation |
 | [Implementation Checklist](bounty_escrow/IMPLEMENTATION_CHECKLIST.md) | Implementation task tracking |
 | [Analytics Documentation](bounty_escrow/ANALYTICS_DOCUMENTATION.md) | Analytics views and query functions |
 | [Analytics Implementation Summary](bounty_escrow/ANALYTICS_IMPLEMENTATION_SUMMARY.md) | Analytics module implementation details |
