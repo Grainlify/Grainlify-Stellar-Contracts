@@ -71,6 +71,21 @@ describe('BountyEscrowClient', () => {
         ).rejects.toThrow(ValidationError);
       });
     });
+    describe('deadlines', () => {
+      it('throws on a positive-but-past deadline in lockFunds', async () => {
+        const pastDeadline = Math.floor(Date.now() / 1000) - 3600;
+        await expect(
+          client.lockFunds(validGAddress1, 1n, 100n, pastDeadline, sourceKeypair)
+        ).rejects.toThrow(ValidationError);
+      });
+      it('accepts a valid future deadline in lockFunds', async () => {
+        mockInvoke();
+        const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+        await expect(
+          client.lockFunds(validGAddress1, 1n, 100n, futureDeadline, sourceKeypair)
+        ).resolves.toBeUndefined();
+      });
+    });
     
     describe('batch operations', () => {
       it('throws on empty items array in batchLockFunds', async () => {
@@ -83,6 +98,17 @@ describe('BountyEscrowClient', () => {
         const items: LockFundsItem[] = [
           { bounty_id: 1n, depositor: validGAddress1, amount: 10n, deadline: 100 },
           { bounty_id: 2n, depositor: validGAddress1, amount: -10n, deadline: 100 },
+        ];
+        await expect(
+          client.batchLockFunds(items, sourceKeypair)
+        ).rejects.toThrow(ValidationError);
+      });
+      it('throws on a batch containing one item with a past deadline', async () => {
+        const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+        const pastDeadline = Math.floor(Date.now() / 1000) - 3600;
+        const items: LockFundsItem[] = [
+          { bounty_id: 1n, depositor: validGAddress1, amount: 10n, deadline: futureDeadline },
+          { bounty_id: 2n, depositor: validGAddress1, amount: 10n, deadline: pastDeadline },
         ];
         await expect(
           client.batchLockFunds(items, sourceKeypair)
@@ -587,8 +613,9 @@ describe('BountyEscrowClient', () => {
 
     it('routes lockFunds correctly', async () => {
       const invoke = mockInvoke();
-      await client.lockFunds(validGAddress1, 1n, 100n, 1000, sourceKeypair);
-      expect(invoke).toHaveBeenCalledWith('lock_funds', [validGAddress1, 1n, 100n, 1000], sourceKeypair);
+      const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+      await client.lockFunds(validGAddress1, 1n, 100n, futureDeadline, sourceKeypair);
+      expect(invoke).toHaveBeenCalledWith('lock_funds', [validGAddress1, 1n, 100n, futureDeadline], sourceKeypair);
     });
 
     it('routes releaseFunds correctly', async () => {
@@ -623,7 +650,8 @@ describe('BountyEscrowClient', () => {
 
     it('routes batchLockFunds correctly', async () => {
       const invoke = mockInvoke(5);
-      const items = [{ bounty_id: 1n, depositor: validGAddress1, amount: 100n, deadline: 1000 }];
+      const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+      const items = [{ bounty_id: 1n, depositor: validGAddress1, amount: 100n, deadline: futureDeadline }];
       const count = await client.batchLockFunds(items, sourceKeypair);
       expect(count).toBe(5);
       expect(invoke).toHaveBeenCalledWith('batch_lock_funds', [items], sourceKeypair);

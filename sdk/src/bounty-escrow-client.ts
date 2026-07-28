@@ -304,7 +304,7 @@ export class BountyEscrowClient {
     if (amount <= 0n) {
       throw new ValidationError('Amount must be greater than zero', 'amount');
     }
-    if (deadline <= 0) {
+    if (deadline <= Math.floor(Date.now() / 1000)) {
       throw new ValidationError('Deadline must be in the future', 'deadline');
     }
 
@@ -468,6 +468,9 @@ export class BountyEscrowClient {
       this.validateAddress(items[i].depositor, `items[${i}].depositor`);
       if (items[i].amount <= 0n) {
         throw new ValidationError(`Amount at index ${i} must be greater than zero`, 'amount');
+      }
+      if (items[i].deadline <= Math.floor(Date.now() / 1000)) {
+        throw new ValidationError(`Deadline at index ${i} must be in the future`, 'deadline');
       }
     }
 
