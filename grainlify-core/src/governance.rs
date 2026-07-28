@@ -858,7 +858,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_strictly_before_voting_end_rejected() {
         let env = Env::default();
-        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -876,7 +877,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_exact_voting_end_boundary_rejected() {
         let env = Env::default();
-        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -894,7 +896,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_one_second_past_voting_end_succeeds() {
         let env = Env::default();
-        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
