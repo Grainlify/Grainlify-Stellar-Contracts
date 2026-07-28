@@ -1,3 +1,4 @@
+use crate::{DataKey, UpgradeMode};
 use soroban_sdk::{contracttype, symbol_short, token, Address, BytesN, Env, Map, Symbol};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +105,7 @@ pub enum Error {
     InvalidTotalVotingPower = 16,
     Unauthorized = 17,
     VoteWeightOverflow = 18,
+    AlreadyInitialized = 19,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), soroban_sdk::contract)]
@@ -117,6 +119,17 @@ impl GovernanceContract {
         config: GovernanceConfig,
     ) -> Result<(), Error> {
         admin.require_auth();
+
+        // Mutually exclusive with the multisig (`init`) and single-admin
+        // (`init_admin`) upgrade paths — see `claim_upgrade_mode` in lib.rs.
+        // In production this shares instance storage with GrainlifyContract,
+        // so this check sees whatever those two initializers already
+        // claimed; in the standalone-GovernanceContract test harness it is
+        // scoped to that isolated instance's own storage.
+        if env.storage().instance().has(&DataKey::UpgradeMode) {
+            return Err(Error::AlreadyInitialized);
+        }
+
         if config.quorum_percentage > 10000 || config.approval_threshold > 10000 {
             return Err(Error::InvalidThreshold);
         }
@@ -132,6 +145,9 @@ impl GovernanceContract {
 
         env.storage().instance().set(&GOVERNANCE_CONFIG, &config);
         env.storage().instance().set(&PROPOSAL_COUNT, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeMode, &UpgradeMode::Governance);
         Ok(())
     }
 
