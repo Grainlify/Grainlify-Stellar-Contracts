@@ -8,10 +8,11 @@ use soroban_sdk::{
     testutils::Events, Env, Symbol, TryFromVal
 };
 use crate::analytics::{
-    init_bounty_analytics, update_analytics_on_release, update_analytics_on_refund, 
+    init_bounty_analytics, update_analytics_on_release, update_analytics_on_refund,
     emit_bounty_activity, BountyActivityEvent, ANALYTICS_VERSION_V1, get_bounty_analytics
 };
-use soroban_sdk::{contract, contractimpl};
+use crate::RefundMode;
+use soroban_sdk::{contract, contractimpl, Address};
 
 #[contract]
 struct DummyContract;
@@ -320,5 +321,167 @@ fn test_direct_refund_on_uninitialized_bounty() {
         // Verify no record was created
         let result = get_bounty_analytics(&env, bounty_id);
         assert!(result.is_none(), "no analytics record should exist for uninitialized bounty");
+    });
+}
+
+// ============================================================
+// End-to-end coverage for get_bounty_analytics (Issue #399)
+//
+// The tests above exercise the analytics helper functions directly
+// (init_bounty_analytics / update_analytics_on_release / update_analytics_on_refund)
+// against a dummy contract. None of them drive the *real* bounty escrow
+// contract's public entrypoints, so a bug where e.g. release_funds and
+// approve_refund/refund disagree on how they update remaining_amount vs.
+// total_amount_released/total_amount_refunded could slip through even
+// though every isolated field assertion above passes. The tests below
+// close that gap by driving `lock_funds` -> `partial_release` ->
+// `approve_refund`/`refund` (x2) through the generated contract client
+// and then asserting every field of get_bounty_analytics at once.
+// ============================================================
+
+fn create_token<'a>(
+    env: &Env,
+    admin: &Address,
+) -> (
+    soroban_sdk::token::Client<'a>,
+    soroban_sdk::token::StellarAssetClient<'a>,
+) {
+    let addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    (
+        soroban_sdk::token::Client::new(env, &addr),
+        soroban_sdk::token::StellarAssetClient::new(env, &addr),
+    )
+}
+
+fn create_escrow<'a>(env: &Env) -> crate::BountyEscrowContractClient<'a> {
+    let contract_id = env.register_contract(None, crate::BountyEscrowContract);
+    crate::BountyEscrowContractClient::new(env, &contract_id)
+}
+
+/// Drives a realistic mixed lifecycle — lock, a partial release, then a
+/// partial refund followed by a final refund that fully drains the
+/// remainder — through the real contract entrypoints, and asserts every
+/// field of the returned `BountyAnalytics` snapshot against hand-computed
+/// values in one shot.
+///
+/// Note: once a refund leaves any bounty in `PartiallyRefunded` status,
+/// both `release_funds` and `partial_release` reject it with
+/// `FundsNotLocked` (they require `Locked`), so a "release" cannot follow
+/// a partial refund. The mixed sequence below is the realistic analogue:
+/// a partial release while still `Locked`, followed by a partial refund
+/// and then a second, fully-draining refund — covering both counters
+/// (`partial_releases_count`, `partial_refunds_count`) and all three
+/// amount fields in a single interleaved run.
+#[test]
+fn test_get_bounty_analytics_mixed_release_and_refund_sequence() {
+    use soroban_sdk::testutils::{Address as _, Ledger};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+
+    let (token_client, token_sac) = create_token(&env, &admin);
+    let client = create_escrow(&env);
+    client.init(&admin, &token_client.address);
+
+    let locked_amount = 10_000i128;
+    token_sac.mint(&depositor, &locked_amount);
+
+    let bounty_id = 500u64;
+    let deadline = 1_000_000u64;
+    let locked_at = env.ledger().timestamp();
+    client.lock_funds(&depositor, &bounty_id, &locked_amount, &deadline);
+
+    // Partial release #1: 4,000 to the contributor. Escrow stays Locked
+    // since 6,000 remains.
+    env.ledger().set_timestamp(2_000);
+    client.partial_release(&bounty_id, &contributor, &4_000i128);
+
+    // Partial refund #1: 3,000 back to the depositor. Leaves 3,000
+    // remaining, transitioning the escrow to PartiallyRefunded.
+    env.ledger().set_timestamp(3_000);
+    client.approve_refund(&bounty_id, &3_000i128, &depositor, &RefundMode::Partial);
+    client.refund(&bounty_id);
+
+    // Final refund: drains the last 3,000, completing the bounty.
+    let final_refund_at = 4_000u64;
+    env.ledger().set_timestamp(final_refund_at);
+    client.approve_refund(&bounty_id, &3_000i128, &depositor, &RefundMode::Full);
+    client.refund(&bounty_id);
+
+    // Sanity check on the escrow itself before inspecting analytics.
+    let info = client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, crate::EscrowStatus::Refunded);
+    assert_eq!(info.remaining_amount, 0);
+
+    // Now assert every analytics field simultaneously.
+    let analytics = client.get_bounty_analytics(&bounty_id);
+    assert_eq!(analytics.total_amount_locked, 10_000, "total_amount_locked");
+    assert_eq!(analytics.total_amount_released, 4_000, "total_amount_released");
+    assert_eq!(analytics.total_amount_refunded, 6_000, "total_amount_refunded");
+    assert_eq!(analytics.remaining_amount, 0, "remaining_amount");
+    assert_eq!(analytics.created_at, locked_at, "created_at");
+    assert_eq!(analytics.last_updated, final_refund_at, "last_updated");
+    assert_eq!(analytics.partial_releases_count, 1, "partial_releases_count");
+    assert_eq!(analytics.partial_refunds_count, 2, "partial_refunds_count");
+
+    // Cross-field consistency: nothing may drift out of sync with the
+    // originally locked amount after a mixed release/refund sequence.
+    assert_eq!(
+        analytics.total_amount_locked,
+        analytics.total_amount_released + analytics.total_amount_refunded + analytics.remaining_amount,
+        "total_amount_locked must equal released + refunded + remaining after the full sequence"
+    );
+}
+
+/// get_bounty_analytics must return None for a bounty ID that was never
+/// locked — not a default/zeroed BountyAnalytics record, and not a panic —
+/// even when the contract is live and already tracking other bounties.
+#[test]
+fn test_get_bounty_analytics_none_for_never_locked_bounty_on_live_contract() {
+    use soroban_sdk::testutils::{Address as _, Ledger};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+
+    let (token_client, token_sac) = create_token(&env, &admin);
+    let client = create_escrow(&env);
+    client.init(&admin, &token_client.address);
+
+    // Lock a real, unrelated bounty so the contract has live analytics
+    // state, then query an ID that was never locked.
+    token_sac.mint(&depositor, &1_000i128);
+    client.lock_funds(&depositor, &1u64, &1_000i128, &1_000_000u64);
+
+    let never_locked_id = 777u64;
+
+    // The public entrypoint maps the missing record to a typed error
+    // rather than panicking or fabricating a zeroed struct.
+    let result = client.try_get_bounty_analytics(&never_locked_id);
+    assert!(
+        result.is_err(),
+        "expected an error for a never-locked bounty id, got {:?}",
+        result
+    );
+
+    // The underlying analytics module function returns None directly.
+    let contract_id = client.address.clone();
+    env.as_contract(&contract_id, || {
+        assert!(
+            get_bounty_analytics(&env, never_locked_id).is_none(),
+            "no analytics record should exist for a never-locked bounty id"
+        );
+        // The bounty that *was* locked is unaffected and still present.
+        assert!(get_bounty_analytics(&env, 1u64).is_some());
     });
 }
