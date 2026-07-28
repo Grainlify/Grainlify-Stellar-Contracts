@@ -344,6 +344,7 @@ pub enum DataKey {
     ScheduleDispute(u64),            // schedule_id -> DisputeRecord
     Whitelist(Address),              // Address -> bool (whitelisted flag)
     WhitelistEnforced,               // bool (enforcement flag)
+    PendingAdmin,                    // Address proposed via propose_admin, awaiting accept_admin
 }
 
 #[contracttype]
@@ -943,15 +944,53 @@ impl ProgramEscrowContract {
         Self::bump_instance_ttl(&env);
     }
 
-    /// Register or replace the contract admin. Can be called multiple times to rotate the admin.
+    /// One-time bootstrap: register the contract admin when none is set yet.
+    ///
+    /// This is no longer a rotation path. Once an admin is set, further
+    /// rotation must go through `propose_admin`/`accept_admin` so a mistyped
+    /// or uncontrolled address can never instantly and irreversibly take over.
     pub fn setadmin(env: Env, admin: Address) {
-        // If admin is already set, require auth from the current admin
         if env.storage().instance().has(&DataKey::Admin) {
-            let currentadmin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        Self::bump_instance_ttl(&env);
-            currentadmin.require_auth();
+            Self::bump_instance_ttl(&env);
+            panic!("admin already set; use propose_admin/accept_admin to rotate");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Self::bump_instance_ttl(&env);
+    }
+
+    /// Step 1 of admin rotation: the current admin proposes a new admin.
+    ///
+    /// Only records the proposal — the current admin remains fully in
+    /// control until the proposed address calls `accept_admin`. Re-proposing
+    /// overwrites any prior, not-yet-accepted proposal.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin not initialized");
+        current.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Self::bump_instance_ttl(&env);
+    }
+
+    /// Step 2 of admin rotation: the proposed admin accepts, requiring their
+    /// own auth. `new_admin` must match the pending proposal exactly — this
+    /// is checked before `require_auth()`, so a caller who isn't the pending
+    /// admin is rejected even if they could trivially authorize themself.
+    /// Commits the swap and clears the pending slot.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .expect("no pending admin proposal");
+        if new_admin != pending {
+            panic!("caller is not the pending admin");
+        }
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         Self::bump_instance_ttl(&env);
     }
 
@@ -3593,6 +3632,108 @@ mod integration_tests {
         assert_eq!(config.cooldown_period, 120);
     }
 
+    // ========================================================================
+    // Two-step admin handover (Issue #387)
+    // ========================================================================
+
+    /// setadmin must no longer be able to overwrite an already-set admin in
+    /// one step — only propose_admin/accept_admin can rotate it now.
+    #[test]
+    #[should_panic(expected = "admin already set")]
+    fn test_setadmin_cannot_overwrite_existing_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        client.setadmin(&Address::generate(&env));
+        client.setadmin(&Address::generate(&env));
+    }
+
+    /// A proposed admin who never calls accept_admin leaves the original
+    /// admin fully in control — no in-between broken state.
+    #[test]
+    fn test_propose_admin_without_accept_leaves_original_admin_in_control() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let original = Address::generate(&env);
+        let proposed = Address::generate(&env);
+        client.setadmin(&original);
+        client.propose_admin(&proposed);
+
+        assert_eq!(client.getadmin(), Some(original));
+        // The original admin can still perform admin-gated actions.
+        client.update_rate_limit_config(&3600, &10, &30);
+    }
+
+    /// accept_admin must reject a caller who is not the pending admin, even
+    /// though mock_all_auths lets any address trivially self-authorize —
+    /// the pending-address check runs before require_auth is even reached.
+    #[test]
+    #[should_panic(expected = "caller is not the pending admin")]
+    fn test_accept_admin_rejects_non_pending_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let original = Address::generate(&env);
+        let proposed = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.setadmin(&original);
+        client.propose_admin(&proposed);
+
+        client.accept_admin(&attacker);
+    }
+
+    /// accept_admin succeeds when called with the correct pending admin's
+    /// address, committing the swap and clearing the pending slot.
+    #[test]
+    fn test_accept_admin_succeeds_for_correct_pending_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let original = Address::generate(&env);
+        let proposed = Address::generate(&env);
+        client.setadmin(&original);
+        client.propose_admin(&proposed);
+        client.accept_admin(&proposed);
+
+        assert_eq!(client.getadmin(), Some(proposed.clone()));
+        // Pending slot is cleared: a second accept_admin call has nothing to accept.
+        let result = client.try_accept_admin(&proposed);
+        assert!(result.is_err());
+    }
+
+    /// Re-proposing before an accept overwrites the prior pending proposal —
+    /// only the most recent proposed address can ever accept.
+    #[test]
+    fn test_repropose_admin_overwrites_prior_pending_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let original = Address::generate(&env);
+        let first_proposed = Address::generate(&env);
+        let second_proposed = Address::generate(&env);
+        client.setadmin(&original);
+        client.propose_admin(&first_proposed);
+        client.propose_admin(&second_proposed);
+
+        // The first proposed address can no longer accept: it's no longer pending.
+        let result = client.try_accept_admin(&first_proposed);
+        assert!(result.is_err());
+
+        client.accept_admin(&second_proposed);
+        assert_eq!(client.getadmin(), Some(second_proposed));
+    }
+
     #[test]
     fn testadmin_rotation() {
         let env = Env::default();
@@ -3603,11 +3744,14 @@ mod integration_tests {
         let oldadmin = Address::generate(&env);
         let newadmin = Address::generate(&env);
 
-        // setadmin doesn't panic the first time
+        // setadmin doesn't panic the first time (bootstrap)
         client.setadmin(&oldadmin);
 
-        // Rotation: set a different admin — also must not panic
-        client.setadmin(&newadmin);
+        // Rotation now goes through propose/accept, not a second setadmin call.
+        client.propose_admin(&newadmin);
+        client.accept_admin(&newadmin);
+
+        assert_eq!(client.getadmin(), Some(newadmin));
     }
 
     #[test]
@@ -3621,7 +3765,8 @@ mod integration_tests {
         let newadmin = Address::generate(&env);
 
         client.setadmin(&oldadmin);
-        client.setadmin(&newadmin);
+        client.propose_admin(&newadmin);
+        client.accept_admin(&newadmin);
 
         client.update_rate_limit_config(&3600, &10, &30);
 

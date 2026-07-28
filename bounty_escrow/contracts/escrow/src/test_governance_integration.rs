@@ -4,10 +4,13 @@ use crate::{
     governance_integration, BountyEscrowContract, BountyEscrowContractClient, Error, EscrowStatus,
     ReleaseFundsItem,
 };
-use grainlify_core::{GrainlifyContract, GrainlifyContractClient};
+use grainlify_core::{
+    GovernanceConfig, GrainlifyContract, GrainlifyContractClient, ProposalStatus, VoteType,
+    VotingScheme,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, vec, Address, BytesN, Env,
+    token, vec, Address, BytesN, Env, Symbol,
 };
 
 // Mock governance contract for testing
@@ -1070,4 +1073,126 @@ fn test_upgrade_approval_through_encoded_version_path() {
             &matching_hash
         ));
     });
+}
+
+// =============================================================================
+// End-to-end proposal lifecycle (Issue #172)
+// =============================================================================
+// The tests above either drive the mock governance contracts directly through
+// a hand-set proposal status, or use the real GrainlifyContract only for its
+// version-gate query methods (get_ver / get_version_numeric_encoded). Neither
+// exercises the real grainlify-core proposal lifecycle — create_proposal,
+// cast_vote, finalize_proposal, execute_proposal — end to end through the
+// escrow contract's cross-contract `execute_governance_proposal` entrypoint,
+// which is the actual intended production path.
+//
+// This test wires a real BountyEscrowContract to a real GrainlifyContract
+// (no mocks) and drives the full propose -> vote to quorum -> finalize ->
+// execute path, asserting the resulting state change at each stage through
+// escrow's own public interface rather than just checking that a call didn't
+// error.
+
+/// Full propose -> vote -> finalize -> execute lifecycle against the real
+/// grainlify-core governance module, observed entirely through escrow's
+/// `execute_governance_proposal` entrypoint.
+///
+/// Also covers the required failure branch: execution attempted before the
+/// proposal has reached quorum/approval must be rejected, both while voting
+/// is still open and after voting closes but before `finalize_proposal` has
+/// run.
+#[test]
+fn test_full_governance_lifecycle_propose_vote_execute_gates_escrow_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, BountyEscrowContract);
+    let escrow = BountyEscrowContractClient::new(&env, &escrow_id);
+
+    let grainlify_id = env.register_contract(None, GrainlifyContract);
+    let grainlify = GrainlifyContractClient::new(&env, &grainlify_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    escrow.init(&admin, &token);
+    escrow.set_governance_contract(&grainlify_id);
+    // Deliberately not calling set_min_governance_version: it defaults to 0,
+    // which makes the escrow-side version gate a no-op so this test isolates
+    // the proposal-lifecycle gate exercised by execute_governance_proposal
+    // (the version gate itself is already covered by the tests above).
+
+    let config = GovernanceConfig {
+        voting_period: 1_000,
+        execution_delay: 100,
+        quorum_percentage: 5_000,  // 50%, in basis points
+        approval_threshold: 6_000, // 60%, in basis points
+        min_proposal_stake: 0,
+        voting_scheme: VotingScheme::OnePersonOneVote,
+        governance_token: Address::generate(&env), // unused under OnePersonOneVote
+        one_person_total_voters: 3,
+        token_total_voting_power: 0,
+        snapshot_ledger: None,
+    };
+    grainlify.init_governance(&admin, &config);
+
+    let created_at = env.ledger().timestamp();
+    let wasm_hash = BytesN::from_array(&env, &[3u8; 32]);
+    let description = Symbol::new(&env, "raise_lock_fee_cap");
+    let proposal_id = grainlify.create_proposal(&proposer, &wasm_hash, &description);
+
+    // Failure branch: the proposal is freshly created (Active), nowhere near
+    // quorum. Escrow must reject execution rather than silently allow it.
+    assert_eq!(
+        escrow.try_execute_governance_proposal(&proposal_id),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+
+    // Two of three eligible voters vote For: total_cast/total_power = 2/3
+    // (~66%) clears the 50% quorum, and 2/2 approval votes clears the 60%
+    // approval threshold.
+    grainlify.cast_vote(&voter_a, &proposal_id, &VoteType::For);
+    grainlify.cast_vote(&voter_b, &proposal_id, &VoteType::For);
+
+    // Failure branch: quorum-worthy votes are in, but the voting period is
+    // still open, so finalize_proposal hasn't run and status is still
+    // Active, not Approved. Execution must still be rejected.
+    assert_eq!(
+        escrow.try_execute_governance_proposal(&proposal_id),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+
+    let voting_end = created_at + config.voting_period;
+    env.ledger().set_timestamp(voting_end + 1);
+
+    assert_eq!(
+        grainlify.finalize_proposal(&proposal_id),
+        ProposalStatus::Approved
+    );
+
+    // Failure branch: now Approved, but the execution delay hasn't elapsed.
+    assert_eq!(
+        escrow.try_execute_governance_proposal(&proposal_id),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+
+    env.ledger()
+        .set_timestamp(voting_end + 1 + config.execution_delay);
+
+    // Quorum reached, approved, and the execution delay has elapsed: the
+    // escrow-triggered execution now succeeds end-to-end through the real
+    // governance contract.
+    escrow.execute_governance_proposal(&proposal_id);
+
+    // Resulting on-chain state change: the proposal is consumed by
+    // execution. A second attempt through the same escrow entrypoint is
+    // rejected, proving the real governance contract's proposal status
+    // actually flipped to Executed — not just that the first call happened
+    // to return Ok once.
+    assert_eq!(
+        escrow.try_execute_governance_proposal(&proposal_id),
+        Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
 }
