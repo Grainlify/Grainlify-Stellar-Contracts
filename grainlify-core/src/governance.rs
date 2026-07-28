@@ -82,6 +82,7 @@ pub const PROPOSALS: Symbol = symbol_short!("PROPOSALS");
 pub const PROPOSAL_COUNT: Symbol = symbol_short!("PROP_CNT");
 pub const VOTES: Symbol = symbol_short!("VOTES");
 pub const GOVERNANCE_CONFIG: Symbol = symbol_short!("GOV_CFG");
+pub const GOVERNANCE_ADMIN: Symbol = symbol_short!("GOV_ADM");
 
 #[soroban_sdk::contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -120,11 +121,15 @@ impl GovernanceContract {
     ) -> Result<(), Error> {
         admin.require_auth();
 
-        // Mutually exclusive with the multisig (`init`) and single-admin
+        // One-time initialisation. This also mirrors the reinit guard used by
+        // GrainlifyContract::init and GrainlifyContract::init_admin, and is
+        // mutually exclusive with the multisig (`init`) and single-admin
         // (`init_admin`) upgrade paths — see `claim_upgrade_mode` in lib.rs.
         // In production this shares instance storage with GrainlifyContract,
         // so this check sees whatever those two initializers already
-        // claimed; in the standalone-GovernanceContract test harness it is
+        // claimed (and init_governance itself claims UpgradeMode::Governance
+        // below on success, so a second call to init_governance is rejected
+        // here too); in the standalone-GovernanceContract test harness it is
         // scoped to that isolated instance's own storage.
         if env.storage().instance().has(&DataKey::UpgradeMode) {
             return Err(Error::AlreadyInitialized);
@@ -143,6 +148,9 @@ impl GovernanceContract {
             return Err(Error::InvalidTotalVotingPower);
         }
 
+        // Persist the authenticated caller as the real governance admin of
+        // record, rather than treating `admin` as a throwaway auth argument.
+        env.storage().instance().set(&GOVERNANCE_ADMIN, &admin);
         env.storage().instance().set(&GOVERNANCE_CONFIG, &config);
         env.storage().instance().set(&PROPOSAL_COUNT, &0u32);
         env.storage()
@@ -591,6 +599,57 @@ mod test {
         env.mock_all_auths();
         client.init_governance(&admin, &config);
         (client, token_admin_client, user, contract_id)
+    }
+
+    #[test]
+    fn test_init_governance_twice_rejected() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+
+        let attacker = Address::generate(&env);
+        let hijack_config = GovernanceConfig {
+            voting_period: 1,
+            execution_delay: 0,
+            quorum_percentage: 1,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::OnePersonOneVote,
+            governance_token: Address::generate(&env),
+            one_person_total_voters: 1,
+            token_total_voting_power: 0,
+            snapshot_ledger: None,
+        };
+
+        let result = client.try_init_governance(&attacker, &hijack_config);
+        assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    }
+
+    #[test]
+    fn test_init_governance_persists_admin_of_record() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let config = GovernanceConfig {
+            voting_period: 100,
+            execution_delay: 0,
+            quorum_percentage: 1000,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::OnePersonOneVote,
+            governance_token: Address::generate(&env),
+            one_person_total_voters: 10,
+            token_total_voting_power: 0,
+            snapshot_ledger: None,
+        };
+
+        env.mock_all_auths();
+        client.init_governance(&admin, &config);
+
+        let stored_admin: Address = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&GOVERNANCE_ADMIN).unwrap()
+        });
+        assert_eq!(stored_admin, admin);
     }
 
     fn create_test_proposal(
