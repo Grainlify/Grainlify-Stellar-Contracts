@@ -280,7 +280,17 @@ impl GovernanceContract {
             return Err(Error::InvalidTotalVotingPower);
         }
 
-        let quorum_bps = (total_cast * 10000) / total_power;
+        // checked_mul: total_cast grows monotonically with votes cast and, for
+        // TokenWeighted voting, is derived from a configured token's balance()
+        // — a legitimate large token supply can make total_cast * 10000
+        // overflow i128::MAX. Since total_cast never shrinks, an unchecked
+        // panic here would make the proposal permanently un-finalizable
+        // (every retry hits the same overflow). Report it as a typed error
+        // instead, same as the additive vote tallying in cast_vote.
+        let quorum_bps = total_cast
+            .checked_mul(10000)
+            .ok_or(Error::VoteWeightOverflow)?
+            / total_power;
         if quorum_bps < config.quorum_percentage as i128 {
             proposal.status = ProposalStatus::Rejected;
             proposals.set(proposal_id, proposal.clone());
@@ -292,7 +302,11 @@ impl GovernanceContract {
         if approval_votes == 0 {
             proposal.status = ProposalStatus::Rejected;
         } else {
-            let approval_bps = (proposal.votes_for * 10000) / approval_votes;
+            let approval_bps = proposal
+                .votes_for
+                .checked_mul(10000)
+                .ok_or(Error::VoteWeightOverflow)?
+                / approval_votes;
             if approval_bps >= config.approval_threshold as i128 {
                 proposal.status = ProposalStatus::Approved;
             } else {
@@ -858,7 +872,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_strictly_before_voting_end_rejected() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -876,7 +891,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_exact_voting_end_boundary_rejected() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -894,7 +910,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_one_second_past_voting_end_succeeds() {
         let env = Env::default();
-        let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -912,7 +929,7 @@ mod test {
 #[test]
 fn test_sweep_expired_proposal_nonexistent_fails() {
     let env = Env::default();
-    let (client, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let non_existent_id = 999;
 
     let result = client.try_sweep_expired_proposal(&non_existent_id, &150);
@@ -922,7 +939,7 @@ fn test_sweep_expired_proposal_nonexistent_fails() {
 #[test]
 fn test_sweep_expired_proposal_already_expired_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     // First sweep after expiry
@@ -942,7 +959,7 @@ fn test_sweep_expired_proposal_already_expired_fails() {
 #[test]
 fn test_sweep_expired_proposal_already_finalized_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 2);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     // Vote and finalize the proposal
@@ -962,7 +979,7 @@ fn test_sweep_expired_proposal_already_finalized_fails() {
 #[test]
 fn test_cancel_proposal_success() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     let result = client.try_cancel_proposal(&proposer, &prop_id);
@@ -993,7 +1010,7 @@ fn test_cancel_proposal_success() {
 #[test]
 fn test_cancel_proposal_unauthorized() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
     let unauthorized = Address::generate(&env);
 
@@ -1009,7 +1026,7 @@ fn test_cancel_proposal_unauthorized() {
 #[test]
 fn test_cancel_proposal_after_passing_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     client.cast_vote(&proposer, &prop_id, &VoteType::For);
@@ -1024,7 +1041,7 @@ fn test_cancel_proposal_after_passing_fails() {
 #[test]
 fn test_cancel_proposal_already_cancelled_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     client.cancel_proposal(&proposer, &prop_id);
@@ -1036,7 +1053,7 @@ fn test_cancel_proposal_already_cancelled_fails() {
 #[test]
 fn test_cancel_proposal_wrong_proposal_id_returns_unauthorized() {
     let env = Env::default();
-    let (client, _, proposer1) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer1, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let proposer2 = Address::generate(&env);
     let _prop1 = create_test_proposal(&env, &client, &proposer1);
     let prop2 = create_test_proposal(&env, &client, &proposer2);
@@ -1051,7 +1068,7 @@ fn test_cancel_proposal_wrong_proposal_id_returns_unauthorized() {
 #[test]
 fn test_cancel_proposal_after_rejection_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 3);
     let voter2 = Address::generate(&env);
     let voter3 = Address::generate(&env);
     let prop_id = create_test_proposal(&env, &client, &proposer);
@@ -1071,7 +1088,7 @@ fn test_cancel_proposal_after_rejection_fails() {
 #[test]
 fn test_cancel_proposal_after_sweep_expired_fails() {
     let env = Env::default();
-    let (client, _, proposer) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+    let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     let current_time = 150;
@@ -1088,7 +1105,7 @@ fn test_cancel_proposal_after_sweep_expired_fails() {
 #[test]
 fn test_cross_contract_auth_scope_minimal() {
     let env = Env::default();
-    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let (client, token_admin_client, proposer, _) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
     let token_admin_client = token_admin_client.unwrap();
 
     token_admin_client.mint(&proposer, &50);
@@ -1131,7 +1148,7 @@ fn test_cross_contract_auth_scope_minimal() {
 #[test]
 fn test_edge_case_vote_weight_overflow() {
     let env = Env::default();
-    let (client, token_admin_client, proposer) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
+    let (client, token_admin_client, proposer, _) = setup_test(&env, VotingScheme::TokenWeighted, 1000, 10, 0);
     let token_admin_client = token_admin_client.unwrap();
 
     let voter1 = Address::generate(&env);
@@ -1155,5 +1172,165 @@ fn test_edge_case_vote_weight_overflow() {
     // This must trigger the typed overflow error, not a panic
     let res2 = client.try_cast_vote(&voter2, &prop_id, &VoteType::For);
     assert_eq!(res2, Err(Ok(Error::VoteWeightOverflow)));
+}
+
+/// A TokenWeighted voter with a legitimately large balance (well within
+/// cast_vote's own i128::MAX tally guard) can still make finalize_proposal's
+/// `total_cast * 10000` bps math overflow. This must return a typed error,
+/// not panic (Issue #385).
+#[test]
+fn test_finalize_proposal_quorum_bps_overflow_returns_typed_error() {
+    let env = Env::default();
+    let (client, token_admin_client, proposer, _) =
+        setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
+    let token_admin_client = token_admin_client.unwrap();
+    let voter = Address::generate(&env);
+
+    // i128::MAX / 5000 * 10000 overflows i128::MAX by design.
+    token_admin_client.mint(&voter, &(i128::MAX / 5000));
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    client.cast_vote(&voter, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 200);
+
+    let result = client.try_finalize_proposal(&prop_id);
+    assert_eq!(result, Err(Ok(Error::VoteWeightOverflow)));
+}
+
+// =============================================================================
+// Proposal lifecycle (Issue #179)
+// =============================================================================
+// A single end-to-end happy-path test plus one dedicated test per rejection
+// branch: double-voting and voting-after-expiry are already covered above by
+// test_edge_case_double_voting and test_edge_case_voting_after_expiration
+// respectively; the two tests below cover the remaining gap — execution
+// attempted before quorum/approval, and execution of an already-executed
+// proposal — which nothing in this file previously exercised (ProposalStatus
+// never reached Executed in any existing test's assertions).
+
+/// Full propose -> vote to quorum -> finalize -> execute lifecycle, asserting
+/// the proposal's status transitions at every step (Active -> Approved ->
+/// Executed), not just that each call returns Ok.
+#[test]
+fn test_proposal_lifecycle_happy_path_create_vote_execute() {
+    let env = Env::default();
+    // quorum 50%, 3 total one-person-one-vote voters, approval_threshold fixed
+    // at 5000 (50%) by setup_test, execution_delay fixed at 0.
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+
+    // 2 of 3 voters vote For: total_cast/total_power = 2/3 (~66%) clears the
+    // 50% quorum, and 2/2 approval votes clears the 50% approval threshold.
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active,
+        "status must not change until finalize_proposal runs"
+    );
+
+    // voting_period is fixed at 100 by setup_test.
+    env.ledger().with_mut(|li| li.timestamp = 101);
+    assert_eq!(
+        client.finalize_proposal(&prop_id),
+        ProposalStatus::Approved
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Approved
+    );
+
+    // execution_delay is fixed at 0 by setup_test, so executable_at == voting_end (100).
+    client.execute_proposal(&prop_id);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+}
+
+/// Execution attempted before the proposal has quorum/approval must be
+/// rejected with ProposalNotApproved — both while voting is freshly open
+/// (Active, no votes) and after votes are in but before finalize_proposal
+/// has run (still Active, not yet Approved).
+#[test]
+fn test_proposal_lifecycle_rejects_execute_before_quorum() {
+    let env = Env::default();
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Freshly created, no votes at all.
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+
+    // Quorum-worthy votes are in, but finalize_proposal hasn't run yet, so
+    // status is still Active rather than Approved.
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+}
+
+/// Once a proposal has been executed, a second execute_proposal call must be
+/// rejected — the proposal's status has already moved past Approved to
+/// Executed, so it fails the same ProposalNotApproved check as an
+/// unapproved proposal, not some separate "already executed" error.
+#[test]
+fn test_proposal_lifecycle_rejects_executing_already_executed_proposal() {
+    let env = Env::default();
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 101);
+    assert_eq!(
+        client.finalize_proposal(&prop_id),
+        ProposalStatus::Approved
+    );
+
+    client.execute_proposal(&prop_id);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    // Still Executed, not reverted or otherwise mutated by the rejected retry.
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
 }
 }
