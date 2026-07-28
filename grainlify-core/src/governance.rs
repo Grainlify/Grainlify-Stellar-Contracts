@@ -1,3 +1,4 @@
+use crate::{DataKey, UpgradeMode};
 use soroban_sdk::{contracttype, symbol_short, token, Address, BytesN, Env, Map, Symbol};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,9 +121,17 @@ impl GovernanceContract {
     ) -> Result<(), Error> {
         admin.require_auth();
 
-        // One-time initialisation, mirroring the reinit guard already used by
-        // GrainlifyContract::init and GrainlifyContract::init_admin.
-        if env.storage().instance().has(&GOVERNANCE_CONFIG) {
+        // One-time initialisation. This also mirrors the reinit guard used by
+        // GrainlifyContract::init and GrainlifyContract::init_admin, and is
+        // mutually exclusive with the multisig (`init`) and single-admin
+        // (`init_admin`) upgrade paths — see `claim_upgrade_mode` in lib.rs.
+        // In production this shares instance storage with GrainlifyContract,
+        // so this check sees whatever those two initializers already
+        // claimed (and init_governance itself claims UpgradeMode::Governance
+        // below on success, so a second call to init_governance is rejected
+        // here too); in the standalone-GovernanceContract test harness it is
+        // scoped to that isolated instance's own storage.
+        if env.storage().instance().has(&DataKey::UpgradeMode) {
             return Err(Error::AlreadyInitialized);
         }
 
@@ -144,6 +153,9 @@ impl GovernanceContract {
         env.storage().instance().set(&GOVERNANCE_ADMIN, &admin);
         env.storage().instance().set(&GOVERNANCE_CONFIG, &config);
         env.storage().instance().set(&PROPOSAL_COUNT, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeMode, &UpgradeMode::Governance);
         Ok(())
     }
 
