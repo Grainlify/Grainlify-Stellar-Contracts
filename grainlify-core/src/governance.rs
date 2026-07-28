@@ -1197,4 +1197,140 @@ fn test_finalize_proposal_quorum_bps_overflow_returns_typed_error() {
     let result = client.try_finalize_proposal(&prop_id);
     assert_eq!(result, Err(Ok(Error::VoteWeightOverflow)));
 }
+
+// =============================================================================
+// Proposal lifecycle (Issue #179)
+// =============================================================================
+// A single end-to-end happy-path test plus one dedicated test per rejection
+// branch: double-voting and voting-after-expiry are already covered above by
+// test_edge_case_double_voting and test_edge_case_voting_after_expiration
+// respectively; the two tests below cover the remaining gap — execution
+// attempted before quorum/approval, and execution of an already-executed
+// proposal — which nothing in this file previously exercised (ProposalStatus
+// never reached Executed in any existing test's assertions).
+
+/// Full propose -> vote to quorum -> finalize -> execute lifecycle, asserting
+/// the proposal's status transitions at every step (Active -> Approved ->
+/// Executed), not just that each call returns Ok.
+#[test]
+fn test_proposal_lifecycle_happy_path_create_vote_execute() {
+    let env = Env::default();
+    // quorum 50%, 3 total one-person-one-vote voters, approval_threshold fixed
+    // at 5000 (50%) by setup_test, execution_delay fixed at 0.
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+
+    // 2 of 3 voters vote For: total_cast/total_power = 2/3 (~66%) clears the
+    // 50% quorum, and 2/2 approval votes clears the 50% approval threshold.
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active,
+        "status must not change until finalize_proposal runs"
+    );
+
+    // voting_period is fixed at 100 by setup_test.
+    env.ledger().with_mut(|li| li.timestamp = 101);
+    assert_eq!(
+        client.finalize_proposal(&prop_id),
+        ProposalStatus::Approved
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Approved
+    );
+
+    // execution_delay is fixed at 0 by setup_test, so executable_at == voting_end (100).
+    client.execute_proposal(&prop_id);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+}
+
+/// Execution attempted before the proposal has quorum/approval must be
+/// rejected with ProposalNotApproved — both while voting is freshly open
+/// (Active, no votes) and after votes are in but before finalize_proposal
+/// has run (still Active, not yet Approved).
+#[test]
+fn test_proposal_lifecycle_rejects_execute_before_quorum() {
+    let env = Env::default();
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Freshly created, no votes at all.
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+
+    // Quorum-worthy votes are in, but finalize_proposal hasn't run yet, so
+    // status is still Active rather than Approved.
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+}
+
+/// Once a proposal has been executed, a second execute_proposal call must be
+/// rejected — the proposal's status has already moved past Approved to
+/// Executed, so it fails the same ProposalNotApproved check as an
+/// unapproved proposal, not some separate "already executed" error.
+#[test]
+fn test_proposal_lifecycle_rejects_executing_already_executed_proposal() {
+    let env = Env::default();
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 101);
+    assert_eq!(
+        client.finalize_proposal(&prop_id),
+        ProposalStatus::Approved
+    );
+
+    client.execute_proposal(&prop_id);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    // Still Executed, not reverted or otherwise mutated by the rejected retry.
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+}
 }
