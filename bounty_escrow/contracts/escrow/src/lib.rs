@@ -417,6 +417,10 @@ pub enum Error {
     /// proposal approving it (or no governance contract is configured at
     /// all — upgrades fail closed, they are never permitted by default).
     UpgradeNotApproved = 26,
+    /// Returned when an arithmetic operation on an analytics accumulator
+    /// would overflow `i128` or `u32`.  Appended last to preserve
+    /// existing discriminant ordering.
+    AnalyticsOverflow = 27,
 }
 
 #[contracttype]
@@ -1540,8 +1544,9 @@ impl BountyEscrowContract {
 
         let timestamp = env.ledger().timestamp();
 
-        // Update analytics
-        update_analytics_on_release(&env, bounty_id, release_amount, timestamp);
+        // Update analytics; map overflow to a typed error rather than panicking.
+        update_analytics_on_release(&env, bounty_id, release_amount, timestamp)
+            .map_err(|_| Error::AnalyticsOverflow)?;
 
         // Update incremental aggregate counters
         Self::transition_locked_to_released(&env, release_amount);
@@ -2033,7 +2038,8 @@ impl BountyEscrowContract {
         // Update per-bounty analytics (mirrors release_funds/refund) so
         // total_amount_released/remaining_amount never drift out of sync
         // with the escrow's own remaining_amount after a partial release.
-        update_analytics_on_release(&env, bounty_id, payout_amount, env.ledger().timestamp());
+        update_analytics_on_release(&env, bounty_id, payout_amount, env.ledger().timestamp())
+            .map_err(|_| Error::AnalyticsOverflow)?;
 
         // Update incremental aggregate counters
         Self::partial_release_from_locked(&env, payout_amount);
@@ -2192,8 +2198,9 @@ impl BountyEscrowContract {
             .set(&DataKey::Escrow(bounty_id), &escrow);
         Self::bump_escrow_ttl(&env, bounty_id);
 
-        // Update analytics
-        update_analytics_on_refund(&env, bounty_id, refund_amount, now);
+        // Update analytics; map overflow to a typed error rather than panicking.
+        update_analytics_on_refund(&env, bounty_id, refund_amount, now)
+            .map_err(|_| Error::AnalyticsOverflow)?;
 
         // Update incremental aggregate counters
         match (original_status, escrow.status.clone()) {
@@ -2373,7 +2380,8 @@ impl BountyEscrowContract {
                 .set(&DataKey::Escrow(bounty_id), &escrow);
             Self::bump_escrow_ttl(&env, bounty_id);
 
-            update_analytics_on_refund(&env, bounty_id, refund_amount, now);
+            update_analytics_on_refund(&env, bounty_id, refund_amount, now)
+                .map_err(|_| Error::AnalyticsOverflow)?;
 
             emit_bounty_state_transitioned(
                 &env,
