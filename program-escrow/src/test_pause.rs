@@ -25,6 +25,8 @@ fn setup_program_withadmin(env: &Env) -> (ProgramEscrowContract, Address, Addres
 #[test]
 fn test_default_pause_flags_are_all_false() {
     let env = Env::default();
+    // `initialize_contract` requires the incoming admin's own auth as of #491.
+    env.mock_all_auths();
     let (contract, admin) = setup_withadmin(&env);
 
     let flags = contract.get_pause_flags(&env);
@@ -156,6 +158,11 @@ fn test_double_initialize_contract() {
     let contract = ProgramEscrowContract;
     let admin = Address::generate(&env);
 
+    // #491 added `admin.require_auth()` to `initialize_contract`, so the first
+    // call needs authorization. The second still panics with "Already
+    // initialized" rather than an auth error because the already-initialized
+    // guard deliberately runs *before* `require_auth()`.
+    env.mock_all_auths();
     contract.initialize_contract(&env, admin.clone());
     contract.initialize_contract(&env, admin); // should panic
 }
