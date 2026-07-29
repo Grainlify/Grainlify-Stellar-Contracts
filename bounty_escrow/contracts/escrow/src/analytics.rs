@@ -13,31 +13,64 @@
 //! ## Events
 //! - `BountyStateTransitioned` - Emitted when a bounty status changes
 //! - `AnalyticsSnapshot` - Periodic snapshots of contract-wide metrics
+//!
+//! ## Arithmetic safety
+//! All aggregate accumulator updates use `checked_add` / `checked_sub` to
+//! prevent silent wrap-around on `i128` fields.  Any overflow returns
+//! [`AnalyticsError::Overflow`] rather than panicking or wrapping silently.
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
 /// Analytics version
 pub const ANALYTICS_VERSION_V1: u32 = 1;
 
+/// Error type for analytics operations.
+///
+/// `AnalyticsError::Overflow` is returned whenever a checked arithmetic
+/// operation on an aggregate accumulator would overflow `i128` or `u32`.
+/// Appended at the end to avoid renumbering any previously-defined variants
+/// in the parent contract's `Error` enum.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AnalyticsError {
+    /// Arithmetic overflow in an aggregate accumulator.
+    ///
+    /// This should never occur during normal contract operation because bounty
+    /// amounts are bounded by the token supply, but is returned instead of
+    /// panicking or wrapping silently when near-`i128::MAX` inputs are detected.
+    Overflow,
+}
+
 /// Compact analytics struct for bounty-level summaries
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BountyAnalytics {
-    /// Total amount originally locked in this bounty
+    /// Total amount originally locked in this bounty.
+    ///
+    /// Expected input bound: 0 ≤ total_amount_locked ≤ i128::MAX / 2.
+    /// Values above this bound will cause `checked_add` to return
+    /// `AnalyticsError::Overflow` on the first accumulation.
     pub total_amount_locked: i128,
-    /// Total amount released to contributors
+    /// Total amount released to contributors.
+    ///
+    /// Expected input bound: 0 ≤ total_amount_released ≤ total_amount_locked.
     pub total_amount_released: i128,
-    /// Total amount refunded to original depositor
+    /// Total amount refunded to original depositor.
+    ///
+    /// Expected input bound: 0 ≤ total_amount_refunded ≤ total_amount_locked.
     pub total_amount_refunded: i128,
-    /// Current remaining amount in escrow
+    /// Current remaining amount in escrow.
     pub remaining_amount: i128,
     /// Bounty creation timestamp
     pub created_at: u64,
     /// Timestamp of last state transition
     pub last_updated: u64,
-    /// Number of partial releases performed
+    /// Number of partial releases performed.
+    ///
+    /// Expected input bound: partial_releases_count ≤ u32::MAX.
     pub partial_releases_count: u32,
-    /// Number of partial refunds performed
+    /// Number of partial refunds performed.
+    ///
+    /// Expected input bound: partial_refunds_count ≤ u32::MAX.
     pub partial_refunds_count: u32,
 }
 
@@ -157,50 +190,94 @@ pub fn init_bounty_analytics(env: &Env, bounty_id: u64, amount: i128, timestamp:
         .set(&AnalyticsKey::BountyMetrics(bounty_id), &analytics);
 }
 
-/// Update analytics on release
+/// Update analytics on release.
+///
+/// # Input bounds
+/// `release_amount` must satisfy `0 ≤ release_amount ≤ i128::MAX − analytics.total_amount_released`.
+/// Values outside this range cause `Err(AnalyticsError::Overflow)` to be returned instead
+/// of panicking or allowing silent wrap-around of the accumulator.
+///
+/// # Errors
+/// Returns `Err(AnalyticsError::Overflow)` when the checked addition of
+/// `release_amount` into `total_amount_released` or `partial_releases_count`
+/// would exceed the type's maximum value.
 pub fn update_analytics_on_release(
     env: &Env,
     bounty_id: u64,
     release_amount: i128,
     timestamp: u64,
-) {
+) -> Result<(), AnalyticsError> {
     if let Some(mut analytics) = env
         .storage()
         .persistent()
         .get::<AnalyticsKey, BountyAnalytics>(&AnalyticsKey::BountyMetrics(bounty_id))
     {
-        analytics.total_amount_released += release_amount;
+        // Use checked_add to detect overflow rather than panicking or wrapping.
+        // Changing field order or types here is a BREAKING CHANGE for off-chain
+        // consumers (e.g. internal/soroban/event_parser.go) that decode
+        // BountyAnalytics by field position — update those consumers before
+        // deploying any schema change.
+        analytics.total_amount_released = analytics
+            .total_amount_released
+            .checked_add(release_amount)
+            .ok_or(AnalyticsError::Overflow)?;
         analytics.remaining_amount = analytics.remaining_amount.saturating_sub(release_amount);
         analytics.last_updated = timestamp;
-        analytics.partial_releases_count += 1;
+        analytics.partial_releases_count = analytics
+            .partial_releases_count
+            .checked_add(1)
+            .ok_or(AnalyticsError::Overflow)?;
 
         env.storage()
             .persistent()
             .set(&AnalyticsKey::BountyMetrics(bounty_id), &analytics);
     }
+    Ok(())
 }
 
-/// Update analytics on refund
+/// Update analytics on refund.
+///
+/// # Input bounds
+/// `refund_amount` must satisfy `0 ≤ refund_amount ≤ i128::MAX − analytics.total_amount_refunded`.
+/// Values outside this range cause `Err(AnalyticsError::Overflow)` to be returned instead
+/// of panicking or allowing silent wrap-around of the accumulator.
+///
+/// # Errors
+/// Returns `Err(AnalyticsError::Overflow)` when the checked addition of
+/// `refund_amount` into `total_amount_refunded` or `partial_refunds_count`
+/// would exceed the type's maximum value.
 pub fn update_analytics_on_refund(
     env: &Env,
     bounty_id: u64,
     refund_amount: i128,
     timestamp: u64,
-) {
+) -> Result<(), AnalyticsError> {
     if let Some(mut analytics) = env
         .storage()
         .persistent()
         .get::<AnalyticsKey, BountyAnalytics>(&AnalyticsKey::BountyMetrics(bounty_id))
     {
-        analytics.total_amount_refunded += refund_amount;
+        // Use checked_add to detect overflow rather than panicking or wrapping.
+        // Changing field order or types here is a BREAKING CHANGE for off-chain
+        // consumers (e.g. internal/soroban/event_parser.go) that decode
+        // BountyAnalytics by field position — update those consumers before
+        // deploying any schema change.
+        analytics.total_amount_refunded = analytics
+            .total_amount_refunded
+            .checked_add(refund_amount)
+            .ok_or(AnalyticsError::Overflow)?;
         analytics.remaining_amount = analytics.remaining_amount.saturating_sub(refund_amount);
         analytics.last_updated = timestamp;
-        analytics.partial_refunds_count += 1;
+        analytics.partial_refunds_count = analytics
+            .partial_refunds_count
+            .checked_add(1)
+            .ok_or(AnalyticsError::Overflow)?;
 
         env.storage()
             .persistent()
             .set(&AnalyticsKey::BountyMetrics(bounty_id), &analytics);
     }
+    Ok(())
 }
 
 /// Get per-bounty analytics
@@ -260,7 +337,7 @@ mod tests {
             let amount = 1000i128;
 
             init_bounty_analytics(&env, bounty_id, amount, 100);
-            update_analytics_on_release(&env, bounty_id, 500, 200);
+            update_analytics_on_release(&env, bounty_id, 500, 200).unwrap();
 
             let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
             assert_eq!(analytics.total_amount_released, 500);
@@ -280,7 +357,7 @@ mod tests {
             let amount = 1000i128;
 
             init_bounty_analytics(&env, bounty_id, amount, 100);
-            update_analytics_on_refund(&env, bounty_id, 300, 200);
+            update_analytics_on_refund(&env, bounty_id, 300, 200).unwrap();
 
             let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
             assert_eq!(analytics.total_amount_refunded, 300);
@@ -303,20 +380,20 @@ mod tests {
             init_bounty_analytics(&env, bounty_id, amount, 100);
 
             // Partial release
-            update_analytics_on_release(&env, bounty_id, 300, 200);
+            update_analytics_on_release(&env, bounty_id, 300, 200).unwrap();
             let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
             assert_eq!(analytics.remaining_amount, 700);
             assert_eq!(analytics.total_amount_released, 300);
 
             // Another release
-            update_analytics_on_release(&env, bounty_id, 300, 300);
+            update_analytics_on_release(&env, bounty_id, 300, 300).unwrap();
             let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
             assert_eq!(analytics.remaining_amount, 400);
             assert_eq!(analytics.total_amount_released, 600);
             assert_eq!(analytics.partial_releases_count, 2);
 
             // Final refund for remaining
-            update_analytics_on_refund(&env, bounty_id, 400, 400);
+            update_analytics_on_refund(&env, bounty_id, 400, 400).unwrap();
             let analytics = get_bounty_analytics(&env, bounty_id).unwrap();
             assert_eq!(analytics.remaining_amount, 0);
             assert_eq!(analytics.total_amount_refunded, 400);
@@ -332,6 +409,207 @@ mod tests {
         env.as_contract(&contract_id, || {
             let analytics = get_bounty_analytics(&env, 999u64);
             assert!(analytics.is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow / checked-arithmetic tests (Issue #165)
+    // -----------------------------------------------------------------------
+
+    /// release: near-max value that still fits must succeed.
+    ///
+    /// Hand-computed:
+    ///   total_amount_released = 0 before
+    ///   release_amount        = i128::MAX − 1
+    ///   result                = i128::MAX − 1  (no overflow)
+    #[test]
+    fn test_release_near_max_no_overflow() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 100u64;
+            // Initialize with a very large locked amount so the accumulator
+            // starts at 0 and we can push it close to i128::MAX.
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 1);
+
+            let near_max = i128::MAX - 1;
+            let result = update_analytics_on_release(&env, bounty_id, near_max, 2);
+            assert!(result.is_ok(), "near-max release must not overflow");
+
+            let a = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(a.total_amount_released, near_max);
+        });
+    }
+
+    /// release: adding to an accumulator already at i128::MAX must return Overflow.
+    ///
+    /// Hand-computed:
+    ///   total_amount_released = i128::MAX before the second call
+    ///   release_amount        = 1
+    ///   i128::MAX + 1 overflows → AnalyticsError::Overflow
+    #[test]
+    fn test_release_overflow_returns_error_not_panic() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 101u64;
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 1);
+
+            // First call: fill the accumulator to i128::MAX.
+            update_analytics_on_release(&env, bounty_id, i128::MAX, 2)
+                .expect("first call must succeed");
+
+            // Second call: any positive increment must now overflow.
+            let overflow_result = update_analytics_on_release(&env, bounty_id, 1, 3);
+            assert_eq!(
+                overflow_result,
+                Err(AnalyticsError::Overflow),
+                "overflow must return Err(AnalyticsError::Overflow), not panic"
+            );
+        });
+    }
+
+    /// refund: near-max value that still fits must succeed.
+    ///
+    /// Hand-computed:
+    ///   total_amount_refunded = 0 before
+    ///   refund_amount         = i128::MAX − 1
+    ///   result                = i128::MAX − 1  (no overflow)
+    #[test]
+    fn test_refund_near_max_no_overflow() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 102u64;
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 1);
+
+            let near_max = i128::MAX - 1;
+            let result = update_analytics_on_refund(&env, bounty_id, near_max, 2);
+            assert!(result.is_ok(), "near-max refund must not overflow");
+
+            let a = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(a.total_amount_refunded, near_max);
+        });
+    }
+
+    /// refund: adding to an accumulator already at i128::MAX must return Overflow.
+    ///
+    /// Hand-computed:
+    ///   total_amount_refunded = i128::MAX before the second call
+    ///   refund_amount         = 1
+    ///   i128::MAX + 1 overflows → AnalyticsError::Overflow
+    #[test]
+    fn test_refund_overflow_returns_error_not_panic() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 103u64;
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 1);
+
+            // First call: fill the accumulator to i128::MAX.
+            update_analytics_on_refund(&env, bounty_id, i128::MAX, 2)
+                .expect("first call must succeed");
+
+            // Second call: any positive increment must now overflow.
+            let overflow_result = update_analytics_on_refund(&env, bounty_id, 1, 3);
+            assert_eq!(
+                overflow_result,
+                Err(AnalyticsError::Overflow),
+                "overflow must return Err(AnalyticsError::Overflow), not panic"
+            );
+        });
+    }
+
+    /// release: state must not be mutated after an overflow is detected.
+    ///
+    /// The accumulator and counter should remain at their pre-call values when
+    /// the checked_add detects an overflow and returns early.
+    #[test]
+    fn test_release_overflow_state_not_mutated() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 104u64;
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 1);
+
+            // Fill the accumulator to i128::MAX.
+            update_analytics_on_release(&env, bounty_id, i128::MAX, 2).unwrap();
+
+            let before = get_bounty_analytics(&env, bounty_id).unwrap();
+
+            // This must fail without mutating state.
+            let _ = update_analytics_on_release(&env, bounty_id, 1, 3);
+
+            let after = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(
+                before.total_amount_released, after.total_amount_released,
+                "total_amount_released must not change after overflow"
+            );
+            assert_eq!(
+                before.partial_releases_count, after.partial_releases_count,
+                "partial_releases_count must not change after overflow"
+            );
+        });
+    }
+
+    /// refund: state must not be mutated after an overflow is detected.
+    #[test]
+    fn test_refund_overflow_state_not_mutated() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let bounty_id = 105u64;
+            init_bounty_analytics(&env, bounty_id, i128::MAX, 1);
+
+            // Fill the accumulator to i128::MAX.
+            update_analytics_on_refund(&env, bounty_id, i128::MAX, 2).unwrap();
+
+            let before = get_bounty_analytics(&env, bounty_id).unwrap();
+
+            // This must fail without mutating state.
+            let _ = update_analytics_on_refund(&env, bounty_id, 1, 3);
+
+            let after = get_bounty_analytics(&env, bounty_id).unwrap();
+            assert_eq!(
+                before.total_amount_refunded, after.total_amount_refunded,
+                "total_amount_refunded must not change after overflow"
+            );
+            assert_eq!(
+                before.partial_refunds_count, after.partial_refunds_count,
+                "partial_refunds_count must not change after overflow"
+            );
+        });
+    }
+
+    /// Missing bounty: update on a non-existent bounty must return Ok(()) (silent no-op).
+    #[test]
+    fn test_release_missing_bounty_is_noop_ok() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let result = update_analytics_on_release(&env, 999, 500, 100);
+            assert_eq!(result, Ok(()), "missing bounty must return Ok(())");
+            assert!(get_bounty_analytics(&env, 999).is_none());
+        });
+    }
+
+    /// Missing bounty: update on a non-existent bounty must return Ok(()) (silent no-op).
+    #[test]
+    fn test_refund_missing_bounty_is_noop_ok() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, DummyAnalyticsContract);
+
+        env.as_contract(&contract_id, || {
+            let result = update_analytics_on_refund(&env, 999, 300, 50);
+            assert_eq!(result, Ok(()), "missing bounty must return Ok(())");
+            assert!(get_bounty_analytics(&env, 999).is_none());
         });
     }
 }

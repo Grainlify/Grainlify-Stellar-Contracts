@@ -139,7 +139,7 @@ fn test_init_analytics_multiple_bounties_independent() {
 fn test_release_missing_bounty_is_noop() {
     let (env, id) = setup();
     env.as_contract(&id, || {
-        update_analytics_on_release(&env, 99, 500, 100); // no init – must not panic
+        update_analytics_on_release(&env, 99, 500, 100).unwrap(); // no init – must not panic
         assert!(get_bounty_analytics(&env, 99).is_none());
     });
 }
@@ -158,7 +158,7 @@ fn test_release_single_partial_release() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 20, 1_000, 100);
-        update_analytics_on_release(&env, 20, 500, 200);
+        update_analytics_on_release(&env, 20, 500, 200).unwrap();
 
         let a = get_bounty_analytics(&env, 20).unwrap();
         assert_eq!(a.total_amount_released, 500);
@@ -182,19 +182,19 @@ fn test_release_multiple_partial_releases_accumulate() {
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 21, 1_000, 1);
 
-        update_analytics_on_release(&env, 21, 300, 2);
+        update_analytics_on_release(&env, 21, 300, 2).unwrap();
         let a = get_bounty_analytics(&env, 21).unwrap();
         assert_eq!(a.total_amount_released, 300);
         assert_eq!(a.remaining_amount, 700);
         assert_eq!(a.partial_releases_count, 1);
 
-        update_analytics_on_release(&env, 21, 300, 3);
+        update_analytics_on_release(&env, 21, 300, 3).unwrap();
         let a = get_bounty_analytics(&env, 21).unwrap();
         assert_eq!(a.total_amount_released, 600);
         assert_eq!(a.remaining_amount, 400);
         assert_eq!(a.partial_releases_count, 2);
 
-        update_analytics_on_release(&env, 21, 400, 4);
+        update_analytics_on_release(&env, 21, 400, 4).unwrap();
         let a = get_bounty_analytics(&env, 21).unwrap();
         assert_eq!(a.total_amount_released, 1_000);
         assert_eq!(a.remaining_amount, 0);
@@ -210,7 +210,7 @@ fn test_release_exact_amount_drains_to_zero() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 22, 500, 1);
-        update_analytics_on_release(&env, 22, 500, 2);
+        update_analytics_on_release(&env, 22, 500, 2).unwrap();
 
         let a = get_bounty_analytics(&env, 22).unwrap();
         assert_eq!(a.remaining_amount, 0);
@@ -227,7 +227,7 @@ fn test_release_zero_amount_increments_count_only() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 23, 1_000, 1);
-        update_analytics_on_release(&env, 23, 0, 2);
+        update_analytics_on_release(&env, 23, 0, 2).unwrap();
 
         let a = get_bounty_analytics(&env, 23).unwrap();
         assert_eq!(a.total_amount_released, 0);
@@ -245,7 +245,7 @@ fn test_release_zero_amount_increments_count_only() {
 fn test_refund_missing_bounty_is_noop() {
     let (env, id) = setup();
     env.as_contract(&id, || {
-        update_analytics_on_refund(&env, 88, 100, 50);
+        update_analytics_on_refund(&env, 88, 100, 50).unwrap();
         assert!(get_bounty_analytics(&env, 88).is_none());
     });
 }
@@ -264,7 +264,7 @@ fn test_refund_single_partial_refund() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 30, 1_000, 100);
-        update_analytics_on_refund(&env, 30, 300, 200);
+        update_analytics_on_refund(&env, 30, 300, 200).unwrap();
 
         let a = get_bounty_analytics(&env, 30).unwrap();
         assert_eq!(a.total_amount_refunded, 300);
@@ -287,13 +287,13 @@ fn test_refund_multiple_partial_refunds_accumulate() {
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 31, 800, 10);
 
-        update_analytics_on_refund(&env, 31, 200, 20);
+        update_analytics_on_refund(&env, 31, 200, 20).unwrap();
         let a = get_bounty_analytics(&env, 31).unwrap();
         assert_eq!(a.total_amount_refunded, 200);
         assert_eq!(a.remaining_amount, 600);
         assert_eq!(a.partial_refunds_count, 1);
 
-        update_analytics_on_refund(&env, 31, 600, 30);
+        update_analytics_on_refund(&env, 31, 600, 30).unwrap();
         let a = get_bounty_analytics(&env, 31).unwrap();
         assert_eq!(a.total_amount_refunded, 800);
         assert_eq!(a.remaining_amount, 0);
@@ -309,7 +309,7 @@ fn test_refund_exact_amount_drains_to_zero() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 32, 400, 1);
-        update_analytics_on_refund(&env, 32, 400, 2);
+        update_analytics_on_refund(&env, 32, 400, 2).unwrap();
 
         let a = get_bounty_analytics(&env, 32).unwrap();
         assert_eq!(a.remaining_amount, 0);
@@ -326,7 +326,7 @@ fn test_refund_zero_amount_increments_count_only() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 33, 500, 1);
-        update_analytics_on_refund(&env, 33, 0, 2);
+        update_analytics_on_refund(&env, 33, 0, 2).unwrap();
 
         let a = get_bounty_analytics(&env, 33).unwrap();
         assert_eq!(a.total_amount_refunded, 0);
@@ -351,8 +351,8 @@ fn test_lifecycle_release_then_refund_drains_to_zero() {
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 40, 1_000, 1);
 
-        update_analytics_on_release(&env, 40, 600, 2);
-        update_analytics_on_refund(&env, 40, 400, 3);
+        update_analytics_on_release(&env, 40, 600, 2).unwrap();
+        update_analytics_on_refund(&env, 40, 400, 3).unwrap();
 
         let a = get_bounty_analytics(&env, 40).unwrap();
         assert_eq!(a.total_amount_released, 600);
@@ -388,17 +388,17 @@ fn test_lifecycle_multiple_bounties_cross_check_totals() {
     env.as_contract(&id, || {
         // bounty 50: fully released
         init_bounty_analytics(&env, 50, 2_000, 1);
-        update_analytics_on_release(&env, 50, 2_000, 2);
+        update_analytics_on_release(&env, 50, 2_000, 2).unwrap();
 
         // bounty 51: fully refunded in two steps
         init_bounty_analytics(&env, 51, 3_000, 1);
-        update_analytics_on_refund(&env, 51, 1_000, 2);
-        update_analytics_on_refund(&env, 51, 2_000, 3);
+        update_analytics_on_refund(&env, 51, 1_000, 2).unwrap();
+        update_analytics_on_refund(&env, 51, 2_000, 3).unwrap();
 
         // bounty 52: partial release then refund remainder
         init_bounty_analytics(&env, 52, 5_000, 1);
-        update_analytics_on_release(&env, 52, 2_000, 2);
-        update_analytics_on_refund(&env, 52, 3_000, 3);
+        update_analytics_on_release(&env, 52, 2_000, 2).unwrap();
+        update_analytics_on_refund(&env, 52, 3_000, 3).unwrap();
 
         let a50 = get_bounty_analytics(&env, 50).unwrap();
         let a51 = get_bounty_analytics(&env, 51).unwrap();
@@ -540,10 +540,10 @@ fn test_average_bounty_amount_cross_checked_with_analytics_helpers() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 60, 6_000, 1);
-        update_analytics_on_release(&env, 60, 6_000, 2);
+        update_analytics_on_release(&env, 60, 6_000, 2).unwrap();
 
         init_bounty_analytics(&env, 61, 4_000, 1);
-        update_analytics_on_release(&env, 61, 4_000, 2);
+        update_analytics_on_release(&env, 61, 4_000, 2).unwrap();
 
         let a60 = get_bounty_analytics(&env, 60).unwrap();
         let a61 = get_bounty_analytics(&env, 61).unwrap();
@@ -601,8 +601,8 @@ fn test_large_amounts_no_overflow() {
     let (env, id) = setup();
     env.as_contract(&id, || {
         init_bounty_analytics(&env, 70, locked, 1);
-        update_analytics_on_release(&env, 70, half, 2);
-        update_analytics_on_release(&env, 70, locked - half, 3);
+        update_analytics_on_release(&env, 70, half, 2).unwrap();
+        update_analytics_on_release(&env, 70, locked - half, 3).unwrap();
 
         let a = get_bounty_analytics(&env, 70).unwrap();
         assert_eq!(a.total_amount_locked, locked);
