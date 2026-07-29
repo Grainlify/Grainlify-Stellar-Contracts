@@ -132,13 +132,22 @@ fn test_set_and_unset_whitelist_enforcement() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Auth")]
 fn test_set_whitelist_enforced_requires_admin_auth() {
     let env = Env::default();
     let contract_id = env.register_contract(None, ProgramEscrowContract);
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
+
+    // As of #491 `initialize_contract` requires the incoming admin's own auth.
+    // Authorize ONLY the bootstrap and clear immediately: a blanket
+    // `mock_all_auths()` would also authorize `set_whitelist_enforced` and
+    // this test would pass while proving nothing. The `expected` string is
+    // required for the same reason — a bare `#[should_panic]` would happily
+    // absorb an unauthorized-bootstrap panic instead of the one under test.
+    env.mock_all_auths();
     client.initialize_contract(&admin);
+    env.mock_auths(&[]);
 
     // This should panic
     client.set_whitelist_enforced(&true);

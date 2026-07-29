@@ -39,9 +39,10 @@ Planned next: 2.0.0 (numeric 20000)
 ### Migration Guide
 
 - 1.x -> 2.0.0
-  - Deploy new WASM, then call migrate(target=20000, hash)
-  - Verify via get_migration_state(); ensure to_version == 20000
+  - Deploy new WASM, then call migrate(target=2, hash)
+  - Verify via get_migration_state(); ensure to_version == 2
   - Update off-chain indexers to listen to (migration) events
+  - Note: `migrate()` accepts raw sequential version targets (e.g. `2`), while `require_min_version()` and `get_version_numeric_encoded()` use numeric-encoded values (e.g. `20000`).
 
 Breaking changes: require explicit migrate() before using new features that rely on migrated state.
 
@@ -74,7 +75,7 @@ Current: 1.0.0 (numeric 10000)
 1. Upload the new WASM and record `new_wasm_hash`.
 2. For grainlify-core single-admin upgrades, call `schedule_upgrade(new_wasm_hash)` and wait until the returned `executable_at` timestamp. The default delay is 86,400 seconds; admins may configure a delay no lower than 300 seconds with `set_upgrade_delay(delay_seconds)`.
 3. Execute `upgrade(new_wasm_hash)` only after the timelock is ready. The scheduled hash must match the execution hash.
-4. If migration is required, call migrate(target_numeric_version, migration_hash)
+4. If migration is required, call migrate(target_sequential_version, migration_hash)
 5. Verify with get_version(), get_migration_state()
 6. Update clients to enforce minimal compatible version
 
@@ -90,8 +91,8 @@ assert!(scheduled.executable_at >= scheduled.scheduled_at);
 contract.upgrade(&env, &new_wasm_hash);
 
 let hash = BytesN::from_array(&env, &[0u8;32]);
-contract.migrate(&env, &20000, &hash);
-assert_eq!(contract.get_version(&env), 20000);
+contract.migrate(&env, &2, &hash);
+assert_eq!(contract.get_version(&env), 2);
 ```
 
 ### Events and Tracking
