@@ -54,7 +54,6 @@ Source reviewed: `program-escrow/src/lib.rs`.
 | `DataKey::PauseFlags` | Instance | Pause controls. | No explicit extension observed; covered by contract instance TTL. |
 | `DataKey::RateLimitConfig` | Instance | Rate-limit configuration. | No explicit extension observed; covered by contract instance TTL. |
 | `DataKey::FeeConfig` | Instance | Fee configuration. | No explicit extension observed; covered by contract instance TTL. |
-| `PROGRAM_REGISTRY` / `DataKey::ProgramRegistry` | Instance | Registry of known programs. | No explicit extension observed; should remain consistent with live programs. |
 | `DataKey::Dispute` | Instance | Current dispute record. | No explicit extension observed; should live through dispute resolution and settlement. |
 
 ## grainlify-core
