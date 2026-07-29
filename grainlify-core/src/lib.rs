@@ -1388,6 +1388,7 @@ impl GrainlifyContract {
             0 => "0.0.0",
             1 | 10000 => "1.0.0",
             2 | 20000 => "2.0.0",
+            3 | 30000 => "3.0.0",
             10100 => "1.1.0",
             10001 => "1.0.1",
             _ => "unknown",
@@ -2169,6 +2170,31 @@ mod test {
 
         // Previous version should still be None unless upgrade() was called
         // This test verifies the get_previous_version function works
+    }
+
+    /// get_version_semver_string must return "3.0.0" after migrating to version 3.
+    /// Previously the hardcoded match table had no 3|30000 arm, so it returned
+    /// "unknown" even after a successful migrate(env, 3, hash).
+    #[test]
+    fn test_version_semver_string_v3_after_migration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Default version after init_admin is 2
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "2.0.0"));
+
+        // Migrate to version 3
+        let migration_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.migrate(&3, &migration_hash);
+
+        // After migration, version string must reflect version 3
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "3.0.0"));
     }
 
     // ========================================================================
