@@ -2856,8 +2856,15 @@ impl BountyEscrowContract {
         stats
     }
 
-    /// Get total count of escrows
-    /// Get total count of escrows
+    /// Returns the lifetime total number of bounties ever locked, not a live
+    /// count of currently-active bounties.
+    ///
+    /// `EscrowIndex` is append-only and never pruned, so this number only
+    /// ever grows — it includes every `Released` and `Refunded` bounty from
+    /// the contract's entire history alongside currently-`Locked` ones, and
+    /// never decreases when a bounty settles. For a live active count, use
+    /// `count_bounties_by_status(EscrowStatus::Locked)` instead, or
+    /// `get_aggregate_stats` for the full live breakdown by status.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
