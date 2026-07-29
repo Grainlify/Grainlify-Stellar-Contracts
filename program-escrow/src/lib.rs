@@ -549,6 +549,9 @@ pub enum Error {
     GovernanceVersionTooLow = 4,
     /// large-payout threshold_bps exceeds 10_000 (100%).
     InvalidThresholdBps = 5,
+    /// Governance proposal is not in an executable state: pending, rejected,
+    /// missing, delayed, vetoed/cancelled, or already executed.
+    GovernanceProposalNotExecutable = 6,
 }
 
 #[contracttype]
@@ -1694,6 +1697,34 @@ impl ProgramEscrowContract {
         if !governance_integration::check_governance_version(env) {
             return Err(Error::GovernanceVersionTooLow);
         }
+        Ok(())
+    }
+
+    /// Validate and consume an approved, non-vetoed governance proposal
+    /// before executing a governance-triggered action.
+    ///
+    /// The configured grainlify-core governance contract re-checks quorum
+    /// and approval state by executing the proposal itself, and the veto
+    /// check rejects a proposal reported as vetoed/cancelled even if it
+    /// previously reached `Approved` status. Pending, rejected, delayed,
+    /// vetoed, missing, or already-executed proposals are all rejected.
+    ///
+    /// # Authorization
+    /// No caller authorization is required — callable by anyone, mirroring
+    /// `bounty_escrow::execute_governance_proposal`. Safety comes from the
+    /// governance contract re-validating the proposal's own approval state
+    /// on every call, not from caller identity; this function only marks an
+    /// already-legitimately-approved, non-vetoed proposal as consumed.
+    ///
+    /// # Errors
+    /// `GovernanceVersionTooLow`, `GovernanceProposalNotExecutable`.
+    pub fn execute_governance_proposal(env: Env, proposal_id: u32) -> Result<(), Error> {
+        Self::check_governance_requirements(&env)?;
+
+        if !governance_integration::execute_governance_proposal(&env, proposal_id) {
+            return Err(Error::GovernanceProposalNotExecutable);
+        }
+
         Ok(())
     }
     // ========================================================================

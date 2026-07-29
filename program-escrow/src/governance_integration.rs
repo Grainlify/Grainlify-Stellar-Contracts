@@ -19,6 +19,30 @@ pub trait GovernanceInterface {
     /// vetoed or cancelled before execution.  A vetoed proposal must never
     /// be executed even if it previously reached `Approved` status.
     fn is_vetoed(env: Env, proposal_id: u32) -> bool;
+    fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), GovernanceError>;
+}
+
+#[soroban_sdk::contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum GovernanceError {
+    NotInitialized = 1,
+    InvalidThreshold = 2,
+    ThresholdTooLow = 3,
+    InsufficientStake = 4,
+    ProposalsNotFound = 5,
+    ProposalNotFound = 6,
+    ProposalNotActive = 7,
+    VotingNotStarted = 8,
+    VotingEnded = 9,
+    VotingStillActive = 10,
+    AlreadyVoted = 11,
+    ProposalNotApproved = 12,
+    ExecutionDelayNotMet = 13,
+    ProposalExpired = 14,
+    ZeroVotingPower = 15,
+    InvalidTotalVotingPower = 16,
+    Unauthorized = 17,
 }
 
 /// Set the governance contract address (admin only)
@@ -85,6 +109,34 @@ pub fn check_proposal_vetoed(env: &Env, proposal_id: u32) -> bool {
     };
 
     GovernanceClient::new(env, &gov_addr).is_vetoed(&proposal_id)
+}
+
+/// Validate and consume an approved, non-vetoed governance proposal before a
+/// governance-triggered escrow action proceeds.
+///
+/// This is the real code path `check_proposal_vetoed` was declared for: it
+/// delegates to grainlify-core's `execute_proposal` (so quorum, approval
+/// threshold, execution delay, and replay protection are enforced by the
+/// governance module itself, not a caller-supplied flag), and additionally
+/// rejects a proposal `check_proposal_vetoed` reports as vetoed/cancelled —
+/// closing the gap where the veto check existed but nothing ever called it.
+pub fn execute_governance_proposal(env: &Env, proposal_id: u32) -> bool {
+    let Some(gov_addr) = get_governance_contract(env) else {
+        return false;
+    };
+
+    if !check_governance_version(env) {
+        return false;
+    }
+
+    if check_proposal_vetoed(env, proposal_id) {
+        return false;
+    }
+
+    matches!(
+        GovernanceClient::new(env, &gov_addr).try_execute_proposal(&proposal_id),
+        Ok(Ok(()))
+    )
 }
 
 #[cfg(test)]
