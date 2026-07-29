@@ -81,6 +81,19 @@ impl MultiSig {
             panic!("{:?}", MultiSigError::InvalidThreshold);
         }
 
+        // Reject duplicate signer addresses — a duplicate silently reduces the
+        // effective signer count below signers.len(), which can make the
+        // threshold permanently unreachable since each address can approve a
+        // proposal at most once.
+        let mut seen = Vec::new(env);
+        for i in 0..signers.len() {
+            let s = signers.get(i).unwrap();
+            if seen.contains(&s) {
+                panic!("{:?}", MultiSigError::AlreadySigner);
+            }
+            seen.push_back(s);
+        }
+
         let config = MultiSigConfig { signers, threshold };
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage()
