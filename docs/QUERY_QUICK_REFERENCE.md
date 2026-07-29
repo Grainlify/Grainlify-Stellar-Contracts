@@ -171,7 +171,7 @@ loop {
 // Bounty Escrow Dashboard
 let stats = contract.get_aggregate_stats(env.clone());
 let user_escrows = contract.query_escrows_by_depositor(env.clone(), user_addr, 0, 10);
-let total_count = contract.get_escrow_count(env);
+let total_count = contract.get_escrow_count(env); // lifetime total, not a live/active count
 
 // Program Escrow Dashboard
 let stats = contract.get_program_aggregate_stats(env.clone());
