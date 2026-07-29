@@ -224,6 +224,40 @@ pub fn emit_claim_cancelled(env: &Env, event: ClaimCancelled) {
     env.events().publish(topics, event.clone());
 }
 
+/// Final outcome of a pending-claim dispute.
+///
+/// `Claimed` means the authorized recipient completed the claim.
+/// `Cancelled` means the admin cancelled a still-active claim.
+/// `Expired` means the admin cleared a claim after its claim window elapsed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisputeOutcome {
+    Claimed,
+    Cancelled,
+    Expired,
+}
+
+/// Emitted exactly once when a pending-claim dispute reaches a terminal outcome.
+///
+/// The `(dispute, resolved)` topic is stable for off-chain indexers. Existing
+/// claim lifecycle events remain emitted for backward compatibility.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeResolved {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub outcome: DisputeOutcome,
+    pub resolver: Address,
+    pub recipient: Address,
+    pub amount: i128,
+    pub resolved_at: u64,
+}
+
+pub fn emit_dispute_resolved(env: &Env, event: DisputeResolved) {
+    let topics = (symbol_short!("dispute"), symbol_short!("resolved"));
+    env.events().publish(topics, event);
+}
+
 pub fn emit_pause_state_changed(env: &Env, event: crate::PauseStateChanged) {
     let topics = (symbol_short!("pause"), event.operation.clone());
     env.events().publish(topics, event);
