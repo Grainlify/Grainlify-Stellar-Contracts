@@ -1123,9 +1123,11 @@ fn test_no_policy_set_allows_any_positive_amount() {
     assert_eq!(client.get_escrow_info(&7).amount, 999_999);
 }
 
-/// Supplying min > max is a logically invalid policy and must be rejected.
+/// Supplying min > max is a logically invalid policy and must be rejected
+/// with the typed InvalidAmountRange error (issue #467: this previously
+/// used an untyped panic!() instead).
 #[test]
-#[should_panic] // InvalidPolicy / contract-defined panic for malformed config
+#[should_panic(expected = "Error(Contract, #28)")] // InvalidAmountRange
 fn test_set_amount_policy_min_greater_than_max_rejected() {
     let (env, client, _) = create_test_env();
     let admin = Address::generate(&env);
@@ -1136,8 +1138,25 @@ fn test_set_amount_policy_min_greater_than_max_rejected() {
     let (token, _token_client, _) = create_token_contract(&env, &token_admin);
     client.init(&admin, &token);
 
-    // min=5_000 > max=100 — invalid policy, must panic.
+    // min=5_000 > max=100 — invalid policy, must be rejected.
     client.set_amount_policy(&admin, &5_000_i128, &100_i128);
+}
+
+/// The non-panicking try_ variant surfaces the same InvalidAmountRange
+/// error as a typed Result, without panicking.
+#[test]
+fn test_set_amount_policy_min_greater_than_max_returns_typed_error() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, _) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+
+    let result = client.try_set_amount_policy(&admin, &5_000_i128, &100_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidAmountRange)));
 }
 
 /// The admin must be able to update the policy after initial configuration, and
