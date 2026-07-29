@@ -53,6 +53,35 @@
 #   - Use stored identities (stellar keys generate) or environment variables
 #   - Mainnet deployments require explicit confirmation
 #
+#   - ALWAYS INITIALIZE IN THE SAME INVOCATION AS THE DEPLOY (issue #491).
+#
+#     Deploying without `--init` (or without a `--` passthrough) leaves the
+#     contract deployed but UNINITIALIZED, and the admin role is claimed by
+#     whoever calls init/initialize_contract/setadmin first. Between the deploy
+#     transaction and a later, separate initialization transaction there is a
+#     window in which any observer of the public network can front-run you and
+#     take the admin role.
+#
+#     The contracts require the incoming admin address to authorize its own
+#     installation, so an attacker cannot install an address you control — but
+#     that does NOT close the race: an attacker naming an address THEY control
+#     and signing for it still wins, permanently.
+#
+#     Consequences of losing the race:
+#       * bounty_escrow  - unrecoverable. `init` is the only writer of the admin
+#                          key and there is no rotation entrypoint at all.
+#       * program-escrow - recoverable only via propose_admin/accept_admin,
+#                          which the CURRENT admin must initiate. If an attacker
+#                          holds it, they must cooperate. In practice: gone.
+#
+#     DO:     ./scripts/deploy.sh contract.wasm -- --admin GABC... --token CDEF...
+#     AVOID:  ./scripts/deploy.sh contract.wasm            # then init separately
+#
+#     If a deploy does land uninitialized, treat the contract as compromised
+#     until you have confirmed on-chain that YOUR initialization transaction is
+#     the one that succeeded. Verify with `getadmin` / `get_admin_audit_view`
+#     before funding it. See docs/DEPLOYMENT_RUNBOOK.md.
+#
 # ==============================================================================
 
 set -euo pipefail
@@ -408,9 +437,27 @@ deploy_contract() {
             "${init_args[@]+"${init_args[@]}"}"; then
             log_warn "Initialization failed or not supported"
             log_warn "You may need to initialize the contract manually"
+            log_warn ""
+            log_warn "SECURITY (issue #491): this contract is deployed but NOT"
+            log_warn "initialized. The admin role goes to whoever initializes it"
+            log_warn "first, and anyone watching the network can do that now."
+            log_warn "Initialize immediately, then CONFIRM the stored admin is"
+            log_warn "yours (getadmin / get_admin_audit_view) before funding it."
+            log_warn "If it is not yours, abandon this contract and redeploy —"
+            log_warn "for bounty_escrow the admin can never be changed."
         else
             log_success "Contract initialized"
         fi
+    else
+        log_warn ""
+        log_warn "SECURITY (issue #491): deployed WITHOUT initialization."
+        log_warn "The admin role is unclaimed and goes to whoever calls"
+        log_warn "init/initialize_contract/setadmin first — including an"
+        log_warn "attacker front-running you between now and your init tx."
+        log_warn "Prefer deploying and initializing in ONE invocation:"
+        log_warn "  ./scripts/deploy.sh <wasm> -- --admin <G...> --token <C...>"
+        log_warn "Otherwise initialize now and verify the stored admin is yours"
+        log_warn "before funding the contract. See docs/DEPLOYMENT_RUNBOOK.md."
     fi
 
     # Record deployment

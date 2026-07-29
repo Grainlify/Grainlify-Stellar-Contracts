@@ -24,6 +24,21 @@ Because the contract does not maintain an on-chain voter registry, quorum for th
 
 ### TokenWeighted
 
+> **⚠️ Security warning: vote amplification via post-vote token transfers.**
+> Voting power is read from each voter's *live* token balance at the moment
+> they vote, not a balance snapshotted at proposal creation. The contract
+> only blocks the same *address* from voting twice on a proposal — it does
+> not stop the same underlying tokens from voting repeatedly through
+> different addresses. A holder can vote from address A with their full
+> balance, transfer those tokens to address B, vote again from B with that
+> same balance, transfer to C, and repeat — accumulating many multiples of
+> their true voting power within a single voting period. This is the
+> classic governance-token flash-loan / vote-amplification vulnerability
+> class. `OnePersonOneVote` is unaffected. Do not deploy `TokenWeighted`
+> governance for any proposal where this risk is unacceptable without first
+> adopting one of the mitigations in
+> [Snapshot And Balance Semantics](#snapshot-and-balance-semantics) below.
+
 `TokenWeighted` derives each vote's `voting_power` by reading the voter's balance from the configured governance token contract at vote time:
 
 ```text

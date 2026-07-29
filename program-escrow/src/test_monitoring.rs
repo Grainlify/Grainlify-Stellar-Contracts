@@ -143,7 +143,11 @@ fn test_set_large_payout_threshold_rejects_u32_max() {
     assert_eq!(client.get_large_payout_threshold(), 1000);
 }
 #[test]
-#[should_panic]
+// `expected` matches the `.unwrap()` on the `try_` result below, which surfaces
+// the auth abort as `Err(Abort)`. It still discriminates against the bootstrap:
+// an unauthorized `setadmin` would panic on the non-`try_` call above with a
+// host auth error, not with "Abort".
+#[should_panic(expected = "Abort")]
 fn test_non_admin_cannot_update_large_payout_threshold() {
     let env = Env::default();
 
@@ -151,7 +155,15 @@ fn test_non_admin_cannot_update_large_payout_threshold() {
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
+
+    // As of #491 `setadmin` requires the incoming admin's own auth. Authorize
+    // ONLY the bootstrap and clear immediately, so the threshold update below
+    // is still evaluated unauthenticated. The `expected` string matters here:
+    // with a bare `#[should_panic]` this test would keep passing off the
+    // bootstrap's own auth failure and stop covering the threshold guard.
+    env.mock_all_auths();
     client.setadmin(&admin);
+    env.mock_auths(&[]);
 
     client.try_set_large_payout_threshold(&2000).unwrap();
 }
