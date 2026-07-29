@@ -2951,6 +2951,15 @@ impl ProgramEscrowContract {
 
         let mut schedules = Self::get_program_release_schedules(env.clone());
         let mut program_data = Self::get_program_info(env.clone());
+
+        // Require the same authorization as the sibling release entrypoints
+        // (release_program_schedule_manual, trigger_program_releases) —
+        // without this, any address could choose the exact release timing
+        // for a due schedule and force gas costs onto whoever watches
+        // schedules, even though the recipient/amount are fixed and can't
+        // be redirected (Issue #435).
+        program_data.authorized_payout_key.require_auth();
+
         let now = env.ledger().timestamp();
         let mut released_schedule: Option<ProgramReleaseSchedule> = None;
 
