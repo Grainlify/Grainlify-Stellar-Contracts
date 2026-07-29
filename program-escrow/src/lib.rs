@@ -1719,6 +1719,11 @@ impl ProgramEscrowContract {
             panic!("Dispute in progress");
         }
 
+        // Governance version gate — refuse fund movement when the linked
+        // governance contract's version is below the configured minimum.
+        Self::check_governance_requirements(&env)
+            .unwrap_or_else(|_| panic!("{:?}", Error::GovernanceVersionTooLow));
+
         let mut program_data: ProgramData =
             env.storage()
                 .persistent()
@@ -1931,6 +1936,11 @@ impl ProgramEscrowContract {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
+
+        // Governance version gate — refuse fund movement when the linked
+        // governance contract's version is below the configured minimum.
+        Self::check_governance_requirements(&env)
+            .unwrap_or_else(|_| panic!("{:?}", Error::GovernanceVersionTooLow));
 
         // Verify authorization
         let program_data: ProgramData =
