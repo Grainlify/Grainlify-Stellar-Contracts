@@ -13,26 +13,31 @@ pub fn query_escrows(env: Env, filter: EscrowQueryFilter, offset: u32, limit: u3
 **Purpose**: Retrieve escrows with comprehensive filtering and pagination support.
 
 **Parameters**:
-- `filter`: EscrowQueryFilter with optional fields:
-  - `status`: Filter by EscrowStatus (Locked, Released, Refunded)
-  - `depositor`: Filter by depositor address
-  - `min_amount`: Minimum escrow amount
-  - `max_amount`: Maximum escrow amount
-  - `min_deadline`: Minimum deadline timestamp
-  - `max_deadline`: Maximum deadline timestamp
+- `filter`: `EscrowQueryFilter` with explicit enable flags and sentinel values:
+  - `has_status_filter`: Set `true` to apply `status`; `false` ignores `status`
+  - `status`: Filter by `EscrowStatus` when `has_status_filter` is `true`
+  - `has_depositor_filter`: Set `true` to apply `depositor`; `false` ignores `depositor`
+  - `depositor`: Filter by depositor address when `has_depositor_filter` is `true`
+  - `min_amount`: Minimum escrow amount; `0` means no minimum
+  - `max_amount`: Maximum escrow amount; `i128::MAX` means no maximum
+  - `min_deadline`: Minimum deadline timestamp; `0` means no minimum
+  - `max_deadline`: Maximum deadline timestamp; `u64::MAX` means no maximum
 - `offset`: Number of records to skip (for pagination)
 - `limit`: Maximum number of records to return
 
 **Example Usage**:
 ```rust
 // Query all locked escrows with amount >= 1000
+let ignored_depositor = Address::generate(&env);
 let filter = EscrowQueryFilter {
-    status: Some(EscrowStatus::Locked),
-    depositor: None,
-    min_amount: Some(1000),
-    max_amount: None,
-    min_deadline: None,
-    max_deadline: None,
+    has_status_filter: true,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: ignored_depositor,
+    min_amount: 1000,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: u64::MAX,
 };
 let results = contract.query_escrows(env, filter, 0, 50);
 ```
@@ -187,8 +192,14 @@ pub fn get_total_scheduled_amount(env: Env) -> i128
    
    // Less efficient: Filter all escrows by depositor
    let filter = EscrowQueryFilter {
-       depositor: Some(depositor),
-       ..Default::default()
+       has_status_filter: false,
+       status: EscrowStatus::Locked,
+       has_depositor_filter: true,
+       depositor,
+       min_amount: 0,
+       max_amount: i128::MAX,
+       min_deadline: 0,
+       max_deadline: u64::MAX,
    };
    let results = contract.query_escrows(env, filter, 0, 50);
    ```
@@ -196,11 +207,16 @@ pub fn get_total_scheduled_amount(env: Env) -> i128
 3. **Combine Filters**:
    ```rust
    // Efficient: Apply multiple filters in single query
+   let ignored_depositor = Address::generate(&env);
    let filter = EscrowQueryFilter {
-       status: Some(EscrowStatus::Locked),
-       min_amount: Some(1000),
-       max_deadline: Some(current_time + 86400),
-       ..Default::default()
+       has_status_filter: true,
+       status: EscrowStatus::Locked,
+       has_depositor_filter: false,
+       depositor: ignored_depositor,
+       min_amount: 1000,
+       max_amount: i128::MAX,
+       min_deadline: 0,
+       max_deadline: current_time + 86400,
    };
    ```
 
