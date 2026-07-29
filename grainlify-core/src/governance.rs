@@ -1163,4 +1163,93 @@ fn test_edge_case_vote_weight_overflow() {
     let res2 = client.try_cast_vote(&voter2, &prop_id, &VoteType::For);
     assert_eq!(res2, Err(Ok(Error::VoteWeightOverflow)));
 }
+
+    #[test]
+    fn test_create_proposal_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let proposer = Address::generate(&env);
+        let result = client.try_create_proposal(
+            &proposer,
+            &BytesN::from_array(&env, &[0u8; 32]),
+            &symbol_short!("test"),
+        );
+        assert_eq!(result, Err(Ok(Error::NotInitialized)));
+    }
+
+    #[test]
+    fn test_cast_vote_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        // Insert a proposal manually without initializing governance config
+        let proposer = Address::generate(&env);
+        let mut proposals: Map<u32, Proposal> = Map::new(&env);
+        let proposal = Proposal {
+            id: 0,
+            proposer: proposer.clone(),
+            new_wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
+            description: symbol_short!("test"),
+            created_at: 0,
+            voting_start: 0,
+            voting_end: 100,
+            execution_delay: 0,
+            status: ProposalStatus::Active,
+            votes_for: 0,
+            votes_against: 0,
+            votes_abstain: 0,
+            total_votes: 0,
+        };
+        proposals.set(0, proposal);
+        env.storage().instance().set(&PROPOSALS, &proposals);
+        let voter = Address::generate(&env);
+        let result = client.try_cast_vote(&voter, &0u32, &VoteType::For);
+        assert_eq!(result, Err(Ok(Error::NotInitialized)));
+    }
+
+    #[test]
+    fn test_finalize_proposal_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        // Insert a proposal manually without initializing governance config
+        let proposer = Address::generate(&env);
+        let mut proposals: Map<u32, Proposal> = Map::new(&env);
+        let proposal = Proposal {
+            id: 0,
+            proposer: proposer.clone(),
+            new_wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
+            description: symbol_short!("test"),
+            created_at: 0,
+            voting_start: 0,
+            voting_end: 100,
+            execution_delay: 0,
+            status: ProposalStatus::Active,
+            votes_for: 0,
+            votes_against: 0,
+            votes_abstain: 0,
+            total_votes: 0,
+        };
+        proposals.set(0, proposal);
+        env.storage().instance().set(&PROPOSALS, &proposals);
+        let result = client.try_finalize_proposal(&0u32);
+        assert_eq!(result, Err(Ok(Error::NotInitialized)));
+    }
+
+    #[test]
+    fn test_not_initialized_transition_to_normal() {
+        let env = Env::default();
+        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        // After init_governance, create_proposal should succeed
+        let prop_id = client.create_proposal(&proposer, &BytesN::from_array(&env, &[0u8; 32]), &symbol_short!("test"));
+        // Cast a vote
+        client.cast_vote(&proposer, &prop_id, &VoteType::For);
+        // Advance time beyond voting period
+        env.ledger().with_mut(|li| li.timestamp = 200);
+        // Finalize should not return NotInitialized
+        let status = client.finalize_proposal(&prop_id);
+        assert!(matches!(status, ProposalStatus::Approved | ProposalStatus::Rejected));
+    }
 }
+

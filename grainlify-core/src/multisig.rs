@@ -1561,4 +1561,41 @@ mod test {
         let events = setup.env.events().all();
         assert!(events.len() > 0);
     }
+    #[test]
+    fn test_get_action_returns_proposed_action() {
+        let setup = setup();
+        let wasm_hash = hash(&setup.env, 42);
+        let action = ProposalAction::Upgrade(wasm_hash.clone());
+
+        let proposal_id = setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+            MultiSig::propose(&setup.env, setup.signer_a.clone(), action.clone())
+        });
+
+        let returned_action = MultiSig::get_action(&setup.env, proposal_id);
+        assert_eq!(returned_action, action);
+    }
+
+    #[test]
+    #[should_panic(expected = "ProposalNotFound")]
+    fn test_get_action_nonexistent_proposal_panics() {
+        let setup = setup();
+
+        // Initialize without any proposals
+        setup.env.as_contract(&setup.contract_id, || {
+            MultiSig::init(
+                &setup.env,
+                signers(&setup.env, &setup.signer_a, &setup.signer_b),
+                2,
+            );
+        });
+
+        // Use a proposal_id that was never created
+        MultiSig::get_action(&setup.env, 9999);
+    }
+
 }
