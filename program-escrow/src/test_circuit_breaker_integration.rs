@@ -52,6 +52,12 @@ fn setup() -> (Env, Address, Address, Address, Address) {
 
     let client = ProgramEscrowContractClient::new(&env, &contract_id);
 
+    // The very first set_circuitadmin call now requires the contract admin's
+    // auth (see issue #382), so this fixture needs one registered; all auths
+    // are mocked above so this doesn't require a real signature.
+    let contract_admin = Address::generate(&env);
+    client.initialize_contract(&contract_admin);
+
     // Initialize and fund the program
     client.initialize_program(&program_id, &authorized_key, &token_address);
     client.lock_program_funds(&authorized_key, &200_000i128);

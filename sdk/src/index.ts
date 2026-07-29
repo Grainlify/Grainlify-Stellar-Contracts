@@ -1,9 +1,14 @@
 export { ProgramEscrowClient } from './program-escrow-client';
-export type { 
-  ProgramEscrowConfig, 
-  ProgramData, 
+export type {
+  ProgramEscrowConfig,
+  ProgramData,
   PayoutRecord,
-  ProgramReleaseSchedule 
+  ProgramReleaseSchedule,
+  CircuitBreakerConfig as ProgramCircuitBreakerConfig,
+  CircuitState as ProgramCircuitState,
+  CircuitBreakerStatus as ProgramCircuitBreakerStatus,
+  HealthStatus as ProgramHealthStatus,
+  ProgramAnalytics
 } from './program-escrow-client';
 
 export { BountyEscrowClient } from './bounty-escrow-client';

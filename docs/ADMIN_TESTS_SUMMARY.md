@@ -8,7 +8,7 @@ Added comprehensive tests for admin rotation and configuration update functional
 ### 1. Program Escrow (`contracts/program-escrow/src/lib.rs`)
 
 #### New Public Function
-- `get_admin()` - Returns the current admin address
+- `getadmin()` - Returns the current admin address
 
 #### Tests Added
 1. **`test_admin_rotation`**
@@ -99,6 +99,6 @@ test test::test_admin_persists_across_version_updates ... ok
 
 - All tests use `env.mock_all_auths()` to simulate authorization
 - Tests follow existing patterns in each contract
-- Minimal code changes - only added necessary public function (`get_admin` in program-escrow)
+- Minimal code changes - only added necessary public function (`getadmin` in program-escrow)
 - Tests verify both success and failure cases
 - Error messages match actual contract error codes

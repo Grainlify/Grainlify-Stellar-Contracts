@@ -221,7 +221,12 @@ fn test_emergency_pause_requires_admin_auth() {
     let (token_client, _) = create_token(&env, &token_admin);
     let (client, _) = create_escrow(&env);
 
+    // `init` requires the incoming admin's own auth as of #491. Authorize ONLY
+    // the bootstrap, then clear — a blanket `mock_all_auths()` would authorize
+    // `set_emergency_pause` too and turn this test into a no-op.
+    env.mock_all_auths();
     client.init(&admin, &token_client.address);
+    env.mock_auths(&[]);
 
     assert!(client.try_set_emergency_pause(&true).is_err());
     assert!(!client.get_pause_flags().global_paused);
