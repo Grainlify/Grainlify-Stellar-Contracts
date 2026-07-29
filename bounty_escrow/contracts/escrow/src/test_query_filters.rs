@@ -57,6 +57,29 @@ impl Setup {
     }
 }
 
+#[test]
+fn test_documented_escrow_query_filter_shape_compiles() {
+    let s = Setup::new();
+    let ignored_depositor = Address::generate(&s.env);
+    let filter = EscrowQueryFilter {
+        has_status_filter: true,
+        status: EscrowStatus::Locked,
+        has_depositor_filter: false,
+        depositor: ignored_depositor,
+        min_amount: 1000,
+        max_amount: i128::MAX,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+
+    assert!(filter.has_status_filter);
+    assert_eq!(filter.status, EscrowStatus::Locked);
+    assert!(!filter.has_depositor_filter);
+    assert_eq!(filter.min_amount, 1000);
+    assert_eq!(filter.max_amount, i128::MAX);
+    assert_eq!(filter.min_deadline, 0);
+    assert_eq!(filter.max_deadline, u64::MAX);
+}
 //  status filter tests
 
 #[test]
