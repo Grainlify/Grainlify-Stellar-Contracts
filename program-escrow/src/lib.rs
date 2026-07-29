@@ -2242,6 +2242,25 @@ impl ProgramEscrowContract {
             panic!("Amount must be greater than zero");
         }
 
+        // Whitelist guard: a recipient blocked from a direct single_payout/
+        // batch_payout must not be payable by scheduling a release for them
+        // instead (Issue #436).
+        let whitelist_enforced = env
+            .storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforced)
+            .unwrap_or(false);
+        if whitelist_enforced {
+            let whitelisted = env
+                .storage()
+                .instance()
+                .get(&DataKey::Whitelist(recipient.clone()))
+                .unwrap_or(false);
+            if !whitelisted {
+                panic!("Recipient not whitelisted");
+            }
+        }
+
         let mut schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
             .persistent()
@@ -2335,6 +2354,25 @@ impl ProgramEscrowContract {
             }
 
             if Self::is_schedule_scope_disputed(&env, schedule.schedule_id, &schedule.recipient) {
+                continue;
+            }
+
+            // Re-check the whitelist at release time, not just at schedule
+            // creation: enforcement may have been enabled (or the recipient
+            // blacklisted) after this schedule was already created (Issue
+            // #436). Skip this schedule rather than aborting the whole
+            // batch, mirroring the disputed-schedule check above.
+            if env
+                .storage()
+                .instance()
+                .get(&DataKey::WhitelistEnforced)
+                .unwrap_or(false)
+                && !env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Whitelist(schedule.recipient.clone()))
+                    .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -2871,6 +2909,23 @@ impl ProgramEscrowContract {
                     panic!("Dispute in progress");
                 }
 
+                // Re-check the whitelist at release time, not just at
+                // schedule creation (Issue #436).
+                if env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::WhitelistEnforced)
+                    .unwrap_or(false)
+                    && !env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Whitelist(s.recipient.clone()))
+                        .unwrap_or(false)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Recipient not whitelisted");
+                }
+
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
@@ -2971,6 +3026,23 @@ impl ProgramEscrowContract {
                 {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Dispute in progress");
+                }
+
+                // Re-check the whitelist at release time, not just at
+                // schedule creation (Issue #436).
+                if env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::WhitelistEnforced)
+                    .unwrap_or(false)
+                    && !env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Whitelist(s.recipient.clone()))
+                        .unwrap_or(false)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Recipient not whitelisted");
                 }
 
                 // Transfer funds
