@@ -83,6 +83,30 @@ fn find_contract_event(
     panic!("no event with the expected topic was emitted");
 }
 
+/// Like `find_contract_event`, but returns the LAST matching event instead of
+/// the first. Needed when more than one event shares `topic0` (e.g. both
+/// `authorize_claim` and `claim` emit under the `claim` topic0, distinguished
+/// only by their second topic) and the test cares about a later one.
+fn find_last_contract_event(
+    env: &Env,
+    contract_id: &Address,
+    topic0: Symbol,
+) -> (soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    for i in (0..events.len()).rev() {
+        let (contract, topics, data) = events.get(i).unwrap();
+        if contract != *contract_id || topics.len() == 0 {
+            continue;
+        }
+        if let Ok(sym) = Symbol::try_from_val(env, &topics.get(0).unwrap()) {
+            if sym == topic0 {
+                return (topics, data);
+            }
+        }
+    }
+    panic!("no event with the expected topic was emitted");
+}
+
 #[test]
 fn test_init_event() {
     let (env, client, _contract_id) = create_test_env();
@@ -2124,7 +2148,9 @@ fn test_claim_executed_event_payload_and_topic() {
     let claimed_at = env.ledger().timestamp();
     client.claim(&bounty_id);
 
-    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("claim"));
+    // `authorize_claim` above already emitted a (claim, created) event, so we
+    // need the LAST "claim"-topic event here, not the first.
+    let (topics, data) = find_last_contract_event(&env, &contract_id, symbol_short!("claim"));
 
     // Topic tuple check: (claim, done)
     assert_eq!(topics.len(), 2);
