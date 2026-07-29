@@ -29,7 +29,7 @@ const PROGRAM_ESCROW_DISCRIMINANTS: number[] = [4, 5];
 /** contracts/bounty_escrow/contracts/escrow/src/lib.rs — Error enum */
 const BOUNTY_ESCROW_DISCRIMINANTS: number[] = [
   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, /* gap at 15 */ 16, 17, 18,
-  19, 20, 21, 22, 23,
+  19, 20, 21, 22, 23, 24, 25, 26, 27,
 ];
 
 /** contracts/grainlify-core/src/governance.rs — Error enum */
@@ -93,7 +93,7 @@ describe('Numeric error code tables', () => {
   });
 
   describe('Bounty-escrow', () => {
-    it('maps every contract discriminant (1-23, excluding 15)', () => {
+    it('maps every contract discriminant (1-27, excluding 15)', () => {
       for (const code of BOUNTY_ESCROW_DISCRIMINANTS) {
         expect(BOUNTY_ESCROW_ERROR_MAP[code]).toBeDefined();
       }
@@ -103,6 +103,21 @@ describe('Numeric error code tables', () => {
       for (const code of BOUNTY_ESCROW_DISCRIMINANTS) {
         const err = parseContractErrorByCode(code, 'bounty_escrow');
         expect(err).toBeInstanceOf(ContractError);
+        expect(err.code).not.toBe('CONTRACT_ERROR');
+        expect(err.contractErrorCode).toBe(code);
+      }
+    });
+
+    it('resolves pending-claim, upgrade, and analytics errors to specific codes', () => {
+      const cases: [number, ContractErrorCode][] = [
+        [24, ContractErrorCode.BOUNTY_PENDING_CLAIM_EXISTS],
+        [26, ContractErrorCode.BOUNTY_UPGRADE_NOT_APPROVED],
+        [27, ContractErrorCode.BOUNTY_ANALYTICS_OVERFLOW],
+      ];
+
+      for (const [code, expected] of cases) {
+        const err = parseContractErrorByCode(code, 'bounty_escrow');
+        expect(err.code).toBe(expected);
         expect(err.code).not.toBe('CONTRACT_ERROR');
         expect(err.contractErrorCode).toBe(code);
       }
@@ -354,16 +369,16 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 12 program-escrow + 23 bounty-escrow + 19 governance + 3 circuit-breaker = 57
-    expect(count).toBe(57);
+    // 12 program-escrow + 26 bounty-escrow + 19 governance + 3 circuit-breaker = 60
+    expect(count).toBe(60);
   });
 
   it('PROGRAM_ESCROW_ERROR_MAP has 2 entries', () => {
     expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(2);
   });
 
-  it('BOUNTY_ESCROW_ERROR_MAP has 23 entries', () => {
-    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(23);
+  it('BOUNTY_ESCROW_ERROR_MAP has 26 entries', () => {
+    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(26);
   });
 
   it('GOVERNANCE_ERROR_MAP has 19 entries', () => {
