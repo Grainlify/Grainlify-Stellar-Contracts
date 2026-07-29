@@ -153,6 +153,9 @@ mod error_recovery_tests;
 mod reentrancy_tests;
 
 #[cfg(test)]
+mod test_admin_bootstrap;
+
+#[cfg(test)]
 mod test_monitoring;
 
 #[cfg(test)]
@@ -935,11 +938,25 @@ impl ProgramEscrowContract {
 
     /// Initialize the contract with an admin.
     /// This must be called before any admin protected functions (like pause) can be used.
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from `admin` — the address being installed as
+    /// the contract admin must authorize its own installation. The check runs
+    /// *after* the already-initialized guard, matching the ordering documented
+    /// on `accept_admin` below, so a second call still panics with
+    /// "Already initialized" rather than an authorization failure.
+    ///
+    /// This does not fully close the deploy-then-initialize race: an attacker
+    /// who front-runs the legitimate deployer can still self-authorize a
+    /// bootstrap call naming an address they control. Unlike `bounty_escrow`,
+    /// this contract does retain a recovery path via
+    /// `propose_admin`/`accept_admin`, but only the current admin can start it.
     pub fn initialize_contract(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             Self::bump_instance_ttl(&env);
             panic!("Already initialized");
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         Self::bump_instance_ttl(&env);
     }
@@ -949,11 +966,18 @@ impl ProgramEscrowContract {
     /// This is no longer a rotation path. Once an admin is set, further
     /// rotation must go through `propose_admin`/`accept_admin` so a mistyped
     /// or uncontrolled address can never instantly and irreversibly take over.
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from `admin`, on the same terms as
+    /// `initialize_contract` above: the address being installed must authorize
+    /// its own installation, and the check runs after the already-set guard so
+    /// a second call still panics with the rotation hint.
     pub fn setadmin(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             Self::bump_instance_ttl(&env);
             panic!("admin already set; use propose_admin/accept_admin to rotate");
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         Self::bump_instance_ttl(&env);
     }
@@ -1719,6 +1743,11 @@ impl ProgramEscrowContract {
             panic!("Dispute in progress");
         }
 
+        // Governance version gate — refuse fund movement when the linked
+        // governance contract's version is below the configured minimum.
+        Self::check_governance_requirements(&env)
+            .unwrap_or_else(|_| panic!("{:?}", Error::GovernanceVersionTooLow));
+
         let mut program_data: ProgramData =
             env.storage()
                 .persistent()
@@ -1931,6 +1960,11 @@ impl ProgramEscrowContract {
             reentrancy_guard::clear_entered(&env);
             panic!("Dispute in progress");
         }
+
+        // Governance version gate — refuse fund movement when the linked
+        // governance contract's version is below the configured minimum.
+        Self::check_governance_requirements(&env)
+            .unwrap_or_else(|_| panic!("{:?}", Error::GovernanceVersionTooLow));
 
         // Verify authorization
         let program_data: ProgramData =

@@ -1688,6 +1688,8 @@ fn test_emit_bounty_initialized_topic_and_payload() {
     let admin = Address::generate(&env);
     let (token, _, _) = create_token_contract(&env, &admin);
 
+    // `init` requires the incoming admin's own auth as of #491.
+    env.mock_all_auths();
     client.init(&admin, &token);
 
     let expected_topics: soroban_sdk::Vec<Val> = (symbol_short!("init"),).into_val(&env);

@@ -1388,6 +1388,7 @@ impl GrainlifyContract {
             0 => "0.0.0",
             1 | 10000 => "1.0.0",
             2 | 20000 => "2.0.0",
+            3 | 30000 => "3.0.0",
             10100 => "1.1.0",
             10001 => "1.0.1",
             _ => "unknown",
@@ -1834,6 +1835,69 @@ mod test {
         client.init(&signers, &2u32);
     }
 
+    /// MultiSig::init must reject duplicate signer addresses.
+    /// [A, A, B] with threshold 2 has only 2 distinct signers (A and B),
+    /// so threshold 2 is technically reachable, but only by coincidence — not
+    /// by the number of distinct approvals possible. The init should reject
+    /// it proactively to prevent silent unreachable-quorum configurations.
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_init_rejects_duplicate_signers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a.clone());
+        signers.push_back(addr_a.clone()); // duplicate
+        signers.push_back(addr_b.clone());
+
+        // [A, A, B] with threshold 2 — should panic with AlreadySigner
+        client.init(&signers, &2u32);
+    }
+
+    /// Edge case: [A, A] with threshold 2 is the worst-case — only one
+    /// distinct signer, threshold of 2 is permanently unreachable.
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_init_rejects_duplicate_pair() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a.clone());
+        signers.push_back(addr_a.clone()); // duplicate — only 1 distinct signer
+
+        // [A, A] with threshold 2 — permanently unreachable, must be rejected
+        client.init(&signers, &2u32);
+    }
+
+    /// No duplicates — init must continue to succeed (regression guard).
+    #[test]
+    fn test_init_accepts_unique_signers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+        let addr_c = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a);
+        signers.push_back(addr_b);
+        signers.push_back(addr_c);
+
+        // [A, B, C] with threshold 2 — all distinct, must succeed
+        client.init(&signers, &2u32);
+    }
+
     #[test]
     fn test_set_version() {
         let env = Env::default();
@@ -2105,6 +2169,33 @@ mod test {
     }
 
     #[test]
+    fn test_migrate_docs_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Force contract to start at v1 so the documented 1 -> 2 migrate(target=2)
+        // example executes against migrate_v1_to_v2, matching the doc scenario.
+        // Using direct instance storage set to avoid requiring a public setter for 1.
+        env.storage().instance().set(&DataKey::Version, &1u32);
+        assert_eq!(client.get_version(), 1);
+
+        let migration_hash = BytesN::from_array(&env, &[0u8; 32]);
+        client.migrate(&2, &migration_hash);
+
+        assert_eq!(client.get_version(), 2);
+        let migration_state = client.get_migration_state().expect("migration state must be recorded");
+        assert_eq!(migration_state.from_version, 1);
+        assert_eq!(migration_state.to_version, 2);
+        assert_eq!(migration_state.migration_hash, migration_hash);
+    }
+
+    #[test]
     #[should_panic(expected = "Target version must be greater than current version")]
     fn test_migration_invalid_target_version() {
         let env = Env::default();
@@ -2169,6 +2260,31 @@ mod test {
 
         // Previous version should still be None unless upgrade() was called
         // This test verifies the get_previous_version function works
+    }
+
+    /// get_version_semver_string must return "3.0.0" after migrating to version 3.
+    /// Previously the hardcoded match table had no 3|30000 arm, so it returned
+    /// "unknown" even after a successful migrate(env, 3, hash).
+    #[test]
+    fn test_version_semver_string_v3_after_migration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Default version after init_admin is 2
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "2.0.0"));
+
+        // Migrate to version 3
+        let migration_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.migrate(&3, &migration_hash);
+
+        // After migration, version string must reflect version 3
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "3.0.0"));
     }
 
     // ========================================================================

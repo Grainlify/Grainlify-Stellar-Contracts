@@ -698,3 +698,65 @@ fn test_check_proposal_vetoed_false_against_real_grainlify_core_contract() {
         );
     });
 }
+
+// ============================================================================
+// Governance version gate on fund-movement entrypoints
+// ============================================================================
+
+/// single_payout must be blocked when governance version is below minimum.
+#[test]
+#[should_panic(expected = "GovernanceVersionTooLow")]
+fn test_single_payout_blocked_by_governance_version_too_low() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let backend = Address::generate(&env);
+    let token = Address::generate(&env);
+    let program_id = String::from_str(&env, "GovTest");
+
+    client.setadmin(&admin);
+    client.initialize_program(&program_id, &backend, &token);
+
+    // Link governance and require version 3 (mock returns version 2)
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&3);
+
+    let recipient = Address::generate(&env);
+    // This should panic with GovernanceVersionTooLow
+    client.single_payout(&recipient, &100);
+}
+
+/// batch_payout must be blocked when governance version is below minimum.
+#[test]
+#[should_panic(expected = "GovernanceVersionTooLow")]
+fn test_batch_payout_blocked_by_governance_version_too_low() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let backend = Address::generate(&env);
+    let token = Address::generate(&env);
+    let program_id = String::from_str(&env, "GovBatch");
+
+    client.setadmin(&admin);
+    client.initialize_program(&program_id, &backend, &token);
+
+    // Link governance and require version 3 (mock returns version 2)
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&3);
+
+    let recipient = Address::generate(&env);
+    let recipients = soroban_sdk::vec![&env, recipient];
+    let amounts = soroban_sdk::vec![&env, 100i128];
+    // This should panic with GovernanceVersionTooLow
+    client.batch_payout(&recipients, &amounts);
+}
