@@ -487,6 +487,31 @@ describe('BountyEscrowClient', () => {
       expect(invoke).toHaveBeenCalledWith('reset_circuit', [validGAddress2], sourceKeypair);
     });
 
+    it('routes getCircuitErrorLog correctly', async () => {
+      const entry = {
+        operation: 'lock_funds',
+        bounty_id: 1n,
+        error_code: 21,
+        timestamp: 100n,
+        failure_count_at_time: 3,
+      };
+      const invoke = mockInvoke([entry]);
+      await expect(client.getCircuitErrorLog()).resolves.toEqual([entry]);
+      expect(invoke).toHaveBeenCalledWith('get_circuit_error_log', []);
+    });
+
+    it('routes sweepExpiredRefunds correctly', async () => {
+      const invoke = mockInvoke(2);
+      await expect(client.sweepExpiredRefunds([1n, 2n, 3n])).resolves.toBe(2);
+      expect(invoke).toHaveBeenCalledWith('sweep_expired_refunds', [[1n, 2n, 3n]]);
+    });
+
+    it('routes executeGovernanceProposal correctly', async () => {
+      const invoke = mockInvoke();
+      await client.executeGovernanceProposal(7, sourceKeypair);
+      expect(invoke).toHaveBeenCalledWith('execute_governance_proposal', [7], sourceKeypair);
+    });
+
     it('routes updateMultisigConfig correctly', async () => {
       const invoke = mockInvoke();
       await client.updateMultisigConfig(1000n, [validGAddress1, validGAddress2], 2, sourceKeypair);
