@@ -694,6 +694,114 @@ fn test_upgrade_approval_denies_when_governance_is_not_configured() {
     });
 }
 
+// ---- Issue #472: upgrade() entrypoint wiring check_upgrade_approval ----
+
+// mock_governance's is_upg_ok only ever approves a fixed fake hash, which
+// can't equal a real env.deployer().upload_contract_wasm(...) hash — needed
+// for a test that actually exercises update_current_contract_wasm rather
+// than just check_upgrade_approval in isolation. This mock instead approves
+// whatever hash is registered via set_approved_hash.
+mod mock_governance_upgrade {
+    use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Symbol};
+
+    const APPROVED_HASH: Symbol = symbol_short!("APR_HASH");
+
+    #[contract]
+    pub struct MockGovernanceUpgrade;
+
+    #[contractimpl]
+    impl MockGovernanceUpgrade {
+        pub fn get_ver(_env: Env) -> u32 {
+            2
+        }
+
+        pub fn get_version_numeric_encoded(_env: Env) -> u32 {
+            20_000
+        }
+
+        pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
+            match env
+                .storage()
+                .instance()
+                .get::<Symbol, BytesN<32>>(&APPROVED_HASH)
+            {
+                Some(approved) => approved == wasm_hash,
+                None => false,
+            }
+        }
+
+        pub fn set_approved_hash(env: Env, wasm_hash: BytesN<32>) {
+            env.storage().instance().set(&APPROVED_HASH, &wasm_hash);
+        }
+    }
+}
+
+#[test]
+fn test_upgrade_executes_when_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let _ = client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance_upgrade::MockGovernanceUpgrade);
+    let gov_client = mock_governance_upgrade::MockGovernanceUpgradeClient::new(&env, &gov_id);
+    let _ = client.set_governance_contract(&gov_id);
+    let _ = client.set_min_governance_version(&2);
+
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    gov_client.set_approved_hash(&wasm_hash);
+
+    // Must not panic: admin auth passes, check_upgrade_approval reports the
+    // exact uploaded hash as approved, and update_current_contract_wasm runs.
+    client.upgrade(&wasm_hash);
+}
+
+#[test]
+fn test_upgrade_rejected_when_not_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let _ = client.init(&admin, &token);
+
+    // No governance contract configured at all — check_upgrade_approval
+    // fails closed, so upgrade() must reject even with valid admin auth.
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
+}
+
+#[test]
+fn test_upgrade_rejected_when_hash_not_the_approved_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let _ = client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance_upgrade::MockGovernanceUpgrade);
+    let gov_client = mock_governance_upgrade::MockGovernanceUpgradeClient::new(&env, &gov_id);
+    let _ = client.set_governance_contract(&gov_id);
+    let _ = client.set_min_governance_version(&2);
+
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+    gov_client.set_approved_hash(&approved_hash);
+
+    let attempted_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&attempted_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
+}
+
 #[test]
 fn test_admin_operations_work_without_governance() {
     let env = Env::default();
