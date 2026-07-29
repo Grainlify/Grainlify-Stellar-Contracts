@@ -2845,6 +2845,112 @@ mod test {
         assert_eq!(client.get_state_snapshot().migrations_run, 1);
     }
 
+    fn assert_last_governance_metric_event(
+        env: &Env,
+        contract_id: &Address,
+        expected_metric: soroban_sdk::Symbol,
+        expected_total: u64,
+    ) {
+        let events = env.events().all();
+        assert!(events.len() > 0, "tracking helper must emit an event");
+
+        let (event_contract, topics, data) = events
+            .get(events.len() - 1)
+            .expect("last governance metric event must exist");
+
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (symbol_short!("metric"), symbol_short!("gov")).into_val(env);
+
+        assert_eq!(event_contract, contract_id.clone());
+        assert_eq!(topics, expected_topics);
+
+        let payload =
+            monitoring::GovernanceMetric::try_from_val(env, &data)
+                .expect("governance metric payload must decode");
+
+        assert_eq!(payload.metric, expected_metric);
+        assert_eq!(payload.total, expected_total);
+        assert_eq!(payload.timestamp, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_track_governance_metric_helpers_return_monotonic_totals() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(monitoring::track_proposal_created(&env), 1);
+            assert_eq!(monitoring::track_proposal_created(&env), 2);
+
+            assert_eq!(monitoring::track_vote_cast(&env), 1);
+            assert_eq!(monitoring::track_vote_cast(&env), 2);
+
+            assert_eq!(monitoring::track_upgrade_executed(&env), 1);
+            assert_eq!(monitoring::track_upgrade_executed(&env), 2);
+
+            assert_eq!(monitoring::track_migration_run(&env), 1);
+            assert_eq!(monitoring::track_migration_run(&env), 2);
+
+            let analytics = monitoring::get_analytics(&env);
+            assert_eq!(analytics.proposals_created, 2);
+            assert_eq!(analytics.votes_cast, 2);
+            assert_eq!(analytics.upgrades_executed, 2);
+            assert_eq!(analytics.migrations_run, 2);
+        });
+    }
+
+    #[test]
+    fn test_track_governance_metric_helpers_emit_exact_events() {
+        let env = Env::default();
+        env.ledger().with_mut(|ledger| ledger.timestamp = 9_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        let proposal_total = env.as_contract(&contract_id, || {
+            monitoring::track_proposal_created(&env)
+        });
+        assert_eq!(proposal_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("proposal"),
+            proposal_total,
+        );
+
+        let vote_total = env.as_contract(&contract_id, || {
+            monitoring::track_vote_cast(&env)
+        });
+        assert_eq!(vote_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("vote"),
+            vote_total,
+        );
+
+        let upgrade_total = env.as_contract(&contract_id, || {
+            monitoring::track_upgrade_executed(&env)
+        });
+        assert_eq!(upgrade_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("upgrade"),
+            upgrade_total,
+        );
+
+        let migration_total = env.as_contract(&contract_id, || {
+            monitoring::track_migration_run(&env)
+        });
+        assert_eq!(migration_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("migrate"),
+            migration_total,
+        );
+    }
+
     #[test]
     fn test_upgrade_counter_increments_and_persists() {
         // The single-admin/multisig upgrade paths replace the contract WASM, so
@@ -2866,23 +2972,36 @@ mod test {
     }
 
     #[test]
-    fn test_counters_are_independent() {
-        // Exercising one counter must never perturb the others.
+    fn test_track_governance_metric_counters_are_independent() {
         let env = Env::default();
         let contract_id = env.register_contract(None, GrainlifyContract);
 
         env.as_contract(&contract_id, || {
-            monitoring::track_proposal_created(&env);
-            monitoring::track_vote_cast(&env);
-            monitoring::track_vote_cast(&env);
-            monitoring::track_upgrade_executed(&env);
-            monitoring::track_migration_run(&env);
+            assert_eq!(monitoring::track_proposal_created(&env), 1);
+            assert_eq!(monitoring::track_proposal_created(&env), 2);
+            assert_eq!(monitoring::track_proposal_created(&env), 3);
+
+            assert_eq!(monitoring::track_vote_cast(&env), 1);
+
+            assert_eq!(monitoring::track_upgrade_executed(&env), 1);
+            assert_eq!(monitoring::track_upgrade_executed(&env), 2);
+
+            assert_eq!(monitoring::track_migration_run(&env), 1);
+            assert_eq!(monitoring::track_migration_run(&env), 2);
+            assert_eq!(monitoring::track_migration_run(&env), 3);
+            assert_eq!(monitoring::track_migration_run(&env), 4);
 
             let analytics = monitoring::get_analytics(&env);
-            assert_eq!(analytics.proposals_created, 1);
-            assert_eq!(analytics.votes_cast, 2);
-            assert_eq!(analytics.upgrades_executed, 1);
-            assert_eq!(analytics.migrations_run, 1);
+            assert_eq!(analytics.proposals_created, 3);
+            assert_eq!(analytics.votes_cast, 1);
+            assert_eq!(analytics.upgrades_executed, 2);
+            assert_eq!(analytics.migrations_run, 4);
+
+            let snapshot = monitoring::get_state_snapshot(&env);
+            assert_eq!(snapshot.proposals_created, 3);
+            assert_eq!(snapshot.votes_cast, 1);
+            assert_eq!(snapshot.upgrades_executed, 2);
+            assert_eq!(snapshot.migrations_run, 4);
         });
     }
 
