@@ -34,7 +34,7 @@ const BOUNTY_ESCROW_DISCRIMINANTS: number[] = [
 
 /** contracts/grainlify-core/src/governance.rs — Error enum */
 const GOVERNANCE_DISCRIMINANTS: number[] = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 ];
 
 /** contracts/program-escrow/src/error_recovery.rs — u32 constants */
@@ -117,7 +117,7 @@ describe('Numeric error code tables', () => {
   });
 
   describe('Governance', () => {
-    it('maps every contract discriminant (1-14)', () => {
+    it('maps every contract discriminant (1-19)', () => {
       for (const code of GOVERNANCE_DISCRIMINANTS) {
         expect(GOVERNANCE_ERROR_MAP[code]).toBeDefined();
       }
@@ -130,6 +130,15 @@ describe('Numeric error code tables', () => {
         expect(err.code).not.toBe('CONTRACT_ERROR');
         expect(err.contractErrorCode).toBe(code);
       }
+    });
+
+    it('resolves voting-power and authorization errors to distinct codes', () => {
+      expect(parseContractErrorByCode(15, 'governance').code)
+        .toBe(ContractErrorCode.GOV_ZERO_VOTING_POWER);
+      expect(parseContractErrorByCode(16, 'governance').code)
+        .toBe(ContractErrorCode.GOV_INVALID_TOTAL_VOTING_POWER);
+      expect(parseContractErrorByCode(17, 'governance').code)
+        .toBe(ContractErrorCode.GOV_UNAUTHORIZED);
     });
 
     it('returns generic error for unmapped code', () => {
@@ -335,8 +344,8 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 11 program-escrow + 23 bounty-escrow + 15 governance + 3 circuit-breaker = 52
-    expect(count).toBe(52);
+    // 11 program-escrow + 23 bounty-escrow + 19 governance + 3 circuit-breaker = 56
+    expect(count).toBe(56);
   });
 
   it('PROGRAM_ESCROW_ERROR_MAP has 1 entry', () => {
@@ -347,8 +356,8 @@ describe('Enum size regression guards', () => {
     expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(23);
   });
 
-  it('GOVERNANCE_ERROR_MAP has 15 entries', () => {
-    expect(Object.keys(GOVERNANCE_ERROR_MAP).length).toBe(15);
+  it('GOVERNANCE_ERROR_MAP has 19 entries', () => {
+    expect(Object.keys(GOVERNANCE_ERROR_MAP).length).toBe(19);
   });
 
   it('CIRCUIT_BREAKER_ERROR_MAP has 3 entries', () => {
