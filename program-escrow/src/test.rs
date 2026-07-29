@@ -762,84 +762,6 @@ fn test_anti_abuse_whitelist_bypass() {
 }
 
 // =============================================================================
-// TESTS FOR batch_initialize_programs
-// =============================================================================
-
-#[test]
-fn test_batch_initialize_programs_success() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, ProgramEscrowContract);
-    let client = ProgramEscrowContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let mut items = Vec::new(&env);
-    items.push_back(ProgramInitItem {
-        program_id: String::from_str(&env, "prog-1"),
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    items.push_back(ProgramInitItem {
-        program_id: String::from_str(&env, "prog-2"),
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    let count = client
-        .try_batch_initialize_programs(&items)
-        .unwrap()
-        .unwrap();
-    assert_eq!(count, 2);
-    // batch_initialize_programs uses the multi-program registry (DataKey::Program),
-    // not the single-program PROGRAM_DATA key, so program_exists() won't return true.
-    // Verify the batch succeeded by count alone.
-}
-
-#[test]
-fn test_batch_initialize_programs_empty_err() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, ProgramEscrowContract);
-    let client = ProgramEscrowContractClient::new(&env, &contract_id);
-    let items: Vec<ProgramInitItem> = Vec::new(&env);
-    let res = client.try_batch_initialize_programs(&items);
-    assert!(matches!(res, Err(Ok(BatchError::InvalidBatchSize))));
-}
-
-#[test]
-fn test_batch_initialize_programs_duplicate_id_err() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, ProgramEscrowContract);
-    let client = ProgramEscrowContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let pid = String::from_str(&env, "same-id");
-    let mut items = Vec::new(&env);
-    items.push_back(ProgramInitItem {
-        program_id: pid.clone(),
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    items.push_back(ProgramInitItem {
-        program_id: pid,
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    let res = client.try_batch_initialize_programs(&items);
-    assert!(matches!(res, Err(Ok(BatchError::DuplicateProgramId))));
-}
-
-// =============================================================================
-// TESTS FOR MULTI-TENANT ISOLATION
-// =============================================================================
-
-// Note: Comprehensive multi-tenant isolation tests are implemented in lib.rs
-// using the ProgramEscrowContractClient for proper integration testing.
-// The tests verify:
-// - Funds and balance isolation between programs
-// - Payout history isolation
-// - Release schedule isolation
-// - Release history isolation
-// - Analytics isolation concepts (for future program-specific analytics)
-
-// =============================================================================
 // TESTS FOR PROGRAM ANALYTICS AND MONITORING VIEWS
 // =============================================================================
 
@@ -2029,4 +1951,64 @@ fn test_set_fund_cap_config_clear_caps() {
     let config = client.get_fund_cap_config();
     assert!(config.max_total_funds.is_none());
     assert!(config.max_single_lock.is_none());
+}
+
+// =============================================================================
+// program_exists() correctness (post-fix: removed dead batch storage)
+// =============================================================================
+
+/// program_exists() must return false before any program is initialized.
+#[test]
+fn test_program_exists_false_before_init() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    assert!(!client.program_exists());
+}
+
+/// program_exists() must return true after init_program, and the program
+/// must be fully functional: fundable, payable, and queryable.
+#[test]
+fn test_program_exists_true_after_init_and_fully_usable() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let tokenadmin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+    let token_client = token::Client::new(&env, &token_id);
+    let tokenadmin_client = token::StellarAssetClient::new(&env, &token_id);
+
+    let program_id = String::from_str(&env, "hack-2026");
+
+    // Before init: does not exist
+    assert!(!client.program_exists());
+
+    // Initialize
+    client.init_program(&program_id, &admin, &token_id);
+
+    // After init: exists
+    assert!(client.program_exists());
+
+    // Fund the program
+    tokenadmin_client.mint(&admin, &100_000);
+    client.lock_program_funds(&admin, &100_000);
+    assert_eq!(client.get_remaining_balance(), 100_000);
+
+    // Pay out from the program
+    let recipient = Address::generate(&env);
+    let data = client.single_payout(&recipient, &30_000);
+    assert_eq!(data.remaining_balance, 70_000);
+    assert_eq!(token_client.balance(&recipient), 30_000);
+
+    // Query still works
+    let info = client.get_program_info();
+    assert_eq!(info.program_id, program_id);
+    assert_eq!(info.total_funds, 100_000);
+    assert_eq!(info.remaining_balance, 70_000);
+    assert_eq!(info.payout_history.len(), 1);
 }

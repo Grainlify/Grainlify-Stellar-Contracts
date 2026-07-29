@@ -28,6 +28,7 @@ fn create_escrow(env: &Env) -> BountyEscrowContractClient<'static> {
 
 struct Setup {
     env: Env,
+    admin: Address,
     depositor: Address,
     contributor: Address,
     token: token::Client<'static>,
@@ -48,6 +49,7 @@ impl Setup {
         token_admin.mint(&depositor, &10_000_000);
         Setup {
             env,
+            admin,
             depositor,
             contributor,
             token,
@@ -1074,4 +1076,57 @@ fn test_query_expiring_bounties_empty_index() {
     
     let results = s.escrow.query_expiring_bounties(&(base + 100), &0, &10);
     assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_query_limit_clamped_to_max_query_limit() {
+    let s = Setup::new();
+    s.env.budget().reset_unlimited();
+    let dl = s.env.ledger().timestamp() + 1000;
+
+    // Whitelist depositor to bypass anti-abuse rate limiter
+    s.escrow
+        .set_whitelist(&s.depositor, &true);
+
+    // Create more escrows than MAX_QUERY_LIMIT (100)
+    let total = MAX_QUERY_LIMIT + 10;
+    for id in 1..=total as u64 {
+        s.escrow.lock_funds(&s.depositor, &id, &(id as i128), &dl);
+    }
+
+    // Verify the index actually exceeds the cap
+    let count = s.escrow.get_escrow_count();
+    assert!(count > MAX_QUERY_LIMIT);
+
+    // query_escrows_by_status with limit = u32::MAX should return at most MAX_QUERY_LIMIT
+    let results =
+        s.escrow
+            .query_escrows_by_status(&EscrowStatus::Locked, &0, &u32::MAX);
+    assert_eq!(results.len(), MAX_QUERY_LIMIT);
+
+    // get_escrow_ids_by_status with limit = u32::MAX should return at most MAX_QUERY_LIMIT
+    let ids = s
+        .escrow
+        .get_escrow_ids_by_status(&EscrowStatus::Locked, &0, &u32::MAX);
+    assert_eq!(ids.len(), MAX_QUERY_LIMIT);
+
+    // query_expiring_bounties with limit = u32::MAX should return at most MAX_QUERY_LIMIT
+    let expiring = s
+        .escrow
+        .query_expiring_bounties(&(dl + 1), &0, &u32::MAX);
+    assert_eq!(expiring.len(), MAX_QUERY_LIMIT);
+
+    // query_escrows (composite filter) with limit = u32::MAX
+    let filter = EscrowQueryFilter {
+        has_status_filter: true,
+        status: EscrowStatus::Locked,
+        has_depositor_filter: false,
+        depositor: s.depositor.clone(),
+        min_amount: 0,
+        max_amount: i128::MAX,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+    let composite = s.escrow.query_escrows(&filter, &0, &u32::MAX);
+    assert_eq!(composite.len(), MAX_QUERY_LIMIT);
 }
