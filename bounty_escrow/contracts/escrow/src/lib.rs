@@ -6,6 +6,8 @@ mod error_recovery;
 
 #[cfg(test)]
 mod test_rbac;
+#[cfg(test)]
+mod test_dispute_events;
 mod test_admin_authz;
 #[cfg(test)]
 mod test_admin_bootstrap;
@@ -17,9 +19,9 @@ mod test_serialization;
 use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
     emit_bounty_initialized, emit_funds_locked, emit_funds_refunded, emit_funds_released,
-    emit_claim_created, emit_claim_executed, emit_claim_cancelled,
+    emit_claim_created, emit_claim_executed, emit_claim_cancelled, emit_dispute_resolved,
     BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized, BountyExpired,
-    ClaimCancelled, ClaimCreated, ClaimExecuted,
+    ClaimCancelled, ClaimCreated, ClaimExecuted, DisputeOutcome, DisputeResolved,
     FundsLocked, FundsRefunded, FundsReleased, EVENT_VERSION_V2,
 };
 use analytics::{
@@ -364,6 +366,9 @@ mod anti_abuse {
 const BASIS_POINTS: i128 = 10_000;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
 const MAX_BATCH_SIZE: u32 = 20;
+/// Hard ceiling on the `limit` parameter for read-side pagination functions.
+/// Callers needing more results must loop with `offset` to paginate.
+const MAX_QUERY_LIMIT: u32 = 100;
 /// Extend escrow persistent entries when the ledger sequence is within roughly one day of expiry.
 const ESCROW_TTL_THRESHOLD: u32 = 17_280;
 /// Keep escrow persistent entries alive for roughly thirty days on five-second ledgers.
@@ -1725,6 +1730,18 @@ impl BountyEscrowContract {
                 claimed_at: now,
             },
         );
+        emit_dispute_resolved(
+            &env,
+            DisputeResolved {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                outcome: DisputeOutcome::Claimed,
+                resolver: claim.recipient.clone(),
+                recipient: claim.recipient.clone(),
+                amount: claim_amount,
+                resolved_at: now,
+            },
+        );
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
         Ok(())
     }
@@ -1770,11 +1787,27 @@ impl BountyEscrowContract {
             ClaimCancelled {
                 version: EVENT_VERSION_V2,
                 bounty_id,
-                recipient: claim.recipient,
+                recipient: claim.recipient.clone(),
                 amount: claim.amount,
                 cancelled_at,
-                cancelled_by: admin,
-                reason,
+                cancelled_by: admin.clone(),
+                reason: reason.clone(),
+            },
+        );
+        emit_dispute_resolved(
+            &env,
+            DisputeResolved {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                outcome: if reason == symbol_short!("expired") {
+                    DisputeOutcome::Expired
+                } else {
+                    DisputeOutcome::Cancelled
+                },
+                resolver: admin,
+                recipient: claim.recipient,
+                amount: claim.amount,
+                resolved_at: cancelled_at,
             },
         );
         Ok(())
@@ -2389,8 +2422,10 @@ impl BountyEscrowContract {
 
     /// Query escrows with filtering and pagination
     /// Pass 0 for min values and i128::MAX/u64::MAX for max values to disable those filters
-    /// Query escrows with filtering and pagination
-    /// Pass 0 for min values and i128::MAX/u64::MAX for max values to disable those filters
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2400,6 +2435,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2434,7 +2470,10 @@ impl BountyEscrowContract {
     }
 
     /// Query escrows with amount range filtering
-    /// Query escrows with amount range filtering
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2445,6 +2484,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2479,7 +2519,10 @@ impl BountyEscrowContract {
     }
 
     /// Query escrows with deadline range filtering
-    /// Query escrows with deadline range filtering
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2490,6 +2533,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2574,8 +2618,9 @@ impl BountyEscrowContract {
     ///
     /// # Pagination
     /// - offset: Number of matching records to skip
-    /// - limit: Maximum number of records to return
+    /// - limit: Maximum number of records to return (capped at [`MAX_QUERY_LIMIT`] — 100)
     /// - Pagination is stable and works correctly with any filter combination
+    /// - Callers needing more results must loop with increasing `offset` values
     ///
     /// # Security Notes
     /// - Read-only query function - no state modifications
@@ -2587,6 +2632,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         // Optimization: use depositor index when depositor filter is active
         let index: Vec<u64> = if filter.has_depositor_filter {
             env.storage()
@@ -2807,7 +2853,10 @@ impl BountyEscrowContract {
     }
 
     /// Get escrow IDs by status
-    /// Get escrow IDs by status
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2817,6 +2866,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -3730,23 +3780,19 @@ impl BountyEscrowContract {
     /// # Arguments
     /// * `max_deadline` - Only return bounties with deadline <= this timestamp
     /// * `offset` - Pagination offset
-    /// * `limit` - Maximum number of results
+    /// * `limit` - Maximum number of results (capped at [`MAX_QUERY_LIMIT`] — 100)
     ///
     /// # Returns
     /// Vector of bounties sorted by deadline that match the criteria
-    /// Query bounties by expiration status (approaching or already expired)
     ///
-    /// # Arguments
-    /// * `max_deadline` - Only return bounties with deadline <= this timestamp
-    /// * `offset` - Pagination offset
-    /// * `limit` - Maximum number of results
-    ///
-    /// # Returns
-    /// Vector of bounties sorted by deadline that match the criteria
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
     pub fn query_expiring_bounties(env: Env, max_deadline: u64, offset: u32, limit: u32) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
