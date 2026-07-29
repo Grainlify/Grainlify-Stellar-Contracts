@@ -3283,7 +3283,14 @@ mod test {
         assert!(found_upg_exec);
     }
 
+    // Requires a prebuilt grainlify-core wasm32v1-none release artifact for
+    // the include_bytes! below (`cargo build -p grainlify-core --release
+    // --target wasm32v1-none`) — gated behind a feature so the default
+    // host-only `cargo test -p grainlify-core` doesn't need that target
+    // (Issue #529). Run explicitly with `--features wasm-upgrade-test`
+    // after building the artifact.
     #[test]
+    #[cfg(feature = "wasm-upgrade-test")]
     fn test_upgrade_replay_guard_and_rescheduling() {
         let env = Env::default();
         env.mock_all_auths();
