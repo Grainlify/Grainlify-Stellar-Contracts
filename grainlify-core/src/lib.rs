@@ -70,9 +70,12 @@
 //! ### Voting schemes
 //!
 //! [`VotingScheme::OnePersonOneVote`] assigns power `1` to every authenticated
-//! voter.  [`VotingScheme::TokenWeighted`] reads each voter's current balance
-//! from the configured governance token; see `GOVERNANCE.md` for snapshot
-//! caveats.
+//! voter.  [`VotingScheme::TokenWeighted`] reads each voter's *live* balance
+//! from the configured governance token at vote time — **not** a balance
+//! snapshotted at proposal creation — so the same tokens can vote more than
+//! once via transfers between addresses within one voting period. See
+//! [`VotingScheme::TokenWeighted`]'s own doc comment and `GOVERNANCE.md` for
+//! the full security warning and deployment guidance.
 //!
 //! ### Exported types
 //!
