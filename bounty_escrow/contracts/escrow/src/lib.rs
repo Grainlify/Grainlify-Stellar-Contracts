@@ -3507,6 +3507,10 @@ impl BountyEscrowContract {
             // Update incremental aggregate counters
             Self::transition_locked_to_released(&env, escrow.amount);
 
+            // Update per-bounty analytics (mirrors single-item release_funds)
+            update_analytics_on_release(&env, item.bounty_id, escrow.amount, timestamp)
+                .map_err(|_| Error::AnalyticsOverflow)?;
+
             // Emit individual event for each released bounty
             emit_funds_released(
                 &env,
