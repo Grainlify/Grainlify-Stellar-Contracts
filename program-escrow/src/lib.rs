@@ -1383,7 +1383,24 @@ impl ProgramEscrowContract {
 
     // --- Circuit Breaker & Rate Limit ---
 
+    /// Register (or rotate) the circuit breaker admin.
+    ///
+    /// Bootstrap case (no circuit breaker admin registered yet): requires the
+    /// main contract admin's (`DataKey::Admin`) authorization, so the very
+    /// first caller against a freshly deployed contract cannot claim circuit
+    /// breaker admin unauthenticated -- `initialize_contract` never sets one
+    /// automatically. Once a circuit breaker admin exists, rotation continues
+    /// through `error_recovery::set_circuitadmin`'s existing current-admin
+    /// handoff path (`caller == current` + `require_auth`), unchanged.
     pub fn set_circuitadmin(env: Env, newadmin: Address, caller: Option<Address>) {
+        if error_recovery::get_circuitadmin(&env).is_none() {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .unwrap_or_else(|| panic!("Admin not set"));
+            admin.require_auth();
+        }
         error_recovery::set_circuitadmin(&env, newadmin, caller);
         Self::bump_instance_ttl(&env);
     }

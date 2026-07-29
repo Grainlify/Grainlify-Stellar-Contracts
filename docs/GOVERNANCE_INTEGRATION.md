@@ -32,6 +32,28 @@ The governance integration follows a modular design that allows escrow contracts
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Upgrade Authority Model (grainlify-core)
+
+`grainlify-core` supports three independent upgrade-authorization models —
+single-admin (`init_admin` + `schedule_upgrade`/`upgrade`), multisig (`init`
++ `propose_upgrade`/`execute_upgrade`), and governance (`init_governance` +
+`create_proposal`/`cast_vote`/`finalize_proposal`/`execute_proposal`) — but a
+given deployed contract instance may only ever activate **one** of them.
+
+This is enforced at initialization, not left as a deployment convention:
+each of `init`, `init_admin`, and `init_governance` claims a shared
+`DataKey::UpgradeMode` flag the first time it succeeds, and every subsequent
+call to any of the three — including a repeat call to the same one — is
+permanently rejected for that contract instance. This closes a specific
+bypass: without this guard, a deployer could configure multisig or
+governance for upgrade approval and *also* call `init_admin`, leaving a
+single admin key able to unilaterally replace the contract's WASM regardless
+of the quorum/threshold requirement the other path was meant to enforce.
+
+Escrow contracts (`bounty_escrow`, `program-escrow`) are unaffected by which
+mode a given `grainlify-core` instance uses — they only ever consult the
+governance side via `is_upg_ok`, as described below.
+
 ## Key Components
 
 ### 1. Governance Hooks
