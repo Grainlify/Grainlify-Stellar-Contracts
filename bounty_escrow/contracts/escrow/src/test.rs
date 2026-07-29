@@ -2003,3 +2003,183 @@ fn test_authorize_claim_pending_exists_rejection() {
     assert_eq!(new_claim.recipient, new_contributor);
     assert_eq!(new_claim.amount, amount);
 }
+
+// =============================================================================
+// Deadline validation tests (lock_funds / batch_lock_funds)
+// =============================================================================
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_past_deadline_rejected() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    setup.env.ledger().set_timestamp(100);
+    let past_deadline = 99u64; // deadline in the past
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &past_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_zero_deadline_rejected() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_deadline_equal_now_rejected() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let now = setup.env.ledger().timestamp();
+
+    // deadline == now should be rejected (must be strictly greater)
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &now);
+}
+
+#[test]
+fn test_lock_funds_future_deadline_succeeds() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let now = setup.env.ledger().timestamp();
+    let future_deadline = now + 100;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &future_deadline);
+
+    let stored = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(stored.status, EscrowStatus::Locked);
+    assert_eq!(stored.deadline, future_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_past_deadline_rejected() {
+    let setup = TestSetup::new();
+    setup.env.ledger().set_timestamp(100);
+    let past_deadline = 99u64;
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: past_deadline,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_zero_deadline_rejected() {
+    let setup = TestSetup::new();
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: 0,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_deadline_equal_now_rejected() {
+    let setup = TestSetup::new();
+    let now = setup.env.ledger().timestamp();
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: now,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
+}
+
+#[test]
+fn test_batch_lock_funds_future_deadline_succeeds() {
+    let setup = TestSetup::new();
+    let now = setup.env.ledger().timestamp();
+    let future_deadline = now + 100;
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: future_deadline,
+        },
+        LockFundsItem {
+            bounty_id: 2,
+            depositor: setup.depositor.clone(),
+            amount: 2000,
+            deadline: future_deadline,
+        },
+    ];
+
+    let count = setup.escrow.batch_lock_funds(&items);
+    assert_eq!(count, 2);
+
+    let stored1 = setup.escrow.get_escrow_info(&1);
+    assert_eq!(stored1.status, EscrowStatus::Locked);
+    assert_eq!(stored1.deadline, future_deadline);
+
+    let stored2 = setup.escrow.get_escrow_info(&2);
+    assert_eq!(stored2.status, EscrowStatus::Locked);
+    assert_eq!(stored2.deadline, future_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_rejects_whole_batch_if_any_past_deadline() {
+    let setup = TestSetup::new();
+    setup.env.ledger().set_timestamp(100);
+    let future_deadline = 200u64;
+    let past_deadline = 99u64;
+
+    // Second item has a past deadline — entire batch must be rejected
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: future_deadline,
+        },
+        LockFundsItem {
+            bounty_id: 2,
+            depositor: setup.depositor.clone(),
+            amount: 2000,
+            deadline: past_deadline,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
+}
