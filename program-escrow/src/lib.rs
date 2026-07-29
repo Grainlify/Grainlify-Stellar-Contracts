@@ -283,8 +283,8 @@ mod test_analytics_events;
 mod test_governance_integration;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
-    String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, String, Symbol, Vec,
 };
 
 // Event types
@@ -297,6 +297,7 @@ const DISPUTE_RESOLVED: Symbol = symbol_short!("DispRes");
 const DISPUTE_CANCELLED: Symbol = symbol_short!("DispCanc");
 const EVENT_VERSION_V2: u32 = 2;
 const PAUSE_STATE_CHANGED: Symbol = symbol_short!("PauseSt");
+const UPGRADE_EXECUTED: Symbol = symbol_short!("UpgExec");
 const AGGREGATE_STATS: Symbol = symbol_short!("AggStats");
 const LARGE_PAYOUT: Symbol = symbol_short!("LrgPay");
 const SCHEDULE_TRIGGERED: Symbol = symbol_short!("SchedTrg");
@@ -461,6 +462,14 @@ pub struct PauseFlags {
 pub struct PauseStateChanged {
     pub operation: Symbol,
     pub paused: bool,
+    pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecutedEvent {
+    pub version: u32,
+    pub wasm_hash: BytesN<32>,
     pub admin: Address,
 }
 
@@ -634,6 +643,10 @@ pub enum Error {
     /// Governance proposal is not in an executable state: pending, rejected,
     /// missing, delayed, vetoed/cancelled, or already executed.
     GovernanceProposalNotExecutable = 6,
+    /// The requested WASM hash has no executed, post-delay governance
+    /// proposal approving it (or no governance contract is configured at
+    /// all — upgrades fail closed, they are never permitted by default).
+    UpgradeNotApproved = 7,
 }
 
 #[contracttype]
@@ -1092,6 +1105,43 @@ impl ProgramEscrowContract {
 
         env.storage().instance().set(&DataKey::PauseFlags, &flags);
         Self::bump_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Upgrade the contract to new WASM code, gated on governance approval.
+    ///
+    /// `check_upgrade_approval` (in `governance_integration.rs`) was
+    /// previously unreachable dead code: it existed, was unit-tested in
+    /// isolation, and was cross-contract-callable, but nothing in this
+    /// contract's own logic ever called it, because there was no upgrade
+    /// entrypoint at all (Issue #472). This closes that gap.
+    ///
+    /// # Authorization
+    /// Requires the contract admin's `require_auth()`. Admin auth alone is
+    /// not sufficient, though: `check_upgrade_approval` must also report the
+    /// exact `new_wasm_hash` as approved by an executed, post-delay
+    /// `grainlify-core` governance proposal. If no governance contract is
+    /// configured at all, `check_upgrade_approval` returns `false` and this
+    /// fails closed — upgrades are never permitted by default.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        let admin = Self::requireadmin(&env);
+        admin.require_auth();
+
+        if !governance_integration::check_upgrade_approval(&env, &new_wasm_hash) {
+            return Err(Error::UpgradeNotApproved);
+        }
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+
+        env.events().publish(
+            (UPGRADE_EXECUTED,),
+            UpgradeExecutedEvent {
+                version: EVENT_VERSION_V2,
+                wasm_hash: new_wasm_hash,
+                admin,
+            },
+        );
+
         Ok(())
     }
 

@@ -248,6 +248,71 @@ fn test_upgrade_approval_denies_when_governance_is_not_configured() {
     });
 }
 
+// ---- Issue #472: upgrade() entrypoint wiring check_upgrade_approval ----
+
+#[test]
+fn test_upgrade_executes_when_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    gov_client.set_proposal(&1, &wasm_hash, &4); // 4 = Executed
+
+    // Must not panic: admin auth passes, check_upgrade_approval reports the
+    // exact uploaded hash as approved, and update_current_contract_wasm runs.
+    client.upgrade(&wasm_hash);
+}
+
+#[test]
+fn test_upgrade_rejected_when_not_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    // No governance contract configured at all — check_upgrade_approval
+    // fails closed, so upgrade() must reject even with valid admin auth.
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
+}
+
+#[test]
+fn test_upgrade_rejected_when_hash_not_the_approved_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+    gov_client.set_proposal(&1, &approved_hash, &4); // Executed, but a different hash
+
+    let attempted_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&attempted_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
+}
+
 #[test]
 fn testadmin_operations_work_without_governance() {
     let env = Env::default();

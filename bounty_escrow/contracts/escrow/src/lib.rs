@@ -20,9 +20,9 @@ use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
     emit_bounty_initialized, emit_funds_locked, emit_funds_refunded, emit_funds_released,
     emit_claim_created, emit_claim_executed, emit_claim_cancelled, emit_dispute_resolved,
-    BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized, BountyExpired,
-    ClaimCancelled, ClaimCreated, ClaimExecuted, DisputeOutcome, DisputeResolved,
-    FundsLocked, FundsRefunded, FundsReleased, EVENT_VERSION_V2,
+    emit_upgrade_executed, BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized,
+    BountyExpired, ClaimCancelled, ClaimCreated, ClaimExecuted, DisputeOutcome, DisputeResolved,
+    FundsLocked, FundsRefunded, FundsReleased, UpgradeExecuted, EVENT_VERSION_V2,
 };
 use analytics::{
     emit_analytics_snapshot, emit_bounty_activity, emit_bounty_state_transitioned,
@@ -36,8 +36,8 @@ use error_recovery::{
     CircuitBreakerStatus, CircuitState, ErrorEntry, ERR_CIRCUIT_OPEN,
 };
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
-    Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Map, Symbol, Vec,
 };
 
 // ==================== MONITORING MODULE ====================
@@ -413,6 +413,10 @@ pub enum Error {
     PendingClaimExists = 24,
     /// Returned when a governance proposal is missing, unapproved, delayed, rejected, or already executed
     GovernanceProposalNotExecutable = 25,
+    /// The requested WASM hash has no executed, post-delay governance
+    /// proposal approving it (or no governance contract is configured at
+    /// all — upgrades fail closed, they are never permitted by default).
+    UpgradeNotApproved = 26,
 }
 
 #[contracttype]
@@ -893,6 +897,47 @@ impl BountyEscrowContract {
                 fee_recipient: fee_config.fee_recipient.clone(),
                 fee_enabled: fee_config.fee_enabled,
                 timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Upgrade the contract to new WASM code, gated on governance approval.
+    ///
+    /// `check_upgrade_approval` (in `governance_integration.rs`) was
+    /// previously unreachable dead code: it existed, was unit-tested in
+    /// isolation, and was cross-contract-callable, but nothing in this
+    /// contract's own logic ever called it, because there was no upgrade
+    /// entrypoint at all (Issue #472). This closes that gap, mirroring
+    /// `program-escrow`'s own `upgrade()`.
+    ///
+    /// # Authorization
+    /// Requires the contract admin's `require_auth()`. Admin auth alone is
+    /// not sufficient, though: `check_upgrade_approval` must also report the
+    /// exact `new_wasm_hash` as approved by an executed, post-delay
+    /// `grainlify-core` governance proposal. If no governance contract is
+    /// configured at all, `check_upgrade_approval` returns `false` and this
+    /// fails closed — upgrades are never permitted by default.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        if !governance_integration::check_upgrade_approval(&env, &new_wasm_hash) {
+            return Err(Error::UpgradeNotApproved);
+        }
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+
+        emit_upgrade_executed(
+            &env,
+            UpgradeExecuted {
+                version: EVENT_VERSION_V2,
+                wasm_hash: new_wasm_hash,
+                admin,
             },
         );
 

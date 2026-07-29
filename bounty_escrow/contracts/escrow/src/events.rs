@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
 
 pub const EVENT_VERSION_V2: u32 = 2;
 
@@ -76,6 +76,20 @@ pub struct BountyExpired {
 
 pub fn emit_bounty_expired(env: &Env, event: BountyExpired) {
     let topics = (symbol_short!("b_exp"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
+/// Emitted after a governance-approved WASM upgrade actually executes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeExecuted {
+    pub version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+}
+
+pub fn emit_upgrade_executed(env: &Env, event: UpgradeExecuted) {
+    let topics = (symbol_short!("upgrade"),);
     env.events().publish(topics, event.clone());
 }
 
