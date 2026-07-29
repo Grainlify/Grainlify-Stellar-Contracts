@@ -462,7 +462,7 @@ fn test_recipient_dispute_skips_only_target_schedule_release() {
     let released_count = client.trigger_program_releases();
     assert_eq!(released_count, 1);
 
-    let schedules = client.get_program_release_schedules();
+    let schedules = client.get_program_release_schedules(&0, &100);
     let first = schedules.get(0).unwrap();
     let second = schedules.get(1).unwrap();
 
@@ -501,7 +501,7 @@ fn test_schedule_dispute_skips_only_target_schedule_release() {
     let released_count = client.trigger_program_releases();
     assert_eq!(released_count, 1);
 
-    let schedules = client.get_program_release_schedules();
+    let schedules = client.get_program_release_schedules(&0, &100);
     let first = schedules.get(0).unwrap();
     let second = schedules.get(1).unwrap();
 

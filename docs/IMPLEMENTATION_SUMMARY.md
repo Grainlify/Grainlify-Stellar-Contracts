@@ -42,8 +42,8 @@ Successfully implemented comprehensive query functions for both Bounty Escrow an
 3. **query_release_history()** - Filter release history by recipient
 4. **get_program_aggregate_stats()** - Program-wide statistics
 5. **get_payouts_by_recipient()** - Recipient-specific payout history
-6. **get_pending_schedules()** - All unreleased schedules
-7. **get_due_schedules()** - Schedules ready for release
+6. **get_pending_schedules(offset, limit)** - All unreleased schedules
+7. **get_due_schedules(offset, limit)** - Schedules ready for release
 8. **get_total_scheduled_amount()** - Total amount in pending schedules
 
 ## Key Features

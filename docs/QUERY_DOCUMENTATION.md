@@ -135,21 +135,34 @@ pub fn get_payouts_by_recipient(env: Env, recipient: Address, offset: u32, limit
 
 **Purpose**: Retrieve all payouts for a specific recipient with pagination.
 
-### 6. Get Pending Schedules
+### 6. Get Program Release Schedules
 ```rust
-pub fn get_pending_schedules(env: Env) -> Vec<ProgramReleaseSchedule>
+pub fn get_program_release_schedules(
+    env: Env,
+    offset: u32,
+    limit: u32,
+) -> Vec<ProgramReleaseSchedule>
 ```
 
-**Purpose**: Get all schedules that haven't been released yet.
+**Purpose**: Retrieve a raw-index page of release schedules. `limit` is capped at 100 records.
 
-### 7. Get Due Schedules
+The compatibility wrapper `get_all_prog_release_schedules` accepts and forwards the same `offset` and `limit`.
+
+### 7. Get Pending Schedules
 ```rust
-pub fn get_due_schedules(env: Env) -> Vec<ProgramReleaseSchedule>
+pub fn get_pending_schedules(env: Env, offset: u32, limit: u32) -> Vec<ProgramReleaseSchedule>
 ```
 
-**Purpose**: Get all schedules that are ready to be released (timestamp <= now).
+**Purpose**: Get a capped page of schedules that have not been released yet. The offset counts matching pending schedules.
 
-### 8. Get Total Scheduled Amount
+### 8. Get Due Schedules
+```rust
+pub fn get_due_schedules(env: Env, offset: u32, limit: u32) -> Vec<ProgramReleaseSchedule>
+```
+
+**Purpose**: Get a capped page of unreleased schedules that are ready to be released (`timestamp <= now`). The offset counts matching due schedules.
+
+### 9. Get Total Scheduled Amount
 ```rust
 pub fn get_total_scheduled_amount(env: Env) -> i128
 ```
@@ -286,8 +299,8 @@ let user_payouts = contract.get_payouts_by_recipient(
 ```rust
 // Daily statistics
 let stats = contract.get_program_aggregate_stats(env);
-let pending = contract.get_pending_schedules(env);
-let due = contract.get_due_schedules(env);
+let pending = contract.get_pending_schedules(env, 0, 50);
+let due = contract.get_due_schedules(env, 0, 50);
 
 // Generate report
 generate_daily_report(stats, pending, due);

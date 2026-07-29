@@ -116,7 +116,7 @@ fn add_due_schedule(
     // schedule is due because release_timestamp (500) < current timestamp (1_000)
     client.create_program_release_schedule(&amount, &500u64, recipient);
     // schedule_id starts at 1; return the expected id
-    let schedules = client.get_all_prog_release_schedules();
+    let schedules = client.get_all_prog_release_schedules(&0, &100);
     schedules.get(schedules.len() - 1).unwrap().schedule_id
 }
 
