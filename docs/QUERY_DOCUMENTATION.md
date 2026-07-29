@@ -27,12 +27,14 @@ pub fn query_escrows(env: Env, filter: EscrowQueryFilter, offset: u32, limit: u3
 ```rust
 // Query all locked escrows with amount >= 1000
 let filter = EscrowQueryFilter {
-    status: Some(EscrowStatus::Locked),
-    depositor: None,
-    min_amount: Some(1000),
-    max_amount: None,
-    min_deadline: None,
-    max_deadline: None,
+    has_status_filter: true,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: Address::generate(&env), // ignored: has_depositor_filter is false
+    min_amount: 1000,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: u64::MAX,
 };
 let results = contract.query_escrows(env, filter, 0, 50);
 ```
@@ -73,7 +75,12 @@ pub fn get_escrows_by_status(env: Env, status: EscrowStatus, offset: u32, limit:
 pub fn get_escrow_count(env: Env) -> u32
 ```
 
-**Purpose**: Get total number of escrows in the system.
+**Purpose**: Lifetime total number of bounties ever locked (append-only,
+never decreases — includes settled `Released`/`Refunded` bounties, not
+just active ones). For a live/active count use
+`count_bounties_by_status(EscrowStatus::Locked)` or `get_aggregate_stats`
+instead. `get_total_bounties_created` is an identically-behaved alias
+with a less ambiguous name.
 
 ## Program Escrow Query Functions
 
@@ -187,8 +194,14 @@ pub fn get_total_scheduled_amount(env: Env) -> i128
    
    // Less efficient: Filter all escrows by depositor
    let filter = EscrowQueryFilter {
-       depositor: Some(depositor),
-       ..Default::default()
+       has_status_filter: false,
+       status: EscrowStatus::Locked, // ignored: has_status_filter is false
+       has_depositor_filter: true,
+       depositor,
+       min_amount: 0,
+       max_amount: i128::MAX,
+       min_deadline: 0,
+       max_deadline: u64::MAX,
    };
    let results = contract.query_escrows(env, filter, 0, 50);
    ```
@@ -197,10 +210,14 @@ pub fn get_total_scheduled_amount(env: Env) -> i128
    ```rust
    // Efficient: Apply multiple filters in single query
    let filter = EscrowQueryFilter {
-       status: Some(EscrowStatus::Locked),
-       min_amount: Some(1000),
-       max_deadline: Some(current_time + 86400),
-       ..Default::default()
+       has_status_filter: true,
+       status: EscrowStatus::Locked,
+       has_depositor_filter: false,
+       depositor: Address::generate(&env), // ignored: has_depositor_filter is false
+       min_amount: 1000,
+       max_amount: i128::MAX,
+       min_deadline: 0,
+       max_deadline: current_time + 86400,
    };
    ```
 
