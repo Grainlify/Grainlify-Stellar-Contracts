@@ -154,7 +154,7 @@ Common options:
 | `--expected-admin <address>` | Compare the admin getter result with an expected address. |
 | `--expected-wasm <path>` | Calculate SHA-256 for a local WASM artifact and compare it with the deployed WASM hash. |
 | `--expected-wasm-hash <hash>` | Compare the deployed WASM hash with a known expected hash. |
-| `--smoke-functions <list>` | Comma-separated read-only functions to call. Defaults to `get_version,get_admin,get_pause_flags`. |
+| `--smoke-functions <list>` | Comma-separated read-only functions to call. Override as needed for contract-specific view names such as `program-escrow` (`get_version,getadmin,get_pause_flags`). |
 | `--skip-smoke` | Skip the default read-only smoke checks. |
 | `--json` | Emit machine-readable JSON. |
 | `-v, --verbose` | Enable debug logs. |
@@ -170,8 +170,9 @@ Examples:
 ```
 
 By default, verification now performs the primary `--function` check and read-only
-smoke calls for `get_version`, `get_admin`, and `get_pause_flags`. Use
-`--smoke-functions` for contracts with a different view surface, or `--skip-smoke`
+smoke calls for version, admin, and pause-flag getters. Use `--smoke-functions`
+for contracts with a different view surface, including `program-escrow`, which
+exposes `getadmin`, or use `--skip-smoke`
 when verifying a minimal contract that does not expose those getters. When a WASM
 artifact or expected hash is provided, the script reads the deployed hash with
 `stellar contract info hash --contract-id` and fails the verification if the

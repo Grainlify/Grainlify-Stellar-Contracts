@@ -2105,6 +2105,33 @@ mod test {
     }
 
     #[test]
+    fn test_migrate_docs_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Force contract to start at v1 so the documented 1 -> 2 migrate(target=2)
+        // example executes against migrate_v1_to_v2, matching the doc scenario.
+        // Using direct instance storage set to avoid requiring a public setter for 1.
+        env.storage().instance().set(&DataKey::Version, &1u32);
+        assert_eq!(client.get_version(), 1);
+
+        let migration_hash = BytesN::from_array(&env, &[0u8; 32]);
+        client.migrate(&2, &migration_hash);
+
+        assert_eq!(client.get_version(), 2);
+        let migration_state = client.get_migration_state().expect("migration state must be recorded");
+        assert_eq!(migration_state.from_version, 1);
+        assert_eq!(migration_state.to_version, 2);
+        assert_eq!(migration_state.migration_hash, migration_hash);
+    }
+
+    #[test]
     #[should_panic(expected = "Target version must be greater than current version")]
     fn test_migration_invalid_target_version() {
         let env = Env::default();
