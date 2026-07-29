@@ -3834,21 +3834,17 @@ impl BountyEscrowContract {
 
     /// Get high-value bounties (above a threshold) for risk monitoring.
     ///
-    /// **Note:** This function still performs an O(N) scan as it requires filtering
-    /// by amount, which cannot be efficiently maintained in aggregate counters.
-    /// Consider using pagination and caching for large datasets.
-    ///
-    /// # Arguments
-    /// * `min_amount` - Minimum amount to consider "high-value"
-    /// * `limit` - Maximum number of results
-    /// Get high-value bounties (above a threshold) for risk monitoring.
+    /// Only returns bounties with status `Locked` or `PartiallyRefunded`
+    /// (funds still actually escrowed). Filters on `remaining_amount` rather
+    /// than the original locked amount so that bounties that have been mostly
+    /// paid out via partial_release do not inflate the results.
     ///
     /// **Note:** This function still performs an O(N) scan as it requires filtering
     /// by amount, which cannot be efficiently maintained in aggregate counters.
     /// Consider using pagination and caching for large datasets.
     ///
     /// # Arguments
-    /// * `min_amount` - Minimum amount to consider "high-value"
+    /// * `min_amount` - Minimum remaining amount to consider "high-value"
     /// * `limit` - Maximum number of results
     ///
     /// # Authorization
@@ -3874,7 +3870,10 @@ impl BountyEscrowContract {
                 .persistent()
                 .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
             {
-                if escrow.amount >= min_amount {
+                if (escrow.status == EscrowStatus::Locked
+                    || escrow.status == EscrowStatus::PartiallyRefunded)
+                    && escrow.remaining_amount >= min_amount
+                {
                     results.push_back(bounty_id);
                     count += 1;
                 }

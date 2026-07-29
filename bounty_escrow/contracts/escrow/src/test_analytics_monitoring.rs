@@ -594,6 +594,63 @@ fn test_get_high_value_bounties_returns_empty_vec_when_none_qualify() {
     assert!(results.is_empty());
 }
 
+#[test]
+fn test_get_high_value_bounties_excludes_released_and_refunded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &10_000_000);
+
+    let deadline = env.ledger().timestamp() + 2000;
+    // Lock three bounties above the threshold
+    escrow.lock_funds(&depositor, &1, &1000, &deadline);
+    escrow.lock_funds(&depositor, &2, &2000, &deadline);
+    escrow.lock_funds(&depositor, &3, &3000, &deadline);
+
+    // Release bounty 1 ( Released )
+    escrow.release_funds(&1, &contributor);
+    // Advance time past deadline so refund succeeds
+    env.ledger().set_timestamp(deadline + 1);
+    // Refund bounty 2 ( Refunded )
+    escrow.refund(&2);
+
+    // Bounty 1 (Released, original 1000) and bounty 2 (Refunded, original 2000)
+    // must NOT appear even though their original amounts exceed min_amount.
+    let results = escrow.get_high_value_bounties(&500, &10);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0), Some(3));
+}
+
+#[test]
+fn test_get_high_value_bounties_uses_remaining_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &10_000_000);
+
+    let deadline = env.ledger().timestamp() + 2000;
+    // Lock a bounty at 1000
+    escrow.lock_funds(&depositor, &1, &1000, &deadline);
+
+    // Partially release 900, leaving remaining_amount = 100
+    escrow.partial_release(&1, &contributor, &900);
+
+    // With min_amount = 500, the bounty should NOT appear
+    // because remaining_amount (100) < min_amount (500)
+    let results = escrow.get_high_value_bounties(&500, &10);
+    assert_eq!(results.len(), 0);
+}
+
 // ===========================================================================
 // 7. Query by deadline range – monitoring view
 // ===========================================================================
