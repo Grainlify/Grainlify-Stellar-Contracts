@@ -1835,6 +1835,69 @@ mod test {
         client.init(&signers, &2u32);
     }
 
+    /// MultiSig::init must reject duplicate signer addresses.
+    /// [A, A, B] with threshold 2 has only 2 distinct signers (A and B),
+    /// so threshold 2 is technically reachable, but only by coincidence — not
+    /// by the number of distinct approvals possible. The init should reject
+    /// it proactively to prevent silent unreachable-quorum configurations.
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_init_rejects_duplicate_signers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a.clone());
+        signers.push_back(addr_a.clone()); // duplicate
+        signers.push_back(addr_b.clone());
+
+        // [A, A, B] with threshold 2 — should panic with AlreadySigner
+        client.init(&signers, &2u32);
+    }
+
+    /// Edge case: [A, A] with threshold 2 is the worst-case — only one
+    /// distinct signer, threshold of 2 is permanently unreachable.
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_init_rejects_duplicate_pair() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a.clone());
+        signers.push_back(addr_a.clone()); // duplicate — only 1 distinct signer
+
+        // [A, A] with threshold 2 — permanently unreachable, must be rejected
+        client.init(&signers, &2u32);
+    }
+
+    /// No duplicates — init must continue to succeed (regression guard).
+    #[test]
+    fn test_init_accepts_unique_signers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+        let addr_c = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a);
+        signers.push_back(addr_b);
+        signers.push_back(addr_c);
+
+        // [A, B, C] with threshold 2 — all distinct, must succeed
+        client.init(&signers, &2u32);
+    }
+
     #[test]
     fn test_set_version() {
         let env = Env::default();
