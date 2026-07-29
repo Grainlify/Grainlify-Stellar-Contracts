@@ -107,6 +107,22 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "UpgradeMode"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "symbol": "Multisig"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Version"
                             }
                           ]

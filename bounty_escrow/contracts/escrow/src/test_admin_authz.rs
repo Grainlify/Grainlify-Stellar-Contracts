@@ -29,8 +29,6 @@ struct AuthzSetup<'a> {
 impl<'a> AuthzSetup<'a> {
     fn new() -> Self {
         let env = Env::default();
-        // NOTE: no mock_all_auths(). `init` performs no require_auth, so it
-        // works without any mocked authorization.
         let contract_id = env.register_contract(None, BountyEscrowContract);
         let client = BountyEscrowContractClient::new(&env, &contract_id);
 
@@ -41,7 +39,15 @@ impl<'a> AuthzSetup<'a> {
             .register_stellar_asset_contract_v2(token_admin.clone())
             .address();
 
+        // NOTE: as of #491 `init` requires the incoming admin's own auth, so
+        // the bootstrap has to be authorized. Scope it to this one call and
+        // clear immediately with `mock_auths(&[])` — the negative tests below
+        // depend on the env being unauthenticated, and a lingering
+        // `mock_all_auths()` would make every `require_auth()` succeed and
+        // silently void them (see the module note above).
+        env.mock_all_auths();
         client.init(&admin, &token_id);
+        env.mock_auths(&[]);
 
         Self {
             env,

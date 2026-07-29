@@ -1,3 +1,4 @@
+use crate::{DataKey, UpgradeMode};
 use soroban_sdk::{contracttype, symbol_short, token, Address, BytesN, Env, Map, Symbol};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,6 +25,19 @@ pub enum VoteType {
 #[contracttype]
 pub enum VotingScheme {
     OnePersonOneVote,
+    /// **SECURITY WARNING — vote amplification via post-vote token
+    /// transfers.** Voting power is derived from each voter's *live* token
+    /// balance at `cast_vote` time, not a balance snapshotted at proposal
+    /// creation. `cast_vote` only blocks the same *address* from voting
+    /// twice on a proposal — nothing stops the same underlying tokens from
+    /// voting repeatedly through different addresses: vote from A with the
+    /// full balance, transfer to B, vote from B with that same balance,
+    /// transfer to C, and so on, all within one `voting_period`. A single
+    /// actor can accumulate many multiples of their true voting power this
+    /// way, undermining the "weighted by stake" premise of this scheme.
+    /// See `derive_voting_power` and `GovernanceConfig::snapshot_ledger`.
+    /// Deployments that cannot accept this risk should use
+    /// `OnePersonOneVote`, which is unaffected (see docs/grainlify-core/GOVERNANCE.md).
     TokenWeighted,
 }
 
@@ -56,6 +70,8 @@ pub struct GovernanceConfig {
     pub approval_threshold: u32,
     /// Minimum governance-token balance required to create a proposal.
     pub min_proposal_stake: i128,
+    /// See [`VotingScheme::TokenWeighted`]'s doc comment for a security
+    /// warning that applies when this is set to `TokenWeighted`.
     pub voting_scheme: VotingScheme,
     /// Soroban token used for token-weighted votes and proposal stake checks.
     pub governance_token: Address,
@@ -63,7 +79,14 @@ pub struct GovernanceConfig {
     pub one_person_total_voters: u32,
     /// Total token voting power for token-weighted quorum calculations.
     pub token_total_voting_power: i128,
-    /// Optional ledger recorded by governance policy for snapshot/stake-lock semantics.
+    /// Recorded policy metadata only — **not enforced**. This field does not
+    /// cause any balance to actually be snapshotted; `derive_voting_power`
+    /// always reads a live balance regardless of this value. Setting it does
+    /// not close the vote-amplification gap described on
+    /// [`VotingScheme::TokenWeighted`]; the standard Soroban token interface
+    /// does not expose historical/checkpointed balances, so real snapshotting
+    /// would require either a checkpoint-capable token or a separate
+    /// lock/escrow mechanism — neither is implemented here.
     pub snapshot_ledger: Option<u32>,
 }
 
@@ -81,6 +104,7 @@ pub const PROPOSALS: Symbol = symbol_short!("PROPOSALS");
 pub const PROPOSAL_COUNT: Symbol = symbol_short!("PROP_CNT");
 pub const VOTES: Symbol = symbol_short!("VOTES");
 pub const GOVERNANCE_CONFIG: Symbol = symbol_short!("GOV_CFG");
+pub const GOVERNANCE_ADMIN: Symbol = symbol_short!("GOV_ADM");
 
 #[soroban_sdk::contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -104,6 +128,7 @@ pub enum Error {
     InvalidTotalVotingPower = 16,
     Unauthorized = 17,
     VoteWeightOverflow = 18,
+    AlreadyInitialized = 19,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), soroban_sdk::contract)]
@@ -117,6 +142,21 @@ impl GovernanceContract {
         config: GovernanceConfig,
     ) -> Result<(), Error> {
         admin.require_auth();
+
+        // One-time initialisation. This also mirrors the reinit guard used by
+        // GrainlifyContract::init and GrainlifyContract::init_admin, and is
+        // mutually exclusive with the multisig (`init`) and single-admin
+        // (`init_admin`) upgrade paths — see `claim_upgrade_mode` in lib.rs.
+        // In production this shares instance storage with GrainlifyContract,
+        // so this check sees whatever those two initializers already
+        // claimed (and init_governance itself claims UpgradeMode::Governance
+        // below on success, so a second call to init_governance is rejected
+        // here too); in the standalone-GovernanceContract test harness it is
+        // scoped to that isolated instance's own storage.
+        if env.storage().instance().has(&DataKey::UpgradeMode) {
+            return Err(Error::AlreadyInitialized);
+        }
+
         if config.quorum_percentage > 10000 || config.approval_threshold > 10000 {
             return Err(Error::InvalidThreshold);
         }
@@ -130,8 +170,14 @@ impl GovernanceContract {
             return Err(Error::InvalidTotalVotingPower);
         }
 
+        // Persist the authenticated caller as the real governance admin of
+        // record, rather than treating `admin` as a throwaway auth argument.
+        env.storage().instance().set(&GOVERNANCE_ADMIN, &admin);
         env.storage().instance().set(&GOVERNANCE_CONFIG, &config);
         env.storage().instance().set(&PROPOSAL_COUNT, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeMode, &UpgradeMode::Governance);
         Ok(())
     }
 
@@ -280,6 +326,13 @@ impl GovernanceContract {
             return Err(Error::InvalidTotalVotingPower);
         }
 
+        // checked_mul: total_cast grows monotonically with votes cast and, for
+        // TokenWeighted voting, is derived from a configured token's balance()
+        // — a legitimate large token supply can make total_cast * 10000
+        // overflow i128::MAX. Since total_cast never shrinks, an unchecked
+        // panic here would make the proposal permanently un-finalizable
+        // (every retry hits the same overflow). Report it as a typed error
+        // instead, same as the additive vote tallying in cast_vote.
         let quorum_bps = total_cast
             .checked_mul(10000)
             .ok_or(Error::VoteWeightOverflow)?
@@ -473,9 +526,19 @@ impl GovernanceContract {
 /// Derives voting power for the configured scheme.
 ///
 /// `OnePersonOneVote` always returns `1` for an authenticated address.
-/// `TokenWeighted` reads the voter's current balance from the configured
-/// governance token. `snapshot_ledger` is recorded policy metadata only; the
-/// standard Soroban token interface does not expose historical balances.
+///
+/// **SECURITY WARNING**: `TokenWeighted` reads the voter's *current, live*
+/// balance from the configured governance token at the moment this is
+/// called — not a balance snapshotted at proposal creation or first-vote
+/// time. `GovernanceConfig::snapshot_ledger` is recorded policy metadata
+/// only and does not change this. Combined with `cast_vote` only blocking
+/// the same *address* from voting twice (not the same underlying tokens),
+/// a holder can vote from address A, transfer their tokens to address B,
+/// vote again from B with that same balance, and repeat — accumulating
+/// many multiples of their true voting power within a single voting
+/// period. This is the classic governance-token flash-loan / vote
+/// amplification vulnerability class; see [`VotingScheme::TokenWeighted`]
+/// and `docs/grainlify-core/GOVERNANCE.md` for deployment guidance.
 fn derive_voting_power(env: &Env, config: &GovernanceConfig, voter: &Address) -> i128 {
     match config.voting_scheme {
         VotingScheme::OnePersonOneVote => 1,
@@ -568,6 +631,57 @@ mod test {
         env.mock_all_auths();
         client.init_governance(&admin, &config);
         (client, token_admin_client, user, contract_id)
+    }
+
+    #[test]
+    fn test_init_governance_twice_rejected() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+
+        let attacker = Address::generate(&env);
+        let hijack_config = GovernanceConfig {
+            voting_period: 1,
+            execution_delay: 0,
+            quorum_percentage: 1,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::OnePersonOneVote,
+            governance_token: Address::generate(&env),
+            one_person_total_voters: 1,
+            token_total_voting_power: 0,
+            snapshot_ledger: None,
+        };
+
+        let result = client.try_init_governance(&attacker, &hijack_config);
+        assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    }
+
+    #[test]
+    fn test_init_governance_persists_admin_of_record() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let config = GovernanceConfig {
+            voting_period: 100,
+            execution_delay: 0,
+            quorum_percentage: 1000,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::OnePersonOneVote,
+            governance_token: Address::generate(&env),
+            one_person_total_voters: 10,
+            token_total_voting_power: 0,
+            snapshot_ledger: None,
+        };
+
+        env.mock_all_auths();
+        client.init_governance(&admin, &config);
+
+        let stored_admin: Address = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&GOVERNANCE_ADMIN).unwrap()
+        });
+        assert_eq!(stored_admin, admin);
     }
 
     fn create_test_proposal(
@@ -797,6 +911,88 @@ mod test {
         );
     }
 
+    /// Issue #477: documents the vote-amplification gap explicitly.
+    /// `cast_vote` only blocks the same *address* from voting twice on a
+    /// proposal; it derives voting power from a *live* token balance, so the
+    /// same underlying tokens can vote repeatedly by transferring between
+    /// addresses within a single voting period. This test is a deliberate,
+    /// documented demonstration of that tradeoff — not a claim that it is
+    /// fixed. See the security warnings on `VotingScheme::TokenWeighted`,
+    /// `derive_voting_power`, and `docs/grainlify-core/GOVERNANCE.md`.
+    #[test]
+    fn test_token_weighted_vote_amplification_via_transfer_between_addresses() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_address = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
+        let token_client = token::Client::new(&env, &token_address);
+
+        let config = GovernanceConfig {
+            voting_period: 100,
+            execution_delay: 0,
+            quorum_percentage: 1000,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::TokenWeighted,
+            governance_token: token_address,
+            one_person_total_voters: 0,
+            token_total_voting_power: 100,
+            snapshot_ledger: None,
+        };
+        client.init_governance(&admin, &config);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+
+        // A single pool of 100 tokens, entirely controlled by one actor,
+        // starting out at address A.
+        token_admin_client.mint(&voter_a, &100);
+
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        // Vote once from A with the full balance.
+        client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+
+        // Move the SAME 100 tokens to a different address the same actor
+        // controls — nothing about this requires the tokens to leave the
+        // actor's control, just a different on-chain address.
+        token_client.transfer(&voter_a, &voter_b, &100);
+
+        // Vote AGAIN from B with that same, now-live balance. AlreadyVoted
+        // only tracks (proposal_id, voter address), so a never-before-seen
+        // address sails through even though it holds the exact same tokens
+        // that already voted once under a different address.
+        client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+
+        let proposals: Map<u32, Proposal> = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&PROPOSALS).unwrap()
+        });
+        let proposal = proposals.get(prop_id).unwrap();
+
+        // The vulnerability, made concrete: two distinct ballots were
+        // accepted (total_votes == 2) and the tally double-counts the same
+        // 100-token balance as 200 votes_for — a single pool of tokens
+        // exerted twice its true voting power within one voting period.
+        assert_eq!(
+            proposal.total_votes, 2,
+            "both A's and B's ballots must be recorded as separate votes"
+        );
+        assert_eq!(
+            proposal.votes_for, 200,
+            "the same 100-token balance must be double-counted across A and B — \
+             this is the vote-amplification gap, not a bug in this test"
+        );
+    }
+
     #[test]
     fn test_create_proposal_enforces_minimum_stake() {
         let env = Env::default();
@@ -865,7 +1061,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_strictly_before_voting_end_rejected() {
         let env = Env::default();
-        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -883,7 +1080,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_exact_voting_end_boundary_rejected() {
         let env = Env::default();
-        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -901,7 +1099,8 @@ mod test {
     #[test]
     fn test_sweep_expired_proposal_one_second_past_voting_end_succeeds() {
         let env = Env::default();
-        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
+        let (client, _, proposer, _) =
+            setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
@@ -1164,92 +1363,164 @@ fn test_edge_case_vote_weight_overflow() {
     assert_eq!(res2, Err(Ok(Error::VoteWeightOverflow)));
 }
 
-    #[test]
-    fn test_create_proposal_not_initialized() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        let proposer = Address::generate(&env);
-        let result = client.try_create_proposal(
-            &proposer,
-            &BytesN::from_array(&env, &[0u8; 32]),
-            &symbol_short!("test"),
-        );
-        assert_eq!(result, Err(Ok(Error::NotInitialized)));
-    }
+/// A TokenWeighted voter with a legitimately large balance (well within
+/// cast_vote's own i128::MAX tally guard) can still make finalize_proposal's
+/// `total_cast * 10000` bps math overflow. This must return a typed error,
+/// not panic (Issue #385).
+#[test]
+fn test_finalize_proposal_quorum_bps_overflow_returns_typed_error() {
+    let env = Env::default();
+    let (client, token_admin_client, proposer, _) =
+        setup_test(&env, VotingScheme::TokenWeighted, 1000, 0, 0);
+    let token_admin_client = token_admin_client.unwrap();
+    let voter = Address::generate(&env);
 
-    #[test]
-    fn test_cast_vote_not_initialized() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        // Insert a proposal manually without initializing governance config
-        let proposer = Address::generate(&env);
-        let mut proposals: Map<u32, Proposal> = Map::new(&env);
-        let proposal = Proposal {
-            id: 0,
-            proposer: proposer.clone(),
-            new_wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
-            description: symbol_short!("test"),
-            created_at: 0,
-            voting_start: 0,
-            voting_end: 100,
-            execution_delay: 0,
-            status: ProposalStatus::Active,
-            votes_for: 0,
-            votes_against: 0,
-            votes_abstain: 0,
-            total_votes: 0,
-        };
-        proposals.set(0, proposal);
-        env.storage().instance().set(&PROPOSALS, &proposals);
-        let voter = Address::generate(&env);
-        let result = client.try_cast_vote(&voter, &0u32, &VoteType::For);
-        assert_eq!(result, Err(Ok(Error::NotInitialized)));
-    }
+    // i128::MAX / 5000 * 10000 overflows i128::MAX by design.
+    token_admin_client.mint(&voter, &(i128::MAX / 5000));
 
-    #[test]
-    fn test_finalize_proposal_not_initialized() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        // Insert a proposal manually without initializing governance config
-        let proposer = Address::generate(&env);
-        let mut proposals: Map<u32, Proposal> = Map::new(&env);
-        let proposal = Proposal {
-            id: 0,
-            proposer: proposer.clone(),
-            new_wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
-            description: symbol_short!("test"),
-            created_at: 0,
-            voting_start: 0,
-            voting_end: 100,
-            execution_delay: 0,
-            status: ProposalStatus::Active,
-            votes_for: 0,
-            votes_against: 0,
-            votes_abstain: 0,
-            total_votes: 0,
-        };
-        proposals.set(0, proposal);
-        env.storage().instance().set(&PROPOSALS, &proposals);
-        let result = client.try_finalize_proposal(&0u32);
-        assert_eq!(result, Err(Ok(Error::NotInitialized)));
-    }
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    client.cast_vote(&voter, &prop_id, &VoteType::For);
 
-    #[test]
-    fn test_not_initialized_transition_to_normal() {
-        let env = Env::default();
-        let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
-        // After init_governance, create_proposal should succeed
-        let prop_id = client.create_proposal(&proposer, &BytesN::from_array(&env, &[0u8; 32]), &symbol_short!("test"));
-        // Cast a vote
-        client.cast_vote(&proposer, &prop_id, &VoteType::For);
-        // Advance time beyond voting period
-        env.ledger().with_mut(|li| li.timestamp = 200);
-        // Finalize should not return NotInitialized
-        let status = client.finalize_proposal(&prop_id);
-        assert!(matches!(status, ProposalStatus::Approved | ProposalStatus::Rejected));
-    }
+    env.ledger().with_mut(|li| li.timestamp = 200);
+
+    let result = client.try_finalize_proposal(&prop_id);
+    assert_eq!(result, Err(Ok(Error::VoteWeightOverflow)));
+}
+
+// =============================================================================
+// Proposal lifecycle (Issue #179)
+// =============================================================================
+// A single end-to-end happy-path test plus one dedicated test per rejection
+// branch: double-voting and voting-after-expiry are already covered above by
+// test_edge_case_double_voting and test_edge_case_voting_after_expiration
+// respectively; the two tests below cover the remaining gap — execution
+// attempted before quorum/approval, and execution of an already-executed
+// proposal — which nothing in this file previously exercised (ProposalStatus
+// never reached Executed in any existing test's assertions).
+
+/// Full propose -> vote to quorum -> finalize -> execute lifecycle, asserting
+/// the proposal's status transitions at every step (Active -> Approved ->
+/// Executed), not just that each call returns Ok.
+#[test]
+fn test_proposal_lifecycle_happy_path_create_vote_execute() {
+    let env = Env::default();
+    // quorum 50%, 3 total one-person-one-vote voters, approval_threshold fixed
+    // at 5000 (50%) by setup_test, execution_delay fixed at 0.
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+
+    // 2 of 3 voters vote For: total_cast/total_power = 2/3 (~66%) clears the
+    // 50% quorum, and 2/2 approval votes clears the 50% approval threshold.
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active,
+        "status must not change until finalize_proposal runs"
+    );
+
+    // voting_period is fixed at 100 by setup_test.
+    env.ledger().with_mut(|li| li.timestamp = 101);
+    assert_eq!(
+        client.finalize_proposal(&prop_id),
+        ProposalStatus::Approved
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Approved
+    );
+
+    // execution_delay is fixed at 0 by setup_test, so executable_at == voting_end (100).
+    client.execute_proposal(&prop_id);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+}
+
+/// Execution attempted before the proposal has quorum/approval must be
+/// rejected with ProposalNotApproved — both while voting is freshly open
+/// (Active, no votes) and after votes are in but before finalize_proposal
+/// has run (still Active, not yet Approved).
+#[test]
+fn test_proposal_lifecycle_rejects_execute_before_quorum() {
+    let env = Env::default();
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+
+    // Freshly created, no votes at all.
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+
+    // Quorum-worthy votes are in, but finalize_proposal hasn't run yet, so
+    // status is still Active rather than Approved.
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Active
+    );
+}
+
+/// Once a proposal has been executed, a second execute_proposal call must be
+/// rejected — the proposal's status has already moved past Approved to
+/// Executed, so it fails the same ProposalNotApproved check as an
+/// unapproved proposal, not some separate "already executed" error.
+#[test]
+fn test_proposal_lifecycle_rejects_executing_already_executed_proposal() {
+    let env = Env::default();
+    let (client, _, proposer, _) =
+        setup_test(&env, VotingScheme::OnePersonOneVote, 5000, 0, 3);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+
+    let prop_id = create_test_proposal(&env, &client, &proposer);
+    client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+    client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+
+    env.ledger().with_mut(|li| li.timestamp = 101);
+    assert_eq!(
+        client.finalize_proposal(&prop_id),
+        ProposalStatus::Approved
+    );
+
+    client.execute_proposal(&prop_id);
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+
+    assert_eq!(
+        client.try_execute_proposal(&prop_id),
+        Err(Ok(Error::ProposalNotApproved))
+    );
+    // Still Executed, not reverted or otherwise mutated by the rejected retry.
+    assert_eq!(
+        client.get_proposal_status(&prop_id),
+        ProposalStatus::Executed
+    );
+}
 }
 

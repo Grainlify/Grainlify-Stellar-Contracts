@@ -6,7 +6,13 @@ mod error_recovery;
 
 #[cfg(test)]
 mod test_rbac;
+#[cfg(test)]
+mod test_dispute_events;
+#[cfg(test)]
+mod test_event_schema;
 mod test_admin_authz;
+#[cfg(test)]
+mod test_admin_bootstrap;
 mod test_coverage_boost;
 mod test_coverage_boost_small;
 mod test_coverage_comprehensive;
@@ -15,10 +21,10 @@ mod test_serialization;
 use events::{
     emit_batch_funds_locked, emit_batch_funds_released, emit_bounty_expired,
     emit_bounty_initialized, emit_funds_locked, emit_funds_refunded, emit_funds_released,
-    emit_claim_created, emit_claim_executed, emit_claim_cancelled,
-    BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized, BountyExpired,
-    ClaimCancelled, ClaimCreated, ClaimExecuted,
-    FundsLocked, FundsRefunded, FundsReleased, EVENT_VERSION_V2,
+    emit_claim_created, emit_claim_executed, emit_claim_cancelled, emit_dispute_resolved,
+    emit_upgrade_executed, BatchFundsLocked, BatchFundsReleased, BountyEscrowInitialized,
+    BountyExpired, ClaimCancelled, ClaimCreated, ClaimExecuted, DisputeOutcome, DisputeResolved,
+    FundsLocked, FundsRefunded, FundsReleased, UpgradeExecuted, EVENT_VERSION_V2,
 };
 use analytics::{
     emit_analytics_snapshot, emit_bounty_activity, emit_bounty_state_transitioned,
@@ -32,8 +38,8 @@ use error_recovery::{
     CircuitBreakerStatus, CircuitState, ErrorEntry, ERR_CIRCUIT_OPEN,
 };
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
-    Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Map, Symbol, Vec,
 };
 
 // ==================== MONITORING MODULE ====================
@@ -362,6 +368,9 @@ mod anti_abuse {
 const BASIS_POINTS: i128 = 10_000;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
 const MAX_BATCH_SIZE: u32 = 20;
+/// Hard ceiling on the `limit` parameter for read-side pagination functions.
+/// Callers needing more results must loop with `offset` to paginate.
+const MAX_QUERY_LIMIT: u32 = 100;
 /// Extend escrow persistent entries when the ledger sequence is within roughly one day of expiry.
 const ESCROW_TTL_THRESHOLD: u32 = 17_280;
 /// Keep escrow persistent entries alive for roughly thirty days on five-second ledgers.
@@ -406,6 +415,14 @@ pub enum Error {
     PendingClaimExists = 24,
     /// Returned when a governance proposal is missing, unapproved, delayed, rejected, or already executed
     GovernanceProposalNotExecutable = 25,
+    /// The requested WASM hash has no executed, post-delay governance
+    /// proposal approving it (or no governance contract is configured at
+    /// all — upgrades fail closed, they are never permitted by default).
+    UpgradeNotApproved = 26,
+    /// Returned when an arithmetic operation on an analytics accumulator
+    /// would overflow `i128` or `u32`.  Appended last to preserve
+    /// existing discriminant ordering.
+    AnalyticsOverflow = 27,
 }
 
 #[contracttype]
@@ -767,10 +784,28 @@ impl BountyEscrowContract {
     // ==================== END INCREMENTAL AGGREGATE COUNTERS ====================
 
     /// Initialize the contract with the admin address and the token address (XLM).
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from `admin` — the address being installed as
+    /// the permanent contract admin must authorize its own installation. The
+    /// check runs *after* the already-initialized guard so a second call still
+    /// reports `AlreadyInitialized` rather than an authorization failure.
+    ///
+    /// Note this does not fully close the deploy-then-initialize race: an
+    /// attacker who front-runs the legitimate deployer can still self-authorize
+    /// a bootstrap call naming an address they control. It raises the bar so a
+    /// front-runner can no longer install an arbitrary third-party address, and
+    /// it is the mitigation available without deploy-time (constructor)
+    /// initialization. See `docs/DEPLOYMENT_RUNBOOK.md` for the operational
+    /// guidance that covers the remaining window.
+    ///
+    /// # Errors
+    /// `AlreadyInitialized` if an admin has already been set.
     pub fn init(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
 
@@ -874,6 +909,47 @@ impl BountyEscrowContract {
         Ok(())
     }
 
+    /// Upgrade the contract to new WASM code, gated on governance approval.
+    ///
+    /// `check_upgrade_approval` (in `governance_integration.rs`) was
+    /// previously unreachable dead code: it existed, was unit-tested in
+    /// isolation, and was cross-contract-callable, but nothing in this
+    /// contract's own logic ever called it, because there was no upgrade
+    /// entrypoint at all (Issue #472). This closes that gap, mirroring
+    /// `program-escrow`'s own `upgrade()`.
+    ///
+    /// # Authorization
+    /// Requires the contract admin's `require_auth()`. Admin auth alone is
+    /// not sufficient, though: `check_upgrade_approval` must also report the
+    /// exact `new_wasm_hash` as approved by an executed, post-delay
+    /// `grainlify-core` governance proposal. If no governance contract is
+    /// configured at all, `check_upgrade_approval` returns `false` and this
+    /// fails closed — upgrades are never permitted by default.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        if !governance_integration::check_upgrade_approval(&env, &new_wasm_hash) {
+            return Err(Error::UpgradeNotApproved);
+        }
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+
+        emit_upgrade_executed(
+            &env,
+            UpgradeExecuted {
+                version: EVENT_VERSION_V2,
+                wasm_hash: new_wasm_hash,
+                admin,
+            },
+        );
+
+        Ok(())
+    }
+
     /// Update pause flags (admin only)
     pub fn set_paused(
         env: Env,
@@ -965,6 +1041,10 @@ impl BountyEscrowContract {
     }
 
     /// Get current pause flags
+    /// Get current pause flags
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_pause_flags(env: &Env) -> PauseFlags {
         env.storage()
             .instance()
@@ -1012,6 +1092,10 @@ impl BountyEscrowContract {
     }
 
     /// Get current fee configuration (view function)
+    /// Get current fee configuration (view function)
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_fee_config(env: Env) -> FeeConfig {
         Self::get_fee_config_internal(&env)
     }
@@ -1048,6 +1132,10 @@ impl BountyEscrowContract {
     }
 
     /// Get multisig configuration
+    /// Get multisig configuration
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_multisig_config(env: Env) -> MultisigConfig {
         env.storage()
             .instance()
@@ -1144,6 +1232,11 @@ impl BountyEscrowContract {
     }
 
     /// Approve release for large amount (requires multisig)
+    ///
+    /// # Authorization
+    /// Requires `approver.require_auth()`, and `approver` must be one of the
+    /// addresses configured in `MultisigConfig::signers` (`Unauthorized` otherwise).
+    /// This only records one signer's approval; it does not itself transfer funds.
     pub fn approve_large_release(
         env: Env,
         bounty_id: u64,
@@ -1205,6 +1298,26 @@ impl BountyEscrowContract {
     }
 
     /// Lock funds for a specific bounty.
+    ///
+    /// # Authorization
+    /// Requires `depositor.require_auth()` — only the depositor themself can
+    /// lock their own funds.
+    ///
+    /// # Arguments
+    /// * `depositor` - Address whose token balance is debited.
+    /// * `bounty_id` - Caller-chosen unique identifier; fails with `BountyExists` if reused.
+    /// * `amount` - Token amount to lock, in the token contract's own smallest unit
+    ///   (e.g. stroops for the native asset); must satisfy any configured min/max
+    ///   amount policy.
+    /// * `deadline` - Unix timestamp (seconds) after which the bounty becomes refundable.
+    ///
+    /// # Cross-contract call
+    /// Transfers `amount` from `depositor` to this contract via the configured
+    /// token contract's `transfer` (see `execute_token_transfer`).
+    ///
+    /// # Errors
+    /// `NotInitialized`, `BountyExists`, `AmountBelowMinimum`/`AmountAboveMaximum`
+    /// (if an amount policy is set), `FundsPaused`, `CircuitBreakerOpen`.
     pub fn lock_funds(
         env: Env,
         depositor: Address,
@@ -1233,6 +1346,12 @@ impl BountyEscrowContract {
 
         if env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyExists);
+        }
+
+        // Reject deadlines that are in the past or exactly now — a bounty
+        // must commit funds for at least one future ledger.
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
         }
 
         // Enforce min/max amount policy if one has been configured (Issue #62).
@@ -1350,6 +1469,13 @@ impl BountyEscrowContract {
     /// Only the admin (backend) can authorize this.
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before this value transfer can proceed.
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()`, where `admin` is the contract's configured admin.
+    ///
+    /// # Cross-contract call
+    /// Transfers the escrow's full `remaining_amount` to `contributor` via the
+    /// configured token contract's `transfer` (see `execute_token_transfer`).
     pub fn release_funds(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
         Self::check_governance_requirements(&env)?;
 
@@ -1420,8 +1546,9 @@ impl BountyEscrowContract {
 
         let timestamp = env.ledger().timestamp();
 
-        // Update analytics
-        update_analytics_on_release(&env, bounty_id, release_amount, timestamp);
+        // Update analytics; map overflow to a typed error rather than panicking.
+        update_analytics_on_release(&env, bounty_id, release_amount, timestamp)
+            .map_err(|_| Error::AnalyticsOverflow)?;
 
         // Update incremental aggregate counters
         Self::transition_locked_to_released(&env, release_amount);
@@ -1559,6 +1686,18 @@ impl BountyEscrowContract {
     }
 
     /// Beneficiary calls this to claim their authorized funds within the window.
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from the `recipient` address recorded on the
+    /// pending claim by `authorize_claim` — not the escrow's admin or depositor.
+    ///
+    /// # Cross-contract call
+    /// Transfers the claimed amount to the recipient via the configured token
+    /// contract's `transfer` (see `execute_token_transfer`).
+    ///
+    /// # Errors
+    /// `BountyNotFound` (no pending claim), `ClaimExpired`, `FundsNotLocked`
+    /// (already claimed), `FundsPaused`, `CircuitBreakerOpen`.
     pub fn claim(env: Env, bounty_id: u64) -> Result<(), Error> {
         // --- All validation BEFORE the reentrancy guard so early returns never
         //     leak the guard flag. ---
@@ -1643,6 +1782,18 @@ impl BountyEscrowContract {
                 claimed_at: now,
             },
         );
+        emit_dispute_resolved(
+            &env,
+            DisputeResolved {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                outcome: DisputeOutcome::Claimed,
+                resolver: claim.recipient.clone(),
+                recipient: claim.recipient.clone(),
+                amount: claim_amount,
+                resolved_at: now,
+            },
+        );
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
         Ok(())
     }
@@ -1688,11 +1839,27 @@ impl BountyEscrowContract {
             ClaimCancelled {
                 version: EVENT_VERSION_V2,
                 bounty_id,
-                recipient: claim.recipient,
+                recipient: claim.recipient.clone(),
                 amount: claim.amount,
                 cancelled_at,
-                cancelled_by: admin,
-                reason,
+                cancelled_by: admin.clone(),
+                reason: reason.clone(),
+            },
+        );
+        emit_dispute_resolved(
+            &env,
+            DisputeResolved {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                outcome: if reason == symbol_short!("expired") {
+                    DisputeOutcome::Expired
+                } else {
+                    DisputeOutcome::Cancelled
+                },
+                resolver: admin,
+                recipient: claim.recipient,
+                amount: claim.amount,
+                resolved_at: cancelled_at,
             },
         );
         Ok(())
@@ -1767,6 +1934,13 @@ impl BountyEscrowContract {
     /// - The bounty stays Locked while any funds remain unreleased.
     /// - If governance is configured, its version must satisfy the configured
     ///   minimum before any partial payout is transferred.
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()`, where `admin` is the contract's configured admin.
+    ///
+    /// # Cross-contract call
+    /// Transfers `payout_amount` to `contributor` via the configured token
+    /// contract's `transfer` (see `execute_token_transfer`).
     pub fn partial_release(
         env: Env,
         bounty_id: u64,
@@ -1863,6 +2037,12 @@ impl BountyEscrowContract {
             .set(&DataKey::Escrow(bounty_id), &escrow);
         Self::bump_escrow_ttl(&env, bounty_id);
 
+        // Update per-bounty analytics (mirrors release_funds/refund) so
+        // total_amount_released/remaining_amount never drift out of sync
+        // with the escrow's own remaining_amount after a partial release.
+        update_analytics_on_release(&env, bounty_id, payout_amount, env.ledger().timestamp())
+            .map_err(|_| Error::AnalyticsOverflow)?;
+
         // Update incremental aggregate counters
         Self::partial_release_from_locked(&env, payout_amount);
         if transitioned_to_released {
@@ -1929,6 +2109,17 @@ impl BountyEscrowContract {
     /// Refunds the full remaining_amount (accounts for any prior partial releases).
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before funds can be refunded.
+    ///
+    /// # Authorization
+    /// No caller authorization is required — callable by anyone (a permissionless
+    /// "keeper" pattern). Safety comes from the recipient being fixed by contract
+    /// state (the original depositor, or an admin-approved recipient via
+    /// `approve_refund`), not from caller identity, and from the deadline/approval
+    /// gate above.
+    ///
+    /// # Cross-contract call
+    /// Transfers the refund amount to the recipient via the configured token
+    /// contract's `transfer` (see `execute_token_transfer`).
     pub fn refund(env: Env, bounty_id: u64) -> Result<(), Error> {
 
 
@@ -2009,8 +2200,9 @@ impl BountyEscrowContract {
             .set(&DataKey::Escrow(bounty_id), &escrow);
         Self::bump_escrow_ttl(&env, bounty_id);
 
-        // Update analytics
-        update_analytics_on_refund(&env, bounty_id, refund_amount, now);
+        // Update analytics; map overflow to a typed error rather than panicking.
+        update_analytics_on_refund(&env, bounty_id, refund_amount, now)
+            .map_err(|_| Error::AnalyticsOverflow)?;
 
         // Update incremental aggregate counters
         match (original_status, escrow.status.clone()) {
@@ -2099,6 +2291,14 @@ impl BountyEscrowContract {
     /// transfer, so one invalid entry rejects the whole sweep.
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before any expired bounty is swept.
+    ///
+    /// # Authorization
+    /// No caller authorization is required, matching `refund`'s permissionless
+    /// keeper pattern — recipients are always each bounty's own depositor.
+    ///
+    /// # Cross-contract call
+    /// Transfers each bounty's full remaining amount back to its depositor via
+    /// the configured token contract's `transfer`, once per swept bounty.
     pub fn sweep_expired_refunds(env: Env, bounty_ids: Vec<u64>) -> Result<u32, Error> {
 
 
@@ -2182,7 +2382,8 @@ impl BountyEscrowContract {
                 .set(&DataKey::Escrow(bounty_id), &escrow);
             Self::bump_escrow_ttl(&env, bounty_id);
 
-            update_analytics_on_refund(&env, bounty_id, refund_amount, now);
+            update_analytics_on_refund(&env, bounty_id, refund_amount, now)
+                .map_err(|_| Error::AnalyticsOverflow)?;
 
             emit_bounty_state_transitioned(
                 &env,
@@ -2240,6 +2441,10 @@ impl BountyEscrowContract {
     }
 
     /// view function to get escrow info
+    /// view function to get escrow info
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_escrow_info(env: Env, bounty_id: u64) -> Result<Escrow, Error> {
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
@@ -2254,6 +2459,13 @@ impl BountyEscrowContract {
     }
 
     /// view function to get contract balance of the token
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
+    ///
+    /// # Cross-contract call
+    /// Reads this contract's balance via the configured token contract's
+    /// `balance` query. No funds move.
     pub fn get_balance(env: Env) -> Result<i128, Error> {
         if !env.storage().instance().has(&DataKey::Token) {
             return Err(Error::NotInitialized);
@@ -2265,12 +2477,20 @@ impl BountyEscrowContract {
 
     /// Query escrows with filtering and pagination
     /// Pass 0 for min values and i128::MAX/u64::MAX for max values to disable those filters
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn query_escrows_by_status(
         env: Env,
         status: EscrowStatus,
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2305,6 +2525,13 @@ impl BountyEscrowContract {
     }
 
     /// Query escrows with amount range filtering
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn query_escrows_by_amount(
         env: Env,
         min_amount: i128,
@@ -2312,6 +2539,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2346,6 +2574,13 @@ impl BountyEscrowContract {
     }
 
     /// Query escrows with deadline range filtering
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn query_escrows_by_deadline(
         env: Env,
         min_deadline: u64,
@@ -2353,6 +2588,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2387,6 +2623,10 @@ impl BountyEscrowContract {
     }
 
     /// Query escrows by depositor
+    /// Query escrows by depositor
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn query_escrows_by_depositor(
         env: Env,
         depositor: Address,
@@ -2433,8 +2673,9 @@ impl BountyEscrowContract {
     ///
     /// # Pagination
     /// - offset: Number of matching records to skip
-    /// - limit: Maximum number of records to return
+    /// - limit: Maximum number of records to return (capped at [`MAX_QUERY_LIMIT`] — 100)
     /// - Pagination is stable and works correctly with any filter combination
+    /// - Callers needing more results must loop with increasing `offset` values
     ///
     /// # Security Notes
     /// - Read-only query function - no state modifications
@@ -2446,6 +2687,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         // Optimization: use depositor index when depositor filter is active
         let index: Vec<u64> = if filter.has_depositor_filter {
             env.storage()
@@ -2533,6 +2775,16 @@ impl BountyEscrowContract {
     ///
     /// For verification purposes, use `get_aggregate_stats_full_scan` to perform a
     /// ground-truth comparison.
+    /// Get aggregate statistics from O(1) incremental counters.
+    ///
+    /// This function reads maintained counters that are updated on every state transition
+    /// (lock, release, refund, partial_release). Provides constant-time aggregate queries.
+    ///
+    /// For verification purposes, use `get_aggregate_stats_full_scan` to perform a
+    /// ground-truth comparison.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_aggregate_stats(env: Env) -> AggregateStats {
         Self::get_counters(&env)
     }
@@ -2545,6 +2797,17 @@ impl BountyEscrowContract {
     ///
     /// **Performance:** O(N) where N is the number of bounties. Not suitable for
     /// production queries at scale.
+    /// Get aggregate statistics via full O(N) scan for reconciliation and testing.
+    ///
+    /// This function performs a complete scan of all escrows to calculate aggregate
+    /// statistics from scratch. Use this to verify the incremental counters are accurate
+    /// or when counters need to be rebuilt.
+    ///
+    /// **Performance:** O(N) where N is the number of bounties. Not suitable for
+    /// production queries at scale.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_aggregate_stats_full_scan(env: Env) -> AggregateStats {
         let index: Vec<u64> = env
             .storage()
@@ -2594,6 +2857,10 @@ impl BountyEscrowContract {
     }
 
     /// Get total count of escrows
+    /// Get total count of escrows
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_escrow_count(env: Env) -> u32 {
         let index: Vec<u64> = env
             .storage()
@@ -2641,12 +2908,20 @@ impl BountyEscrowContract {
     }
 
     /// Get escrow IDs by status
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_escrow_ids_by_status(
         env: Env,
         status: EscrowStatus,
         offset: u32,
         limit: u32,
     ) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2679,6 +2954,16 @@ impl BountyEscrowContract {
         results
     }
 
+    /// Set (or overwrite) the address recorded as the anti-abuse module's admin.
+    ///
+    /// Note: this stored value is informational only — `set_whitelist` below is
+    /// actually gated by the contract's main `DataKey::Admin`, not by this value.
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from the contract's main admin (`DataKey::Admin`).
+    ///
+    /// # Errors
+    /// `NotInitialized` if the contract has no admin set yet.
     pub fn set_anti_abuse_admin(env: Env, admin: Address) -> Result<(), Error> {
         let current: Address = env
             .storage()
@@ -2690,10 +2975,26 @@ impl BountyEscrowContract {
         Ok(())
     }
 
+    /// Get the address most recently stored via `set_anti_abuse_admin`, if any.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_anti_abuse_admin(env: Env) -> Option<Address> {
         anti_abuse::get_admin(&env)
     }
 
+    /// Add or remove `whitelisted_address` from the anti-abuse rate-limit
+    /// whitelist. Whitelisted addresses bypass `check_rate_limit` entirely.
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from the contract's main admin (`DataKey::Admin`).
+    ///
+    /// # Arguments
+    /// * `whitelisted_address` - Address to add or remove.
+    /// * `whitelisted` - `true` to add, `false` to remove.
+    ///
+    /// # Errors
+    /// `NotInitialized` if the contract has no admin set yet.
     pub fn set_whitelist(
         env: Env,
         whitelisted_address: Address,
@@ -2718,6 +3019,18 @@ impl BountyEscrowContract {
     /// # Returns
     /// * `Ok(Vec<RefundRecord>)` - The refund history
     /// * `Err(Error::BountyNotFound)` - Bounty doesn't exist
+    /// Retrieves the refund history for a specific bounty.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `bounty_id` - The bounty to query
+    ///
+    /// # Returns
+    /// * `Ok(Vec<RefundRecord>)` - The refund history
+    /// * `Err(Error::BountyNotFound)` - Bounty doesn't exist
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_refund_history(env: Env, bounty_id: u64) -> Result<Vec<RefundRecord>, Error> {
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
@@ -2746,6 +3059,10 @@ impl BountyEscrowContract {
     }
 
     /// Get the governance contract address
+    /// Get the governance contract address
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_governance_contract(env: Env) -> Option<Address> {
         governance_integration::get_governance_contract(&env)
     }
@@ -2762,6 +3079,10 @@ impl BountyEscrowContract {
     }
 
     /// Get minimum required governance version
+    /// Get minimum required governance version
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_min_governance_version(env: Env) -> u32 {
         governance_integration::get_min_governance_version(&env)
     }
@@ -2771,6 +3092,19 @@ impl BountyEscrowContract {
     /// The configured grainlify-core governance contract re-checks quorum and
     /// approval state by executing the proposal itself. Pending, rejected,
     /// delayed, missing, or already-executed proposals are rejected.
+    ///
+    /// # Authorization
+    /// No caller authorization is required — callable by anyone. Safety comes
+    /// from the governance contract re-validating the proposal's own approval
+    /// state on every call, not from caller identity; this function only marks
+    /// an already-legitimately-approved proposal as consumed.
+    ///
+    /// # Cross-contract call
+    /// Invokes `execute_proposal` on the configured governance contract (see
+    /// `governance_integration::execute_governance_proposal`).
+    ///
+    /// # Errors
+    /// `NotInitialized`, `GovernanceVersionTooLow`, `GovernanceProposalNotExecutable`.
     pub fn execute_governance_proposal(env: Env, proposal_id: u32) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
@@ -2806,6 +3140,22 @@ impl BountyEscrowContract {
     ///   - remaining: Remaining amount in escrow
     ///   - approval: Optional refund approval if exists
     /// * `Err(Error::BountyNotFound)` - Bounty doesn't exist
+    /// Gets refund eligibility information for a bounty.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `bounty_id` - The bounty to query
+    ///
+    /// # Returns
+    /// * `Ok((bool, bool, i128, Option<RefundApproval>))` - Tuple containing:
+    ///   - can_refund: Whether refund is possible
+    ///   - deadline_passed: Whether the deadline has passed
+    ///   - remaining: Remaining amount in escrow
+    ///   - approval: Optional refund approval if exists
+    /// * `Err(Error::BountyNotFound)` - Bounty doesn't exist
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_refund_eligibility(
         env: Env,
         bounty_id: u64,
@@ -2868,6 +3218,14 @@ impl BountyEscrowContract {
     ///
     /// # Note
     /// This operation is atomic - if any item fails, the entire transaction reverts.
+    ///
+    /// # Authorization
+    /// Requires `require_auth()` from each item's own `depositor` (same rule as
+    /// `lock_funds`) — there is no single caller identity for the whole batch.
+    ///
+    /// # Cross-contract call
+    /// Transfers each item's `amount` from its `depositor` to this contract via
+    /// the configured token contract's `transfer`, once per batch item.
     pub fn batch_lock_funds(env: Env, items: Vec<LockFundsItem>) -> Result<u32, Error> {
 
 
@@ -2920,6 +3278,11 @@ impl BountyEscrowContract {
             // Validate amount
             if item.amount <= 0 {
                 return Err(Error::InvalidAmount);
+            }
+
+            // Reject deadlines that are in the past or exactly now
+            if item.deadline <= timestamp {
+                return Err(Error::InvalidDeadline);
             }
         }
 
@@ -3036,6 +3399,10 @@ impl BountyEscrowContract {
     /// This operation is atomic - if any item fails, the entire transaction reverts.
     /// If governance is configured, the linked governance version must meet
     /// the configured minimum before any item is released.
+    ///
+    /// # Cross-contract call
+    /// Transfers each item's escrowed amount to its `contributor` via the
+    /// configured token contract's `transfer`, once per batch item.
     pub fn batch_release_funds(env: Env, items: Vec<ReleaseFundsItem>) -> Result<u32, Error> {
 
 
@@ -3179,6 +3546,17 @@ impl BountyEscrowContract {
     /// # Returns
     /// * `Ok(BountyAnalytics)` - Analytics for the bounty including amounts locked/released/refunded
     /// * `Err(Error::BountyNotFound)` - If bounty doesn't exist
+    /// Get per-bounty analytics for a specific bounty
+    ///
+    /// # Arguments
+    /// * `bounty_id` - The bounty to query
+    ///
+    /// # Returns
+    /// * `Ok(BountyAnalytics)` - Analytics for the bounty including amounts locked/released/refunded
+    /// * `Err(Error::BountyNotFound)` - If bounty doesn't exist
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_bounty_analytics(env: Env, bounty_id: u64) -> Result<analytics::BountyAnalytics, Error> {
         get_bounty_analytics(&env, bounty_id).ok_or(Error::BountyNotFound)
     }
@@ -3199,6 +3577,25 @@ impl BountyEscrowContract {
     /// - Average bounty size
     ///
     /// This function uses O(1) incremental counters for efficiency.
+    /// Get contract-wide analytics snapshot
+    ///
+    /// Returns aggregated metrics about active bounties, total locked amounts, and released amounts.
+    /// This view is efficient and suitable for regular polling by off-chain indexers.
+    ///
+    /// # Returns
+    /// `ContractAnalytics` containing:
+    /// - Active bounty count (Locked or Partially Refunded)
+    /// - Released bounty count
+    /// - Refunded bounty count
+    /// - Total locked amount
+    /// - Total released amount
+    /// - Total refunded amount
+    /// - Average bounty size
+    ///
+    /// This function uses O(1) incremental counters for efficiency.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_contract_analytics(env: Env) -> ContractAnalytics {
         let stats = Self::get_counters(&env);
 
@@ -3230,6 +3627,10 @@ impl BountyEscrowContract {
     ///
     /// This can be called periodically to create snapshots for off-chain analytics and indexing.
     /// The event contains a full `ContractAnalytics` structure that can be ingested by indexing services.
+    ///
+    /// # Authorization
+    /// None — callable by anyone. It only publishes an event derived from
+    /// existing on-chain state; it cannot mutate escrow state or move funds.
     pub fn emit_analytics_snapshot_event(env: Env) {
         let analytics = Self::get_contract_analytics(env.clone());
         emit_analytics_snapshot(
@@ -3249,6 +3650,17 @@ impl BountyEscrowContract {
     ///
     /// For Locked status, this includes both Locked and PartiallyRefunded bounties.
     /// For other statuses, only exact matches are counted.
+    /// Count bounties by status
+    ///
+    /// # Returns
+    /// Number of bounties in the specified status
+    /// Count bounties by status using O(1) incremental counters.
+    ///
+    /// For Locked status, this includes both Locked and PartiallyRefunded bounties.
+    /// For other statuses, only exact matches are counted.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn count_bounties_by_status(env: Env, status: EscrowStatus) -> u32 {
         let stats = Self::get_counters(&env);
         match status {
@@ -3267,6 +3679,13 @@ impl BountyEscrowContract {
     ///
     /// Use this when you need to distinguish between Locked and PartiallyRefunded,
     /// or for verification purposes.
+    /// Count bounties by status via full O(N) scan for exact status matching.
+    ///
+    /// Use this when you need to distinguish between Locked and PartiallyRefunded,
+    /// or for verification purposes.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn count_by_status_full_scan(env: Env, status: EscrowStatus) -> u32 {
         let index: Vec<u64> = env
             .storage()
@@ -3293,6 +3712,12 @@ impl BountyEscrowContract {
     /// Get total volume of funds by status using O(1) incremental counters.
     ///
     /// Returns the sum of all funds in bounties with the specified status.
+    /// Get total volume of funds by status using O(1) incremental counters.
+    ///
+    /// Returns the sum of all funds in bounties with the specified status.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_volume_by_status(env: Env, status: EscrowStatus) -> i128 {
         let stats = Self::get_counters(&env);
         match status {
@@ -3310,6 +3735,12 @@ impl BountyEscrowContract {
     /// Get total volume of funds by status via full O(N) scan.
     ///
     /// Use this for exact status matching or verification.
+    /// Get total volume of funds by status via full O(N) scan.
+    ///
+    /// Use this for exact status matching or verification.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn volume_by_status_full_scan(env: Env, status: EscrowStatus) -> i128 {
         let index: Vec<u64> = env
             .storage()
@@ -3342,6 +3773,12 @@ impl BountyEscrowContract {
     /// Get statistics for a specific depositor
     ///
     /// Returns count and total amount of bounties created by the depositor
+    /// Get statistics for a specific depositor
+    ///
+    /// Returns count and total amount of bounties created by the depositor
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_depositor_stats(
         env: Env,
         depositor: Address,
@@ -3398,11 +3835,19 @@ impl BountyEscrowContract {
     /// # Arguments
     /// * `max_deadline` - Only return bounties with deadline <= this timestamp
     /// * `offset` - Pagination offset
-    /// * `limit` - Maximum number of results
+    /// * `limit` - Maximum number of results (capped at [`MAX_QUERY_LIMIT`] — 100)
     ///
     /// # Returns
     /// Vector of bounties sorted by deadline that match the criteria
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn query_expiring_bounties(env: Env, max_deadline: u64, offset: u32, limit: u32) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -3444,13 +3889,21 @@ impl BountyEscrowContract {
 
     /// Get high-value bounties (above a threshold) for risk monitoring.
     ///
+    /// Only returns bounties with status `Locked` or `PartiallyRefunded`
+    /// (funds still actually escrowed). Filters on `remaining_amount` rather
+    /// than the original locked amount so that bounties that have been mostly
+    /// paid out via partial_release do not inflate the results.
+    ///
     /// **Note:** This function still performs an O(N) scan as it requires filtering
     /// by amount, which cannot be efficiently maintained in aggregate counters.
     /// Consider using pagination and caching for large datasets.
     ///
     /// # Arguments
-    /// * `min_amount` - Minimum amount to consider "high-value"
+    /// * `min_amount` - Minimum remaining amount to consider "high-value"
     /// * `limit` - Maximum number of results
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_high_value_bounties(env: Env, min_amount: i128, limit: u32) -> Vec<u64> {
         let index: Vec<u64> = env
             .storage()
@@ -3472,7 +3925,10 @@ impl BountyEscrowContract {
                 .persistent()
                 .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
             {
-                if escrow.amount >= min_amount {
+                if (escrow.status == EscrowStatus::Locked
+                    || escrow.status == EscrowStatus::PartiallyRefunded)
+                    && escrow.remaining_amount >= min_amount
+                {
                     results.push_back(bounty_id);
                     count += 1;
                 }
@@ -3540,11 +3996,19 @@ impl BountyEscrowContract {
     }
 
     /// Get the current circuit breaker configuration.
+    /// Get the current circuit breaker configuration.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_circuit_breaker_config(env: Env) -> CircuitBreakerConfig {
         get_config(&env)
     }
 
     /// Get the current circuit breaker status.
+    /// Get the current circuit breaker status.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_circuit_breaker_status(env: Env) -> CircuitBreakerStatus {
         get_status(&env)
     }
@@ -3565,6 +4029,10 @@ impl BountyEscrowContract {
     }
 
     /// Get the circuit breaker error log.
+    /// Get the circuit breaker error log.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
     pub fn get_circuit_error_log(env: Env) -> soroban_sdk::Vec<ErrorEntry> {
         error_recovery::get_error_log(&env)
     }

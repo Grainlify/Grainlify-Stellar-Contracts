@@ -235,6 +235,14 @@
                     "storage": [
                       {
                         "key": {
+                          "symbol": "GOV_ADM"
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        }
+                      },
+                      {
+                        "key": {
                           "symbol": "GOV_CFG"
                         },
                         "val": {
@@ -604,6 +612,22 @@
                                   }
                                 ]
                               }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "UpgradeMode"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "symbol": "Governance"
                             }
                           ]
                         }
