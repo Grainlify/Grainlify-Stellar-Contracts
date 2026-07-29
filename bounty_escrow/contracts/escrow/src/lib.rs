@@ -1292,6 +1292,12 @@ impl BountyEscrowContract {
             return Err(Error::BountyExists);
         }
 
+        // Reject deadlines that are in the past or exactly now — a bounty
+        // must commit funds for at least one future ledger.
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
+        }
+
         // Enforce min/max amount policy if one has been configured (Issue #62).
         // When no policy is set this block is skipped entirely, preserving
         // backward-compatible behaviour for callers that never call set_amount_policy.
@@ -3167,6 +3173,11 @@ impl BountyEscrowContract {
             // Validate amount
             if item.amount <= 0 {
                 return Err(Error::InvalidAmount);
+            }
+
+            // Reject deadlines that are in the past or exactly now
+            if item.deadline <= timestamp {
+                return Err(Error::InvalidDeadline);
             }
         }
 
