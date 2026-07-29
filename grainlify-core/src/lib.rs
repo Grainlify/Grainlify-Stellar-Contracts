@@ -231,6 +231,8 @@
 
 mod governance;
 mod multisig;
+#[cfg(test)]
+mod governance_proptest;
 pub use governance::{
     Error as GovError, GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme,
 };
@@ -3293,7 +3295,9 @@ mod test {
         let admin = Address::generate(&env);
         client.init_admin(&admin);
 
-        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+        // Use the compiled contract WASM with proper metadata for upload.
+        let wasm_bytes = include_bytes!("../target/wasm32v1-none/release/grainlify_core.wasm");
+        let wasm_hash = env.deployer().upload_contract_wasm(&wasm_bytes[..]);
         client.set_upgrade_delay(&600);
         client.schedule_upgrade(&wasm_hash);
 
@@ -3319,7 +3323,7 @@ mod test {
         env.ledger().with_mut(|li| li.timestamp = 6_000);
         
         // Let's schedule a new upgrade hash
-        let new_wasm_hash = env.deployer().upload_contract_wasm([1u8].as_slice());
+        let new_wasm_hash = wasm_hash; // reuse original wasm_hash to avoid missing metadata
         let rescheduled = client.schedule_upgrade(&new_wasm_hash);
 
         assert_eq!(rescheduled.wasm_hash, new_wasm_hash);
