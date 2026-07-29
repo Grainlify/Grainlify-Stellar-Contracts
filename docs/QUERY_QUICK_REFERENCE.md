@@ -17,13 +17,16 @@ let balance = contract.get_balance(env)?;
 ### Filtered Queries
 ```rust
 // All locked escrows
+let ignored_depositor = Address::generate(&env);
 let filter = EscrowQueryFilter {
-    status: Some(EscrowStatus::Locked),
-    depositor: None,
-    min_amount: None,
-    max_amount: None,
-    min_deadline: None,
-    max_deadline: None,
+    has_status_filter: true,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: ignored_depositor,
+    min_amount: 0,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: u64::MAX,
 };
 let results = contract.query_escrows(env, filter, 0, 50);
 
@@ -31,13 +34,16 @@ let results = contract.query_escrows(env, filter, 0, 50);
 let results = contract.query_escrows_by_depositor(env, depositor_addr, 0, 50);
 
 // High-value escrows expiring soon
+let ignored_depositor = Address::generate(&env);
 let filter = EscrowQueryFilter {
-    status: Some(EscrowStatus::Locked),
-    depositor: None,
-    min_amount: Some(10000),
-    max_amount: None,
-    min_deadline: None,
-    max_deadline: Some(current_time + 86400), // 24 hours
+    has_status_filter: true,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: ignored_depositor,
+    min_amount: 10000,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: current_time + 86400, // 24 hours
 };
 let results = contract.query_escrows(env, filter, 0, 50);
 ```
@@ -184,10 +190,16 @@ let due = contract.get_due_schedules(env);
 ```rust
 // Check for expiring escrows
 let soon = current_time + 3600; // 1 hour
+let ignored_depositor = Address::generate(&env);
 let filter = EscrowQueryFilter {
-    status: Some(EscrowStatus::Locked),
-    max_deadline: Some(soon),
-    ..Default::default()
+    has_status_filter: true,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: ignored_depositor,
+    min_amount: 0,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: soon,
 };
 let expiring = contract.query_escrows(env, filter, 0, 100);
 
@@ -219,26 +231,42 @@ let daily_total: i128 = daily_payouts.iter().map(|p| p.amount).sum();
 
 ```rust
 // Empty filter (no filtering)
+let ignored_depositor = Address::generate(&env);
 let filter = EscrowQueryFilter {
-    status: None,
-    depositor: None,
-    min_amount: None,
-    max_amount: None,
-    min_deadline: None,
-    max_deadline: None,
+    has_status_filter: false,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: ignored_depositor,
+    min_amount: 0,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: u64::MAX,
 };
 
 // Status only
+let ignored_depositor = Address::generate(&env);
 let filter = EscrowQueryFilter {
-    status: Some(EscrowStatus::Locked),
-    ..Default::default()
+    has_status_filter: true,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: ignored_depositor,
+    min_amount: 0,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: u64::MAX,
 };
 
 // Amount range
+let ignored_depositor = Address::generate(&env);
 let filter = EscrowQueryFilter {
-    min_amount: Some(1000),
-    max_amount: Some(10000),
-    ..Default::default()
+    has_status_filter: false,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: ignored_depositor,
+    min_amount: 1000,
+    max_amount: 10000,
+    min_deadline: 0,
+    max_deadline: u64::MAX,
 };
 
 // Time range
