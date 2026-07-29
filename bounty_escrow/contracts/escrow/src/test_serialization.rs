@@ -150,6 +150,12 @@ fn ser_event_types() {
     roundtrip(&env, events::ClaimCancelled{ version: 1, bounty_id: 1,
         recipient: a.clone(), amount: 100, cancelled_at: 42,
         cancelled_by: a.clone(), reason: Symbol::new(&env, "test") });
+    roundtrip(&env, events::DisputeOutcome::Claimed);
+    roundtrip(&env, events::DisputeOutcome::Cancelled);
+    roundtrip(&env, events::DisputeOutcome::Expired);
+    roundtrip(&env, events::DisputeResolved{ version: 2, bounty_id: 1,
+        outcome: events::DisputeOutcome::Claimed, resolver: a.clone(),
+        recipient: a.clone(), amount: 100, resolved_at: 42 });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
