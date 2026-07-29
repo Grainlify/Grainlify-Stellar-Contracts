@@ -1,5 +1,5 @@
 #![cfg(test)]
-use crate::{events, BountyEscrowContract, BountyEscrowContractClient, Error as ContractError};
+use crate::{events, BountyEscrowContract, BountyEscrowContractClient, ClaimCreated, ClaimExecuted, Error as ContractError};
 use soroban_sdk::testutils::Events;
 use soroban_sdk::{
     symbol_short,
