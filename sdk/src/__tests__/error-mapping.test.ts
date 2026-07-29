@@ -24,7 +24,7 @@ import {
 // -----------------------------------------------------------------------
 
 /** contracts/program-escrow/src/lib.rs — Error enum */
-const PROGRAM_ESCROW_DISCRIMINANTS: number[] = [4];
+const PROGRAM_ESCROW_DISCRIMINANTS: number[] = [4, 5];
 
 /** contracts/bounty_escrow/contracts/escrow/src/lib.rs — Error enum */
 const BOUNTY_ESCROW_DISCRIMINANTS: number[] = [
@@ -181,6 +181,8 @@ describe('parseContractError string matching', () => {
     ['Amount exceeds maximum allowed',                 ContractErrorCode.AMOUNT_ABOVE_MAX],
     ['AmountAboveMaximum',                             ContractErrorCode.AMOUNT_ABOVE_MAX],
     ['GovernanceVersionTooLow',                       ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW],
+    ['InvalidThresholdBps',                            ContractErrorCode.INVALID_THRESHOLD_BPS],
+    ['threshold_bps exceeds 10_000',                   ContractErrorCode.INVALID_THRESHOLD_BPS],
   ];
 
   it.each(programEscrowCases)(
@@ -292,6 +294,14 @@ describe('parseContractError string matching', () => {
 // 4. Cross-layer consistency: numeric ↔ string resolution agrees
 // =======================================================================
 describe('Cross-layer consistency', () => {
+  it('program-escrow numeric and string parsers yield the same code', () => {
+    const fromNumeric = parseContractErrorByCode(5, 'program_escrow');
+    const fromString = parseContractError(new Error('InvalidThresholdBps'));
+
+    expect(fromNumeric.code).toBe(ContractErrorCode.INVALID_THRESHOLD_BPS);
+    expect(fromNumeric.code).toBe(fromString.code);
+  });
+
   it('bounty-escrow numeric and string parsers yield the same code', () => {
     const numericToString: [number, string][] = [
       [3,  'BountyExists'],
@@ -335,12 +345,12 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 11 program-escrow + 23 bounty-escrow + 15 governance + 3 circuit-breaker = 52
-    expect(count).toBe(52);
+    // 12 program-escrow + 23 bounty-escrow + 15 governance + 3 circuit-breaker = 53
+    expect(count).toBe(53);
   });
 
-  it('PROGRAM_ESCROW_ERROR_MAP has 1 entry', () => {
-    expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(1);
+  it('PROGRAM_ESCROW_ERROR_MAP has 2 entries', () => {
+    expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(2);
   });
 
   it('BOUNTY_ESCROW_ERROR_MAP has 23 entries', () => {
