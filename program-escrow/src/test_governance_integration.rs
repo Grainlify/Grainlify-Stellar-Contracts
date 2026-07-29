@@ -39,6 +39,16 @@ mod mock_governance {
         pub fn set_vetoed(env: Env, proposal_id: u32) {
             env.storage().instance().set(&VETOED_KEY, &proposal_id);
         }
+
+        /// Always succeeds. `execute_governance_proposal`'s own veto check
+        /// short-circuits before this is ever reached for a vetoed proposal,
+        /// so this mock only needs to model the non-vetoed, approved case.
+        pub fn execute_proposal(
+            _env: Env,
+            _proposal_id: u32,
+        ) -> Result<(), crate::governance_integration::GovernanceError> {
+            Ok(())
+        }
     }
 }
 
@@ -645,6 +655,70 @@ fn test_veto_after_execution_does_not_retroactively_revoke_approval() {
     });
 }
 
+// ============================================================================
+// Issue #473: check_proposal_vetoed must actually be consulted by a real
+// code path, not just declared. execute_governance_proposal is that path.
+// ============================================================================
+
+/// A vetoed proposal must be rejected by execute_governance_proposal even
+/// though the mock's execute_proposal itself would otherwise succeed —
+/// proving check_proposal_vetoed is now genuinely wired into the contract,
+/// not merely callable in isolation from tests.
+#[test]
+fn test_execute_governance_proposal_rejects_vetoed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client = mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    gov_client.set_vetoed(&0);
+
+    let result = client.try_execute_governance_proposal(&0);
+    assert_eq!(
+        result,
+        Err(Ok(Error::GovernanceProposalNotExecutable)),
+        "a vetoed proposal must be rejected even though the mock's execute_proposal would succeed"
+    );
+}
+
+/// A non-vetoed proposal proceeds normally through execute_governance_proposal
+/// — the veto wiring must not block legitimate governance actions.
+#[test]
+fn test_execute_governance_proposal_succeeds_for_non_vetoed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client = mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    // proposal 1 was never vetoed (only proposal 0 is ever marked in these tests).
+    gov_client.set_vetoed(&0);
+
+    let result = client.try_execute_governance_proposal(&1);
+    assert_eq!(
+        result,
+        Ok(Ok(())),
+        "a non-vetoed proposal must proceed normally"
+    );
+}
+
 /// Issue #386: grainlify-core's is_vetoed used to be a hardcoded stub that
 /// always returned false. This exercises check_proposal_vetoed against a
 /// *real* GrainlifyContract (not the mock above) via an actual
@@ -697,4 +771,66 @@ fn test_check_proposal_vetoed_false_against_real_grainlify_core_contract() {
             "a freshly created, never-cancelled proposal must not be reported as vetoed"
         );
     });
+}
+
+// ============================================================================
+// Governance version gate on fund-movement entrypoints
+// ============================================================================
+
+/// single_payout must be blocked when governance version is below minimum.
+#[test]
+#[should_panic(expected = "GovernanceVersionTooLow")]
+fn test_single_payout_blocked_by_governance_version_too_low() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let backend = Address::generate(&env);
+    let token = Address::generate(&env);
+    let program_id = String::from_str(&env, "GovTest");
+
+    client.setadmin(&admin);
+    client.initialize_program(&program_id, &backend, &token);
+
+    // Link governance and require version 3 (mock returns version 2)
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&3);
+
+    let recipient = Address::generate(&env);
+    // This should panic with GovernanceVersionTooLow
+    client.single_payout(&recipient, &100);
+}
+
+/// batch_payout must be blocked when governance version is below minimum.
+#[test]
+#[should_panic(expected = "GovernanceVersionTooLow")]
+fn test_batch_payout_blocked_by_governance_version_too_low() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let backend = Address::generate(&env);
+    let token = Address::generate(&env);
+    let program_id = String::from_str(&env, "GovBatch");
+
+    client.setadmin(&admin);
+    client.initialize_program(&program_id, &backend, &token);
+
+    // Link governance and require version 3 (mock returns version 2)
+    let gov_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&3);
+
+    let recipient = Address::generate(&env);
+    let recipients = soroban_sdk::vec![&env, recipient];
+    let amounts = soroban_sdk::vec![&env, 100i128];
+    // This should panic with GovernanceVersionTooLow
+    client.batch_payout(&recipients, &amounts);
 }

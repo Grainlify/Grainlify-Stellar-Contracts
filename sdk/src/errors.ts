@@ -74,6 +74,7 @@ export enum ContractErrorCode {
   AMOUNT_BELOW_MIN         = 'AMOUNT_BELOW_MIN',
   AMOUNT_ABOVE_MAX         = 'AMOUNT_ABOVE_MAX',
   GOVERNANCE_VERSION_TOO_LOW = 'GOVERNANCE_VERSION_TOO_LOW',
+  INVALID_THRESHOLD_BPS    = 'INVALID_THRESHOLD_BPS',
 
   // ── Bounty-Escrow (contracts/bounty_escrow) ────────────────────────────
   BOUNTY_ALREADY_INITIALIZED = 'BOUNTY_ALREADY_INITIALIZED',   // 1
@@ -144,6 +145,7 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.AMOUNT_BELOW_MIN]:          'Amount is below the minimum allowed by policy',
   [ContractErrorCode.AMOUNT_ABOVE_MAX]:          'Amount exceeds the maximum allowed by policy',
   [ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW]: 'Linked governance contract version is below the required minimum',
+  [ContractErrorCode.INVALID_THRESHOLD_BPS]:     'Large-payout threshold must not exceed 10,000 basis points',
 
   // Bounty-Escrow
   [ContractErrorCode.BOUNTY_ALREADY_INITIALIZED]: 'Bounty escrow contract is already initialized',
@@ -204,6 +206,7 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
 /** Program-escrow #[contracterror] discriminants → SDK code */
 export const PROGRAM_ESCROW_ERROR_MAP: Record<number, ContractErrorCode> = {
   4: ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW,
+  5: ContractErrorCode.INVALID_THRESHOLD_BPS,
 };
 
 /** Bounty-escrow #[contracterror] discriminants → SDK code */
@@ -352,6 +355,15 @@ export function parseContractError(error: any): ContractError {
   }
   if (!hasBountyContext && (errorMessage.includes('GovernanceVersionTooLow') || errorMessage.includes('Governance version requirement not met'))) {
     return createContractError(ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW);
+  }
+  if (
+    !hasBountyContext
+    && (
+      errorMessage.includes('InvalidThresholdBps')
+      || /threshold_bps.*(?:exceeds|greater than).*10_?000/i.test(errorMessage)
+    )
+  ) {
+    return createContractError(ContractErrorCode.INVALID_THRESHOLD_BPS);
   }
 
   // ── Bounty-escrow patterns ─────────────────────────────────────────────

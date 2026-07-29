@@ -41,6 +41,7 @@ mod mock_governance_with_proposal_state {
     use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Map, Symbol};
 
     const PROPOSAL_STATES: Symbol = symbol_short!("PR_STATE");
+    const VETOED_KEY: Symbol = symbol_short!("VETOED_ID");
     const STATUS_PENDING: u32 = 1;
     const STATUS_APPROVED: u32 = 2;
     const STATUS_REJECTED: u32 = 3;
@@ -115,6 +116,22 @@ mod mock_governance_with_proposal_state {
 
         pub fn executed_status(_env: Env) -> u32 {
             STATUS_EXECUTED
+        }
+
+        /// Returns `true` when `proposal_id` has been marked as vetoed.
+        /// Stores the ID of the single vetoed proposal (u32::MAX = none vetoed).
+        pub fn is_vetoed(env: Env, proposal_id: u32) -> bool {
+            let vetoed_id: u32 = env
+                .storage()
+                .instance()
+                .get(&VETOED_KEY)
+                .unwrap_or(u32::MAX);
+            vetoed_id == proposal_id
+        }
+
+        /// Test-only helper: mark `proposal_id` as vetoed.
+        pub fn set_vetoed(env: Env, proposal_id: u32) {
+            env.storage().instance().set(&VETOED_KEY, &proposal_id);
         }
     }
 }
@@ -281,6 +298,48 @@ fn test_governance_proposal_execution_consumes_approved_proposal_once() {
     assert_eq!(
         setup.escrow.try_execute_governance_proposal(&4),
         Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+}
+
+/// Issue #473: aligning bounty_escrow's GovernanceInterface with
+/// program-escrow's — a proposal reported as vetoed must be rejected by
+/// execute_governance_proposal even though it is otherwise Approved and
+/// would execute successfully.
+#[test]
+fn test_governance_proposal_execution_rejects_vetoed_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&5, &governance.approved_status());
+    governance.set_vetoed(&5);
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&5),
+        Err(Ok(Error::GovernanceProposalNotExecutable)),
+        "a vetoed proposal must be rejected even though it is Approved"
+    );
+    assert_eq!(
+        governance.get_proposal_status(&5),
+        governance.approved_status(),
+        "the mock's proposal status must be untouched — execute_proposal must never have been called"
+    );
+}
+
+/// A non-vetoed, Approved proposal must still execute normally — the veto
+/// wiring must not block legitimate governance actions.
+#[test]
+fn test_governance_proposal_execution_succeeds_for_non_vetoed_approved_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&6, &governance.approved_status());
+    // proposal 5 is vetoed in the sibling test's mock instance, but each test
+    // gets its own fresh contract registration, so this mock has no veto set.
+
+    setup.escrow.execute_governance_proposal(&6);
+    assert_eq!(
+        governance.get_proposal_status(&6),
+        governance.executed_status()
     );
 }
 
