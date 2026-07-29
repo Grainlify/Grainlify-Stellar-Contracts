@@ -147,6 +147,107 @@ mod governance_integration;
 pub mod monitoring;
 mod reentrancy_guard;
 
+// ==================== ANTI-ABUSE MODULE ====================
+mod anti_abuse {
+    use soroban_sdk::{contracttype, symbol_short, Address, Env};
+
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct RateLimitState {
+        pub last_operation_timestamp: u64,
+        pub window_start_timestamp: u64,
+        pub operation_count: u32,
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum RateLimitKey {
+        State(Address),
+        Whitelist(Address),
+    }
+
+    pub fn is_whitelisted(env: &Env, address: &Address) -> bool {
+        env.storage()
+            .instance()
+            .has(&RateLimitKey::Whitelist(address.clone()))
+    }
+
+    pub fn set_whitelist(env: &Env, address: &Address, whitelisted: bool) {
+        if whitelisted {
+            env.storage()
+                .instance()
+                .set(&RateLimitKey::Whitelist(address.clone()), &true);
+        } else {
+            env.storage()
+                .instance()
+                .remove(&RateLimitKey::Whitelist(address.clone()));
+        }
+    }
+
+    pub fn check_rate_limit(
+        env: &Env,
+        address: &Address,
+        window_size: u64,
+        max_operations: u32,
+        cooldown_period: u64,
+    ) {
+        if is_whitelisted(env, address) {
+            return;
+        }
+
+        let now = env.ledger().timestamp();
+        let key = RateLimitKey::State(address.clone());
+
+        let mut state: RateLimitState =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(RateLimitState {
+                    last_operation_timestamp: 0,
+                    window_start_timestamp: now,
+                    operation_count: 0,
+                });
+
+        // 1. Cooldown check
+        if state.last_operation_timestamp > 0
+            && now
+                < state
+                    .last_operation_timestamp
+                    .saturating_add(cooldown_period)
+        {
+            env.events().publish(
+                (symbol_short!("abuse"), symbol_short!("cooldown")),
+                (address.clone(), now),
+            );
+            panic!("Operation in cooldown period");
+        }
+
+        // 2. Window check
+        if now >= state.window_start_timestamp.saturating_add(window_size) {
+            // New window
+            state.window_start_timestamp = now;
+            state.operation_count = 1;
+        } else {
+            // Same window
+            if state.operation_count >= max_operations {
+                env.events().publish(
+                    (symbol_short!("abuse"), symbol_short!("limit")),
+                    (address.clone(), now),
+                );
+                panic!("Rate limit exceeded");
+            }
+            state.operation_count += 1;
+        }
+
+        state.last_operation_timestamp = now;
+        env.storage().persistent().set(&key, &state);
+
+        // Extend TTL for state (approx 1 day)
+        env.storage().persistent().extend_ttl(&key, 17280, 17280);
+    }
+}
+// ==================== END ANTI-ABUSE MODULE ====================
+
 #[cfg(test)]
 mod error_recovery_tests;
 #[cfg(test)]
@@ -758,6 +859,16 @@ impl ProgramEscrowContract {
             monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
             panic!("Funds Paused");
         }
+
+        // Enforce per-caller rate limit
+        let rl_config = Self::get_rate_limit_config(env.clone());
+        anti_abuse::check_rate_limit(
+            &env,
+            &caller_addr,
+            rl_config.window_size,
+            rl_config.max_operations,
+            rl_config.cooldown_period,
+        );
 
         if amount <= 0 {
             monitoring::track_operation(&env, symbol_short!("lock"), caller_addr.clone(), false);
@@ -1560,6 +1671,23 @@ impl ProgramEscrowContract {
             .instance()
             .get(&DataKey::WhitelistEnforced)
             .unwrap_or(false)
+    }
+
+    /// Set the rate-limit whitelist status of an address (admin only).
+    /// Whitelisted addresses bypass rate-limit checks entirely.
+    pub fn set_rate_limit_whitelist(env: Env, address: Address, whitelisted: bool) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+        anti_abuse::set_whitelist(&env, &address, whitelisted);
+    }
+
+    /// Check if an address is rate-limit whitelisted.
+    pub fn is_rate_limit_whitelisted(env: Env, address: Address) -> bool {
+        anti_abuse::is_whitelisted(&env, &address)
     }
 
     // ========================================================================
@@ -3532,11 +3660,6 @@ mod integration_tests {
     // Anti-Abuse Tests
     // ========================================================================
 
-    // NOTE: Anti-abuse tests that depend on multi-program initialization
-    // have been removed. Rate-limit and cooldown logic is currently
-    // not integrated into program-escrow's init flow in the single-program model.
-    // Anti-abuse tests should be re-added if/when integrated.
-
     #[test]
     fn test_anti_abuse_config_update() {
         let env = Env::default();
@@ -3553,6 +3676,161 @@ mod integration_tests {
         assert_eq!(config.window_size, 7200);
         assert_eq!(config.max_operations, 5);
         assert_eq!(config.cooldown_period, 120);
+    }
+
+    #[test]
+    fn test_rate_limit_enforced_on_lock_program_funds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let tokenadmin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+        let token_client = token::Client::new(&env, &token_id);
+        let tokenadmin_client = token::StellarAssetClient::new(&env, &token_id);
+
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let program_id = String::from_str(&env, "test-prog");
+        client.init_program(&program_id, &admin, &token_id);
+        client.setadmin(&admin);
+
+        // Configure: 2 ops per 3600s window, 0s cooldown (isolate max_operations test)
+        client.update_rate_limit_config(&3600, &2, &0);
+
+        let caller = Address::generate(&env);
+        tokenadmin_client.mint(&caller, &1_000_000_000);
+
+        let start_time = 1_000_000;
+        env.ledger().set_timestamp(start_time);
+
+        // First lock: should succeed
+        client.lock_program_funds(&caller, &100);
+        // Second lock: should succeed (within window, under max)
+        env.ledger().set_timestamp(start_time + 10);
+        client.lock_program_funds(&caller, &100);
+        // Third lock: should panic — max_operations = 2
+        env.ledger().set_timestamp(start_time + 20);
+        let result = client.try_lock_program_funds(&caller, &100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "Operation in cooldown period")]
+    fn test_rate_limit_cooldown_enforced() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let tokenadmin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+        let token_client = token::Client::new(&env, &token_id);
+        let tokenadmin_client = token::StellarAssetClient::new(&env, &token_id);
+
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let program_id = String::from_str(&env, "test-prog");
+        client.init_program(&program_id, &admin, &token_id);
+        client.setadmin(&admin);
+
+        // Configure: 10 ops per window, 60s cooldown
+        client.update_rate_limit_config(&3600, &10, &60);
+
+        let caller = Address::generate(&env);
+        tokenadmin_client.mint(&caller, &1_000_000_000);
+
+        let start_time = 1_000_000;
+        env.ledger().set_timestamp(start_time);
+
+        // First lock: succeeds
+        client.lock_program_funds(&caller, &100);
+        // Second lock within cooldown: should panic
+        env.ledger().set_timestamp(start_time + 30);
+        client.lock_program_funds(&caller, &100);
+    }
+
+    #[test]
+    fn test_rate_limit_window_resets() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let tokenadmin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+        let token_client = token::Client::new(&env, &token_id);
+        let tokenadmin_client = token::StellarAssetClient::new(&env, &token_id);
+
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let program_id = String::from_str(&env, "test-prog");
+        client.init_program(&program_id, &admin, &token_id);
+        client.setadmin(&admin);
+
+        // Configure: 1 op per 100s window, 0s cooldown
+        client.update_rate_limit_config(&100, &1, &0);
+
+        let caller = Address::generate(&env);
+        tokenadmin_client.mint(&caller, &1_000_000_000);
+
+        let start_time = 1_000_000;
+        env.ledger().set_timestamp(start_time);
+
+        // First lock: succeeds
+        client.lock_program_funds(&caller, &100);
+        // Second lock in same window: rejected
+        env.ledger().set_timestamp(start_time + 50);
+        let result = client.try_lock_program_funds(&caller, &100);
+        assert!(result.is_err());
+        // After window expires: succeeds again
+        env.ledger().set_timestamp(start_time + 101);
+        client.lock_program_funds(&caller, &100);
+    }
+
+    #[test]
+    fn test_rate_limit_whitelist_bypass() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let tokenadmin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+        let token_client = token::Client::new(&env, &token_id);
+        let tokenadmin_client = token::StellarAssetClient::new(&env, &token_id);
+
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let program_id = String::from_str(&env, "test-prog");
+        client.init_program(&program_id, &admin, &token_id);
+        client.setadmin(&admin);
+
+        // Configure: 1 op per window
+        client.update_rate_limit_config(&3600, &1, &60);
+
+        let caller = Address::generate(&env);
+        tokenadmin_client.mint(&caller, &1_000_000_000);
+
+        // Whitelist caller
+        client.set_rate_limit_whitelist(&caller, &true);
+        assert!(client.is_rate_limit_whitelisted(&caller.clone()));
+
+        let start_time = 1_000_000;
+        env.ledger().set_timestamp(start_time);
+
+        // First lock: succeeds
+        client.lock_program_funds(&caller, &100);
+        // Second lock in same window: would normally be rejected, but whitelisted
+        env.ledger().set_timestamp(start_time + 10);
+        client.lock_program_funds(&caller, &100);
+        // Third lock: still succeeds for whitelisted address
+        env.ledger().set_timestamp(start_time + 20);
+        client.lock_program_funds(&caller, &100);
+
+        let info = client.get_program_info();
+        assert_eq!(info.total_funds, 300);
     }
 
     // ========================================================================
