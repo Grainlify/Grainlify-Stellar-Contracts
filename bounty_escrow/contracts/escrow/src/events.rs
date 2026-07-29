@@ -2,6 +2,26 @@ use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
 
 pub const EVENT_VERSION_V2: u32 = 2;
 
+// ⚠ COMPATIBILITY CONTRACT FOR OFF-CHAIN CONSUMERS ⚠
+//
+// Every struct in this file is a BREAKING CHANGE boundary.
+// The off-chain event parser (e.g. `internal/soroban/event_parser.go`)
+// decodes these events by field POSITION and TYPE.  Any of the following
+// changes will silently break all consumers without a compile-time error:
+//
+//   • Adding, removing, or re-ordering fields in any event struct.
+//   • Changing a field's type (e.g. u64 → i128, Address → BytesN<32>).
+//   • Changing the `topics` tuple used in the corresponding `emit_*` fn.
+//   • Changing the `version` constant value.
+//
+// Before making ANY such change:
+//   1. Bump EVENT_VERSION_V2 (or introduce EVENT_VERSION_V3) so consumers
+//      can detect the new schema.
+//   2. Update `internal/soroban/event_parser.go` (and any other indexer)
+//      to handle both the old and new shapes during the migration window.
+//   3. Add or update the corresponding schema test in
+//      `src/test_event_schema.rs` to lock in the new shape.
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BountyEscrowInitialized {

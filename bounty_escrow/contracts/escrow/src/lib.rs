@@ -8,6 +8,8 @@ mod error_recovery;
 mod test_rbac;
 #[cfg(test)]
 mod test_dispute_events;
+#[cfg(test)]
+mod test_event_schema;
 mod test_admin_authz;
 #[cfg(test)]
 mod test_admin_bootstrap;
