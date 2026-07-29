@@ -5,8 +5,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, Address, Env,
+    testutils::{Address as _, Events, Ledger},
+    token, Address, Env, TryFromVal,
 };
 
 struct Cx<'a> {
@@ -303,4 +303,61 @@ fn full_scan_zero_match_returns_zero() {
         assert_eq!(s.client.count_by_status_full_scan(&status), 0);
         assert_eq!(s.client.volume_by_status_full_scan(&status), 0i128);
     }
+}
+#[test]
+fn test_contract_analytics_full() {
+    let s = Cx::new();
+    s.fund(&s.depositor, 1_000_000i128);
+
+    // Locked bounties
+    s.lock(1u64, 1000i128);
+    s.lock(2u64, 2000i128);
+    // Released bounties
+    s.lock(3u64, 1000i128);
+    s.client.authorize_claim(&3u64, &s.contributor);
+    s.client.claim(&3u64);
+    s.lock(4u64, 3000i128);
+    s.client.authorize_claim(&4u64, &s.contributor);
+    s.client.claim(&4u64);
+    // Fully refunded bounty
+    s.lock(5u64, 1000i128);
+    s.client.approve_refund(&5u64, &1000i128, &s.depositor, &RefundMode::Full);
+    s.client.refund(&5u64);
+    // Partially refunded bounty
+    s.lock(6u64, 2000i128);
+    s.client.approve_refund(&6u64, &500i128, &s.depositor, &RefundMode::Partial);
+    s.client.refund(&6u64);
+
+    let analytics = s.client.get_contract_analytics();
+    assert_eq!(analytics.active_bounty_count, 3);
+    assert_eq!(analytics.released_bounty_count, 2);
+    assert_eq!(analytics.refunded_bounty_count, 1);
+    assert_eq!(analytics.total_locked, 4500i128);
+    assert_eq!(analytics.total_released, 4000i128);
+    assert_eq!(analytics.total_refunded, 1500i128);
+    assert_eq!(analytics.average_bounty_amount, 1666i128);
+
+    // Verify emit_analytics_snapshot_event matches get_contract_analytics
+    s.client.emit_analytics_snapshot_event();
+    let events = s.env.events().all();
+    let (_contract_id, topics, data) = events.last().unwrap();
+    let topic_0 = Symbol::try_from_val(&s.env, &topics.get(0).unwrap()).unwrap();
+    let topic_1 = Symbol::try_from_val(&s.env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_0, symbol_short!("analytics"));
+    assert_eq!(topic_1, symbol_short!("snap"));
+    let snapshot = AnalyticsSnapshot::try_from_val(&s.env, &data).expect("AnalyticsSnapshot event deserialization failed");
+    assert_eq!(snapshot.metrics, analytics);
+}
+
+#[test]
+fn test_contract_analytics_zero() {
+    let s = Cx::new();
+    let analytics = s.client.get_contract_analytics();
+    assert_eq!(analytics.active_bounty_count, 0);
+    assert_eq!(analytics.released_bounty_count, 0);
+    assert_eq!(analytics.refunded_bounty_count, 0);
+    assert_eq!(analytics.total_locked, 0i128);
+    assert_eq!(analytics.total_released, 0i128);
+    assert_eq!(analytics.total_refunded, 0i128);
+    assert_eq!(analytics.average_bounty_amount, 0i128);
 }

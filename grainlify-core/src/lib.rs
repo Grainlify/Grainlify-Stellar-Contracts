@@ -70,9 +70,12 @@
 //! ### Voting schemes
 //!
 //! [`VotingScheme::OnePersonOneVote`] assigns power `1` to every authenticated
-//! voter.  [`VotingScheme::TokenWeighted`] reads each voter's current balance
-//! from the configured governance token; see `GOVERNANCE.md` for snapshot
-//! caveats.
+//! voter.  [`VotingScheme::TokenWeighted`] reads each voter's *live* balance
+//! from the configured governance token at vote time — **not** a balance
+//! snapshotted at proposal creation — so the same tokens can vote more than
+//! once via transfers between addresses within one voting period. See
+//! [`VotingScheme::TokenWeighted`]'s own doc comment and `GOVERNANCE.md` for
+//! the full security warning and deployment guidance.
 //!
 //! ### Exported types
 //!
@@ -2242,7 +2245,7 @@ mod test {
     }
 
     #[test]
-    fn test_get_previous_version() {
+    fn test_migration_state_getters_none_before_any_migration() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2252,14 +2255,130 @@ mod test {
         let admin = Address::generate(&env);
         client.init_admin(&admin);
 
-        // Initially no previous version
-        assert!(client.get_previous_version().is_none());
+        assert_eq!(client.get_migration_state(), None);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_analytics().migrations_run, 0);
+        assert_eq!(client.get_state_snapshot().migrations_run, 0);
+    }
 
-        // Simulate upgrade (this would normally be done via upgrade() but we'll set version directly)
-        client.set_version(&2);
+    #[test]
+    fn test_migration_state_getters_across_upgrade_and_migrate_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 8_000);
 
-        // Previous version should still be None unless upgrade() was called
-        // This test verifies the get_previous_version function works
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let pre_upgrade_version = client.get_version();
+
+        assert_eq!(client.get_migration_state(), None);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_analytics().migrations_run, 0);
+
+        // Drive the real single-admin upgrade path. The empty uploaded WASM is
+        // sufficient for exercising update_current_contract_wasm in the test host.
+        let replacement_wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&replacement_wasm_hash);
+
+        assert_eq!(scheduled.scheduled_at, 8_000);
+        assert_eq!(scheduled.executable_at, 8_600);
+
+        env.ledger().with_mut(|li| li.timestamp = scheduled.executable_at);
+        client.upgrade(&replacement_wasm_hash);
+
+        // The replacement test WASM has no callable entrypoints. Invoke the
+        // implementation directly in the preserved contract context to verify
+        // instance storage written by the real upgrade invocation.
+        let version_after_upgrade = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_version(env.clone())
+        });
+        let previous_version = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_previous_version(env.clone())
+        });
+        let migration_state_before = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_migration_state(env.clone())
+        });
+
+        assert_eq!(version_after_upgrade, pre_upgrade_version);
+        assert_eq!(previous_version, Some(pre_upgrade_version));
+        assert_eq!(migration_state_before, None);
+
+        let target_version = pre_upgrade_version + 1;
+        let migration_hash = BytesN::from_array(&env, &[4u8; 32]);
+        let migrated_at = scheduled.executable_at + 1;
+
+        env.ledger().with_mut(|li| li.timestamp = migrated_at);
+
+        env.as_contract(&contract_id, || {
+            GrainlifyContract::migrate(
+                env.clone(),
+                target_version,
+                migration_hash.clone(),
+            );
+        });
+
+        let migration_state = env
+            .as_contract(&contract_id, || {
+                GrainlifyContract::get_migration_state(env.clone())
+            })
+            .expect("completed migration must record migration state");
+
+        assert_eq!(
+            migration_state,
+            MigrationState {
+                from_version: pre_upgrade_version,
+                to_version: target_version,
+                migrated_at,
+                migration_hash: migration_hash.clone(),
+            }
+        );
+
+        let previous_after_migration = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_previous_version(env.clone())
+        });
+        let analytics_after_migration = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_analytics(env.clone())
+        });
+        let snapshot_after_migration = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_state_snapshot(env.clone())
+        });
+
+        assert_eq!(
+            previous_after_migration,
+            Some(pre_upgrade_version),
+            "migration must not overwrite the version captured by upgrade()"
+        );
+        assert_eq!(analytics_after_migration.upgrades_executed, 1);
+        assert_eq!(analytics_after_migration.migrations_run, 1);
+        assert_eq!(snapshot_after_migration.migrations_run, 1);
+
+        // The same completed migration is idempotent: state and counters must
+        // remain unchanged.
+        env.ledger().with_mut(|li| li.timestamp = migrated_at + 100);
+
+        env.as_contract(&contract_id, || {
+            GrainlifyContract::migrate(
+                env.clone(),
+                target_version,
+                migration_hash.clone(),
+            );
+        });
+
+        let state_after_repeat = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_migration_state(env.clone())
+        });
+        let analytics_after_repeat = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_analytics(env.clone())
+        });
+
+        assert_eq!(state_after_repeat, Some(migration_state));
+        assert_eq!(analytics_after_repeat.migrations_run, 1);
     }
 
     /// get_version_semver_string must return "3.0.0" after migrating to version 3.
@@ -2845,6 +2964,112 @@ mod test {
         assert_eq!(client.get_state_snapshot().migrations_run, 1);
     }
 
+    fn assert_last_governance_metric_event(
+        env: &Env,
+        contract_id: &Address,
+        expected_metric: soroban_sdk::Symbol,
+        expected_total: u64,
+    ) {
+        let events = env.events().all();
+        assert!(events.len() > 0, "tracking helper must emit an event");
+
+        let (event_contract, topics, data) = events
+            .get(events.len() - 1)
+            .expect("last governance metric event must exist");
+
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (symbol_short!("metric"), symbol_short!("gov")).into_val(env);
+
+        assert_eq!(event_contract, contract_id.clone());
+        assert_eq!(topics, expected_topics);
+
+        let payload =
+            monitoring::GovernanceMetric::try_from_val(env, &data)
+                .expect("governance metric payload must decode");
+
+        assert_eq!(payload.metric, expected_metric);
+        assert_eq!(payload.total, expected_total);
+        assert_eq!(payload.timestamp, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_track_governance_metric_helpers_return_monotonic_totals() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(monitoring::track_proposal_created(&env), 1);
+            assert_eq!(monitoring::track_proposal_created(&env), 2);
+
+            assert_eq!(monitoring::track_vote_cast(&env), 1);
+            assert_eq!(monitoring::track_vote_cast(&env), 2);
+
+            assert_eq!(monitoring::track_upgrade_executed(&env), 1);
+            assert_eq!(monitoring::track_upgrade_executed(&env), 2);
+
+            assert_eq!(monitoring::track_migration_run(&env), 1);
+            assert_eq!(monitoring::track_migration_run(&env), 2);
+
+            let analytics = monitoring::get_analytics(&env);
+            assert_eq!(analytics.proposals_created, 2);
+            assert_eq!(analytics.votes_cast, 2);
+            assert_eq!(analytics.upgrades_executed, 2);
+            assert_eq!(analytics.migrations_run, 2);
+        });
+    }
+
+    #[test]
+    fn test_track_governance_metric_helpers_emit_exact_events() {
+        let env = Env::default();
+        env.ledger().with_mut(|ledger| ledger.timestamp = 9_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        let proposal_total = env.as_contract(&contract_id, || {
+            monitoring::track_proposal_created(&env)
+        });
+        assert_eq!(proposal_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("proposal"),
+            proposal_total,
+        );
+
+        let vote_total = env.as_contract(&contract_id, || {
+            monitoring::track_vote_cast(&env)
+        });
+        assert_eq!(vote_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("vote"),
+            vote_total,
+        );
+
+        let upgrade_total = env.as_contract(&contract_id, || {
+            monitoring::track_upgrade_executed(&env)
+        });
+        assert_eq!(upgrade_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("upgrade"),
+            upgrade_total,
+        );
+
+        let migration_total = env.as_contract(&contract_id, || {
+            monitoring::track_migration_run(&env)
+        });
+        assert_eq!(migration_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("migrate"),
+            migration_total,
+        );
+    }
+
     #[test]
     fn test_upgrade_counter_increments_and_persists() {
         // The single-admin/multisig upgrade paths replace the contract WASM, so
@@ -2866,23 +3091,36 @@ mod test {
     }
 
     #[test]
-    fn test_counters_are_independent() {
-        // Exercising one counter must never perturb the others.
+    fn test_track_governance_metric_counters_are_independent() {
         let env = Env::default();
         let contract_id = env.register_contract(None, GrainlifyContract);
 
         env.as_contract(&contract_id, || {
-            monitoring::track_proposal_created(&env);
-            monitoring::track_vote_cast(&env);
-            monitoring::track_vote_cast(&env);
-            monitoring::track_upgrade_executed(&env);
-            monitoring::track_migration_run(&env);
+            assert_eq!(monitoring::track_proposal_created(&env), 1);
+            assert_eq!(monitoring::track_proposal_created(&env), 2);
+            assert_eq!(monitoring::track_proposal_created(&env), 3);
+
+            assert_eq!(monitoring::track_vote_cast(&env), 1);
+
+            assert_eq!(monitoring::track_upgrade_executed(&env), 1);
+            assert_eq!(monitoring::track_upgrade_executed(&env), 2);
+
+            assert_eq!(monitoring::track_migration_run(&env), 1);
+            assert_eq!(monitoring::track_migration_run(&env), 2);
+            assert_eq!(monitoring::track_migration_run(&env), 3);
+            assert_eq!(monitoring::track_migration_run(&env), 4);
 
             let analytics = monitoring::get_analytics(&env);
-            assert_eq!(analytics.proposals_created, 1);
-            assert_eq!(analytics.votes_cast, 2);
-            assert_eq!(analytics.upgrades_executed, 1);
-            assert_eq!(analytics.migrations_run, 1);
+            assert_eq!(analytics.proposals_created, 3);
+            assert_eq!(analytics.votes_cast, 1);
+            assert_eq!(analytics.upgrades_executed, 2);
+            assert_eq!(analytics.migrations_run, 4);
+
+            let snapshot = monitoring::get_state_snapshot(&env);
+            assert_eq!(snapshot.proposals_created, 3);
+            assert_eq!(snapshot.votes_cast, 1);
+            assert_eq!(snapshot.upgrades_executed, 2);
+            assert_eq!(snapshot.migrations_run, 4);
         });
     }
 
