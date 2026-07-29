@@ -207,8 +207,7 @@ const PROGRAM_DATA: Symbol = symbol_short!("ProgData");
 const SCHEDULES: Symbol = symbol_short!("Scheds");
 const RELEASE_HISTORY: Symbol = symbol_short!("RelHist");
 const NEXT_SCHEDULE_ID: Symbol = symbol_short!("NxtSched");
-const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
-const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRegd");
+
 const FEE_CONFIG: Symbol = symbol_short!("FeeConf");
 const FUND_CAP_CONFIG: Symbol = symbol_short!("FnCapCfg");
 const BASIS_POINTS: i128 = 10_000;
@@ -330,7 +329,6 @@ pub struct ProgramData {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
-    Program(String),                 // program_id -> ProgramData
     Admin,                           // Contract Admin
     ReleaseSchedule(String, u64),    // program_id, schedule_id -> ProgramReleaseSchedule
     ReleaseHistory(String),          // program_id -> Vec<ProgramReleaseHistory>
@@ -341,7 +339,6 @@ pub enum DataKey {
     PauseFlags,                      // PauseFlags struct
     RateLimitConfig,                 // RateLimitConfig struct
     FeeConfig,                       // FeeConfig struct
-    ProgramRegistry,                 // Vec<String> of program IDs
     Dispute,                         // DisputeRecord (global program-level dispute)
     RecipientDispute(Address),       // recipient -> DisputeRecord
     ScheduleDispute(u64),            // schedule_id -> DisputeRecord
@@ -449,16 +446,8 @@ pub struct ProgramAggregateStats {
     pub token_address: Address,
 }
 
-/// Input item for batch program registration.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProgramInitItem {
-    pub program_id: String,
-    pub authorized_payout_key: Address,
-    pub token_address: Address,
-}
-
-/// Maximum number of programs per batch (aligned with bounty_escrow).
+/// Maximum number of items per batch (used by `batch_payout` and
+/// `trigger_program_releases` to bound per-invocation work).
 pub const MAX_BATCH_SIZE: u32 = 100;
 
 // ── Dispute Resolution Types ──────────────────────────────────────────────
@@ -531,15 +520,7 @@ pub struct DisputeCancelledEvent {
     pub timestamp: u64,
 }
 
-/// Errors for batch program registration.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum BatchError {
-    InvalidBatchSize = 1,
-    ProgramAlreadyExists = 2,
-    DuplicateProgramId = 3,
-}
+
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -653,68 +634,6 @@ impl ProgramEscrowContract {
         program_data
     }
 
-    /// Batch-initialize multiple programs in one transaction (all-or-nothing).
-    ///
-    /// # Errors
-    /// * `BatchError::InvalidBatchSize` - empty or len > MAX_BATCH_SIZE
-    /// * `BatchError::DuplicateProgramId` - duplicate program_id in items
-    /// * `BatchError::ProgramAlreadyExists` - a program_id already registered
-    pub fn batch_initialize_programs(
-        env: Env,
-        items: Vec<ProgramInitItem>,
-    ) -> Result<u32, BatchError> {
-        let batch_size = items.len() as u32;
-        if batch_size == 0 || batch_size > MAX_BATCH_SIZE {
-            return Err(BatchError::InvalidBatchSize);
-        }
-        for i in 0..batch_size {
-            for j in (i + 1)..batch_size {
-                if items.get(i).unwrap().program_id == items.get(j).unwrap().program_id {
-                    return Err(BatchError::DuplicateProgramId);
-                }
-            }
-        }
-        for i in 0..batch_size {
-            let program_key = DataKey::Program(items.get(i).unwrap().program_id.clone());
-            if env.storage().persistent().has(&program_key) {
-                Self::bump_persistent_datakey_ttl(&env, &program_key);
-                return Err(BatchError::ProgramAlreadyExists);
-            }
-        }
-
-        let mut count = 0u32;
-        for i in 0..batch_size {
-            let item = items.get(i).unwrap();
-            let program_id = item.program_id.clone();
-            let authorized_payout_key = item.authorized_payout_key.clone();
-            let token_address = item.token_address.clone();
-
-            if program_id.is_empty() {
-                return Err(BatchError::InvalidBatchSize);
-            }
-
-            let program_data = ProgramData {
-                program_id: program_id.clone(),
-                total_funds: 0,
-                remaining_balance: 0,
-                authorized_payout_key: authorized_payout_key.clone(),
-                payout_history: vec![&env],
-                token_address: token_address.clone(),
-            };
-            let program_key = DataKey::Program(program_id.clone());
-            env.storage().persistent().set(&program_key, &program_data);
-            Self::bump_persistent_datakey_ttl(&env, &program_key);
-
-            env.events().publish(
-                (symbol_short!("BatchReg"),),
-                (program_id, authorized_payout_key, token_address, 0i128),
-            );
-            count += 1;
-        }
-
-        Ok(count)
-    }
-
     /// Calculate fee amount based on rate (in basis points)
     fn calculate_fee(amount: i128, fee_rate: i128) -> i128 {
         if fee_rate == 0 {
@@ -734,12 +653,6 @@ impl ProgramEscrowContract {
             .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
 
-    /// Bump the TTL for multi-program persistent storage keys
-    fn bump_persistent_datakey_ttl(env: &Env, key: &DataKey) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
-    }
     /// Bump the TTL for the contract instance storage
     fn bump_instance_ttl(env: &Env) {
         env.storage()
@@ -817,18 +730,11 @@ impl ProgramEscrowContract {
     /// # Returns
     /// * `bool` - True if program exists, false otherwise
     pub fn program_exists(env: Env) -> bool {
-        // Check both PROGRAM_DATA (single program) and DataKey::Program registry
-        if env.storage().persistent().has(&PROGRAM_DATA) {
+        let exists = env.storage().persistent().has(&PROGRAM_DATA);
+        if exists {
             Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
-            return true;
         }
-        // Check if any programs exist in registry
-        let registry: Option<Vec<String>> = env.storage().instance().get(&PROGRAM_REGISTRY);
-        Self::bump_instance_ttl(&env);
-        if let Some(reg) = registry {
-            return reg.len() > 0;
-        }
-        false
+        exists
     }
 
     // ========================================================================
@@ -3457,71 +3363,6 @@ mod integration_tests {
 
         // Calling get_program_info without initializing should panic
         client.get_program_info();
-    }
-
-    // ========================================================================
-    // Batch program registration tests
-    // ========================================================================
-
-    #[test]
-    fn test_batch_initialize_programs_success() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, ProgramEscrowContract);
-        let client = ProgramEscrowContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let token = Address::generate(&env);
-        let mut items = Vec::new(&env);
-        items.push_back(ProgramInitItem {
-            program_id: String::from_str(&env, "prog-1"),
-            authorized_payout_key: admin.clone(),
-            token_address: token.clone(),
-        });
-        items.push_back(ProgramInitItem {
-            program_id: String::from_str(&env, "prog-2"),
-            authorized_payout_key: admin.clone(),
-            token_address: token.clone(),
-        });
-        let count = client
-            .try_batch_initialize_programs(&items)
-            .unwrap()
-            .unwrap();
-        assert_eq!(count, 2);
-        // batch_initialize_programs uses DataKey::Program(id) registry;
-        // program_exists() checks the single-program PROGRAM_DATA key.
-        // Verify only the count returned by the batch call.
-    }
-
-    #[test]
-    fn test_batch_initialize_programs_empty_err() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, ProgramEscrowContract);
-        let client = ProgramEscrowContractClient::new(&env, &contract_id);
-        let items: Vec<ProgramInitItem> = Vec::new(&env);
-        let res = client.try_batch_initialize_programs(&items);
-        assert!(matches!(res, Err(Ok(BatchError::InvalidBatchSize))));
-    }
-
-    #[test]
-    fn test_batch_initialize_programs_duplicate_id_err() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, ProgramEscrowContract);
-        let client = ProgramEscrowContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let token = Address::generate(&env);
-        let pid = String::from_str(&env, "same-id");
-        let mut items = Vec::new(&env);
-        items.push_back(ProgramInitItem {
-            program_id: pid.clone(),
-            authorized_payout_key: admin.clone(),
-            token_address: token.clone(),
-        });
-        items.push_back(ProgramInitItem {
-            program_id: pid,
-            authorized_payout_key: admin.clone(),
-            token_address: token.clone(),
-        });
-        let res = client.try_batch_initialize_programs(&items);
-        assert!(matches!(res, Err(Ok(BatchError::DuplicateProgramId))));
     }
 
     // ========================================================================

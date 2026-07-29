@@ -366,6 +366,9 @@ mod anti_abuse {
 const BASIS_POINTS: i128 = 10_000;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
 const MAX_BATCH_SIZE: u32 = 20;
+/// Hard ceiling on the `limit` parameter for read-side pagination functions.
+/// Callers needing more results must loop with `offset` to paginate.
+const MAX_QUERY_LIMIT: u32 = 100;
 /// Extend escrow persistent entries when the ledger sequence is within roughly one day of expiry.
 const ESCROW_TTL_THRESHOLD: u32 = 17_280;
 /// Keep escrow persistent entries alive for roughly thirty days on five-second ledgers.
@@ -2413,8 +2416,10 @@ impl BountyEscrowContract {
 
     /// Query escrows with filtering and pagination
     /// Pass 0 for min values and i128::MAX/u64::MAX for max values to disable those filters
-    /// Query escrows with filtering and pagination
-    /// Pass 0 for min values and i128::MAX/u64::MAX for max values to disable those filters
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2424,6 +2429,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2458,7 +2464,10 @@ impl BountyEscrowContract {
     }
 
     /// Query escrows with amount range filtering
-    /// Query escrows with amount range filtering
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2469,6 +2478,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2503,7 +2513,10 @@ impl BountyEscrowContract {
     }
 
     /// Query escrows with deadline range filtering
-    /// Query escrows with deadline range filtering
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2514,6 +2527,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2598,8 +2612,9 @@ impl BountyEscrowContract {
     ///
     /// # Pagination
     /// - offset: Number of matching records to skip
-    /// - limit: Maximum number of records to return
+    /// - limit: Maximum number of records to return (capped at [`MAX_QUERY_LIMIT`] — 100)
     /// - Pagination is stable and works correctly with any filter combination
+    /// - Callers needing more results must loop with increasing `offset` values
     ///
     /// # Security Notes
     /// - Read-only query function - no state modifications
@@ -2611,6 +2626,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<EscrowWithId> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         // Optimization: use depositor index when depositor filter is active
         let index: Vec<u64> = if filter.has_depositor_filter {
             env.storage()
@@ -2831,7 +2847,10 @@ impl BountyEscrowContract {
     }
 
     /// Get escrow IDs by status
-    /// Get escrow IDs by status
+    ///
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
@@ -2841,6 +2860,7 @@ impl BountyEscrowContract {
         offset: u32,
         limit: u32,
     ) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -3749,23 +3769,19 @@ impl BountyEscrowContract {
     /// # Arguments
     /// * `max_deadline` - Only return bounties with deadline <= this timestamp
     /// * `offset` - Pagination offset
-    /// * `limit` - Maximum number of results
+    /// * `limit` - Maximum number of results (capped at [`MAX_QUERY_LIMIT`] — 100)
     ///
     /// # Returns
     /// Vector of bounties sorted by deadline that match the criteria
-    /// Query bounties by expiration status (approaching or already expired)
     ///
-    /// # Arguments
-    /// * `max_deadline` - Only return bounties with deadline <= this timestamp
-    /// * `offset` - Pagination offset
-    /// * `limit` - Maximum number of results
-    ///
-    /// # Returns
-    /// Vector of bounties sorted by deadline that match the criteria
+    /// # Pagination
+    /// The `limit` parameter is capped at [`MAX_QUERY_LIMIT`] (100). Callers
+    /// needing more results must loop with increasing `offset` values.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
     pub fn query_expiring_bounties(env: Env, max_deadline: u64, offset: u32, limit: u32) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let index: Vec<u64> = env
             .storage()
             .persistent()
