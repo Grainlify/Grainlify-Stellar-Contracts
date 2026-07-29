@@ -1534,6 +1534,9 @@ impl ProgramEscrowContract {
         if caller != admin {
             panic!("Unauthorized: only circuit admin can configure");
         }
+        if failure_threshold == 0 {
+            panic!("Invalid circuit breaker configuration: failure_threshold must be >= 1");
+        }
         error_recovery::set_config(
             &env,
             error_recovery::CircuitBreakerConfig {
