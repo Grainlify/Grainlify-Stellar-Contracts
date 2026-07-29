@@ -1,5 +1,5 @@
 #![cfg(test)]
-use crate::{events, BountyEscrowContract, BountyEscrowContractClient, Error as ContractError};
+use crate::{events, BountyEscrowContract, BountyEscrowContractClient, ClaimCreated, ClaimExecuted, Error as ContractError};
 use soroban_sdk::testutils::Events;
 use soroban_sdk::{
     symbol_short,
@@ -70,6 +70,30 @@ fn find_contract_event(
 ) -> (soroban_sdk::Vec<Val>, Val) {
     let events = env.events().all();
     for i in 0..events.len() {
+        let (contract, topics, data) = events.get(i).unwrap();
+        if contract != *contract_id || topics.len() == 0 {
+            continue;
+        }
+        if let Ok(sym) = Symbol::try_from_val(env, &topics.get(0).unwrap()) {
+            if sym == topic0 {
+                return (topics, data);
+            }
+        }
+    }
+    panic!("no event with the expected topic was emitted");
+}
+
+/// Like `find_contract_event`, but returns the LAST matching event instead of
+/// the first. Needed when more than one event shares `topic0` (e.g. both
+/// `authorize_claim` and `claim` emit under the `claim` topic0, distinguished
+/// only by their second topic) and the test cares about a later one.
+fn find_last_contract_event(
+    env: &Env,
+    contract_id: &Address,
+    topic0: Symbol,
+) -> (soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    for i in (0..events.len()).rev() {
         let (contract, topics, data) = events.get(i).unwrap();
         if contract != *contract_id || topics.len() == 0 {
             continue;
@@ -2053,4 +2077,167 @@ fn test_batch_lock_funds_emits_batch_event_aggregated_multi_item() {
         events::BatchFundsLocked::try_from_val(&env, &data).unwrap();
     assert_eq!(payload.count, expected_count);
     assert_eq!(payload.total_amount, expected_total);
+}
+// ---------------------------------------------------------------------------
+// § Event payload assertions: ClaimCreated, ClaimExecuted, PauseStateChanged
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_claim_created_event_payload_and_topic() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    let bounty_id = 1;
+    let amount = 500;
+    let lock_deadline = env.ledger().timestamp() + 10_000;
+    client.lock_funds(&depositor, &bounty_id, &amount, &lock_deadline);
+
+    let claim_window = 500u64;
+    client.set_claim_window(&claim_window);
+
+    let expected_expires_at = env.ledger().timestamp() + claim_window;
+    client.authorize_claim(&bounty_id, &recipient);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("claim"));
+
+    // Topic tuple check: (claim, created)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("created"));
+
+    // Payload field checks
+    let event: ClaimCreated = ClaimCreated::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as ClaimCreated"));
+    assert_eq!(event.bounty_id, bounty_id);
+    assert_eq!(event.recipient, recipient);
+    assert_eq!(event.amount, amount);
+    assert_eq!(event.expires_at, expected_expires_at);
+}
+
+#[test]
+fn test_claim_executed_event_payload_and_topic() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    let bounty_id = 1;
+    let amount = 500;
+    let lock_deadline = env.ledger().timestamp() + 10_000;
+    client.lock_funds(&depositor, &bounty_id, &amount, &lock_deadline);
+
+    client.set_claim_window(&500);
+    client.authorize_claim(&bounty_id, &recipient);
+
+    let claimed_at = env.ledger().timestamp();
+    client.claim(&bounty_id);
+
+    // `authorize_claim` above already emitted a (claim, created) event, so we
+    // need the LAST "claim"-topic event here, not the first.
+    let (topics, data) = find_last_contract_event(&env, &contract_id, symbol_short!("claim"));
+
+    // Topic tuple check: (claim, done)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("done"));
+
+    // Payload field checks
+    let event: ClaimExecuted = ClaimExecuted::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as ClaimExecuted"));
+    assert_eq!(event.bounty_id, bounty_id);
+    assert_eq!(event.recipient, recipient);
+    assert_eq!(event.amount, amount);
+    assert_eq!(event.claimed_at, claimed_at);
+}
+
+#[test]
+fn test_pause_state_changed_event_for_lock_operation() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    client.set_paused(&Some(true), &None, &None);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("pause"));
+
+    // Topic tuple check: (pause, lock)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("lock"));
+
+    // Payload field checks
+    let event: crate::PauseStateChanged = crate::PauseStateChanged::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as PauseStateChanged"));
+    assert_eq!(event.operation, symbol_short!("lock"));
+    assert!(event.paused);
+    assert_eq!(event.admin, admin);
+}
+
+#[test]
+fn test_pause_state_changed_event_for_release_operation() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    client.set_paused(&None, &Some(true), &None);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("pause"));
+
+    // Topic tuple check: (pause, release)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("release"));
+
+    // Payload field checks
+    let event: crate::PauseStateChanged = crate::PauseStateChanged::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as PauseStateChanged"));
+    assert_eq!(event.operation, symbol_short!("release"));
+    assert!(event.paused);
+    assert_eq!(event.admin, admin);
+}#[test]
+fn test_pause_state_changed_event_for_refund_operation() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    client.set_paused(&None, &None, &Some(true));
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("pause"));
+
+    // Topic tuple check: (pause, refund)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("refund"));
+
+    // Payload field checks
+    let event: crate::PauseStateChanged = crate::PauseStateChanged::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as PauseStateChanged"));
+    assert_eq!(event.operation, symbol_short!("refund"));
+    assert!(event.paused);
+    assert_eq!(event.admin, admin);
 }
