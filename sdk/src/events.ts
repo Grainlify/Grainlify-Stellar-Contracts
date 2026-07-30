@@ -21,6 +21,14 @@ export interface BountyEscrowInitializedEvent {
   timestamp: bigint;
 }
 
+/** Shared upgrade event emitted by bounty escrow (`upgrade`) and program escrow (`UpgExec`). */
+export interface UpgradeExecutedEvent {
+  type: 'upgrade' | 'UpgExec';
+  version: number;
+  wasmHash: string;
+  admin: string;
+}
+
 export interface FundsLockedEvent {
   type: 'f_lock';
   version: number;
@@ -286,6 +294,7 @@ export interface PerformanceMetricEvent {
 
 export type BountyEscrowEvent =
   | BountyEscrowInitializedEvent
+  | UpgradeExecutedEvent
   | FundsLockedEvent
   | FundsReleasedEvent
   | FundsRefundedEvent
@@ -302,6 +311,7 @@ export type BountyEscrowEvent =
 
 export type ProgramEscrowEvent =
   | ProgramInitializedEvent
+  | UpgradeExecutedEvent
   | ProgramFundsLockedEvent
   | BatchPayoutEvent
   | PayoutEvent
@@ -343,6 +353,16 @@ function assertBoolean(val: any, fieldName: string) {
   if (typeof val !== 'boolean') {
     throw new ValidationError(`Field '${fieldName}' must be a boolean, got ${typeof val}`);
   }
+}
+
+function assertBytes(val: any, fieldName: string): asserts val is Uint8Array {
+  if (!(val instanceof Uint8Array)) {
+    throw new ValidationError(`Field '${fieldName}' must be byte data, got ${typeof val}`);
+  }
+}
+
+function bytesToHex(val: Uint8Array): string {
+  return Array.from(val, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function assertVersion(version: any, expected: number[], eventName: string) {
@@ -407,6 +427,18 @@ export function decodeContractEvent(
   }
 
   // --- Bounty Escrow Contract Events ---
+  if (firstTopic === 'upgrade' || firstTopic === 'UpgExec') {
+    assertVersion(parsedValue.version, [2], firstTopic);
+    assertBytes(parsedValue.wasm_hash, 'wasm_hash');
+    assertString(parsedValue.admin, 'admin');
+    return {
+      type: firstTopic,
+      version: Number(parsedValue.version),
+      wasmHash: bytesToHex(parsedValue.wasm_hash),
+      admin: parsedValue.admin,
+    };
+  }
+
   if (firstTopic === 'init') {
     assertVersion(parsedValue.version, [2], 'init');
     assertString(parsedValue.admin, 'admin');
