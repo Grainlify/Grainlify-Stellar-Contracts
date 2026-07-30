@@ -141,8 +141,8 @@ fn test_state_lifecycle_cross_period() {
         let p2_ts = PERIOD_SECONDS * 2 + 100;
 
         init_bounty_analytics(&env, 1, 1000, p0_ts);
-        update_analytics_on_release(&env, 1, 200, p1_ts);
-        update_analytics_on_refund(&env, 1, 800, p2_ts);
+        update_analytics_on_release(&env, 1, 200, p1_ts).unwrap();
+        update_analytics_on_refund(&env, 1, 800, p2_ts).unwrap();
 
         let analytics = get_bounty_analytics(&env, 1).unwrap();
         assert_eq!(analytics.created_at, p0_ts);
@@ -198,21 +198,21 @@ fn test_direct_sequential_releases() {
         init_bounty_analytics(&env, bounty_id, amount, 100);
 
         // First partial release
-        update_analytics_on_release(&env, bounty_id, 200, 200);
+        update_analytics_on_release(&env, bounty_id, 200, 200).unwrap();
         let a = get_bounty_analytics(&env, bounty_id).unwrap();
         assert_eq!(a.total_amount_released, 200);
         assert_eq!(a.remaining_amount, 800);
         assert_eq!(a.partial_releases_count, 1);
 
         // Second partial release
-        update_analytics_on_release(&env, bounty_id, 300, 300);
+        update_analytics_on_release(&env, bounty_id, 300, 300).unwrap();
         let a = get_bounty_analytics(&env, bounty_id).unwrap();
         assert_eq!(a.total_amount_released, 500);
         assert_eq!(a.remaining_amount, 500);
         assert_eq!(a.partial_releases_count, 2);
 
         // Third partial release
-        update_analytics_on_release(&env, bounty_id, 100, 400);
+        update_analytics_on_release(&env, bounty_id, 100, 400).unwrap();
         let a = get_bounty_analytics(&env, bounty_id).unwrap();
         assert_eq!(a.total_amount_released, 600);
         assert_eq!(a.remaining_amount, 400);
@@ -237,14 +237,14 @@ fn test_direct_sequential_refunds() {
         init_bounty_analytics(&env, bounty_id, amount, 100);
 
         // First partial refund
-        update_analytics_on_refund(&env, bounty_id, 150, 200);
+        update_analytics_on_refund(&env, bounty_id, 150, 200).unwrap();
         let a = get_bounty_analytics(&env, bounty_id).unwrap();
         assert_eq!(a.total_amount_refunded, 150);
         assert_eq!(a.remaining_amount, 850);
         assert_eq!(a.partial_refunds_count, 1);
 
         // Second partial refund
-        update_analytics_on_refund(&env, bounty_id, 250, 300);
+        update_analytics_on_refund(&env, bounty_id, 250, 300).unwrap();
         let a = get_bounty_analytics(&env, bounty_id).unwrap();
         assert_eq!(a.total_amount_refunded, 400);
         assert_eq!(a.remaining_amount, 600);
@@ -270,7 +270,7 @@ fn test_direct_saturating_sub_boundary() {
 
         // Release more than remaining — saturating_sub prevents overflow but NOT underflow below 0
         init_bounty_analytics(&env, bounty_id, amount, 100);
-        update_analytics_on_release(&env, bounty_id, 200, 200);
+        update_analytics_on_release(&env, bounty_id, 200, 200).unwrap();
         let a = get_bounty_analytics(&env, bounty_id).unwrap();
         // saturating_sub(100, 200) on i128 = -100 — does NOT floor at zero
         assert_eq!(a.remaining_amount, -100, "saturating_sub on i128 allows negative values");
@@ -280,7 +280,7 @@ fn test_direct_saturating_sub_boundary() {
         // Refund on a different bounty — refund more than remaining
         let bounty_id2 = 14u64;
         init_bounty_analytics(&env, bounty_id2, 50, 100);
-        update_analytics_on_refund(&env, bounty_id2, 500, 200);
+        update_analytics_on_refund(&env, bounty_id2, 500, 200).unwrap();
         let a2 = get_bounty_analytics(&env, bounty_id2).unwrap();
         assert_eq!(a2.remaining_amount, -450, "refund excess goes negative via saturating_sub");
         assert_eq!(a2.total_amount_refunded, 500, "total_refunded accumulates via raw +=");
@@ -298,7 +298,7 @@ fn test_direct_release_on_uninitialized_bounty() {
         let bounty_id = 9999u64;
 
         // This should not panic — just silent no-op
-        update_analytics_on_release(&env, bounty_id, 100, 200);
+        update_analytics_on_release(&env, bounty_id, 100, 200).unwrap();
 
         // Verify no record was created
         let result = get_bounty_analytics(&env, bounty_id);
@@ -316,7 +316,7 @@ fn test_direct_refund_on_uninitialized_bounty() {
         let bounty_id = 9998u64;
 
         // This should not panic — just silent no-op
-        update_analytics_on_refund(&env, bounty_id, 100, 200);
+        update_analytics_on_refund(&env, bounty_id, 100, 200).unwrap();
 
         // Verify no record was created
         let result = get_bounty_analytics(&env, bounty_id);

@@ -41,6 +41,7 @@ mod mock_governance_with_proposal_state {
     use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Map, Symbol};
 
     const PROPOSAL_STATES: Symbol = symbol_short!("PR_STATE");
+    const VETOED_KEY: Symbol = symbol_short!("VETOED_ID");
     const STATUS_PENDING: u32 = 1;
     const STATUS_APPROVED: u32 = 2;
     const STATUS_REJECTED: u32 = 3;
@@ -115,6 +116,22 @@ mod mock_governance_with_proposal_state {
 
         pub fn executed_status(_env: Env) -> u32 {
             STATUS_EXECUTED
+        }
+
+        /// Returns `true` when `proposal_id` has been marked as vetoed.
+        /// Stores the ID of the single vetoed proposal (u32::MAX = none vetoed).
+        pub fn is_vetoed(env: Env, proposal_id: u32) -> bool {
+            let vetoed_id: u32 = env
+                .storage()
+                .instance()
+                .get(&VETOED_KEY)
+                .unwrap_or(u32::MAX);
+            vetoed_id == proposal_id
+        }
+
+        /// Test-only helper: mark `proposal_id` as vetoed.
+        pub fn set_vetoed(env: Env, proposal_id: u32) {
+            env.storage().instance().set(&VETOED_KEY, &proposal_id);
         }
     }
 }
@@ -281,6 +298,48 @@ fn test_governance_proposal_execution_consumes_approved_proposal_once() {
     assert_eq!(
         setup.escrow.try_execute_governance_proposal(&4),
         Err(Ok(Error::GovernanceProposalNotExecutable))
+    );
+}
+
+/// Issue #473: aligning bounty_escrow's GovernanceInterface with
+/// program-escrow's — a proposal reported as vetoed must be rejected by
+/// execute_governance_proposal even though it is otherwise Approved and
+/// would execute successfully.
+#[test]
+fn test_governance_proposal_execution_rejects_vetoed_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&5, &governance.approved_status());
+    governance.set_vetoed(&5);
+
+    assert_eq!(
+        setup.escrow.try_execute_governance_proposal(&5),
+        Err(Ok(Error::GovernanceProposalNotExecutable)),
+        "a vetoed proposal must be rejected even though it is Approved"
+    );
+    assert_eq!(
+        governance.get_proposal_status(&5),
+        governance.approved_status(),
+        "the mock's proposal status must be untouched — execute_proposal must never have been called"
+    );
+}
+
+/// A non-vetoed, Approved proposal must still execute normally — the veto
+/// wiring must not block legitimate governance actions.
+#[test]
+fn test_governance_proposal_execution_succeeds_for_non_vetoed_approved_proposal() {
+    let setup = ValueTransferSetup::new();
+    let governance = configure_stateful_governance(&setup.env, &setup.escrow);
+
+    governance.set_proposal_status(&6, &governance.approved_status());
+    // proposal 5 is vetoed in the sibling test's mock instance, but each test
+    // gets its own fresh contract registration, so this mock has no veto set.
+
+    setup.escrow.execute_governance_proposal(&6);
+    assert_eq!(
+        governance.get_proposal_status(&6),
+        governance.executed_status()
     );
 }
 
@@ -633,6 +692,114 @@ fn test_upgrade_approval_denies_when_governance_is_not_configured() {
             &env, &wasm_hash,
         ));
     });
+}
+
+// ---- Issue #472: upgrade() entrypoint wiring check_upgrade_approval ----
+
+// mock_governance's is_upg_ok only ever approves a fixed fake hash, which
+// can't equal a real env.deployer().upload_contract_wasm(...) hash — needed
+// for a test that actually exercises update_current_contract_wasm rather
+// than just check_upgrade_approval in isolation. This mock instead approves
+// whatever hash is registered via set_approved_hash.
+mod mock_governance_upgrade {
+    use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env, Symbol};
+
+    const APPROVED_HASH: Symbol = symbol_short!("APR_HASH");
+
+    #[contract]
+    pub struct MockGovernanceUpgrade;
+
+    #[contractimpl]
+    impl MockGovernanceUpgrade {
+        pub fn get_ver(_env: Env) -> u32 {
+            2
+        }
+
+        pub fn get_version_numeric_encoded(_env: Env) -> u32 {
+            20_000
+        }
+
+        pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
+            match env
+                .storage()
+                .instance()
+                .get::<Symbol, BytesN<32>>(&APPROVED_HASH)
+            {
+                Some(approved) => approved == wasm_hash,
+                None => false,
+            }
+        }
+
+        pub fn set_approved_hash(env: Env, wasm_hash: BytesN<32>) {
+            env.storage().instance().set(&APPROVED_HASH, &wasm_hash);
+        }
+    }
+}
+
+#[test]
+fn test_upgrade_executes_when_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let _ = client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance_upgrade::MockGovernanceUpgrade);
+    let gov_client = mock_governance_upgrade::MockGovernanceUpgradeClient::new(&env, &gov_id);
+    let _ = client.set_governance_contract(&gov_id);
+    let _ = client.set_min_governance_version(&2);
+
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    gov_client.set_approved_hash(&wasm_hash);
+
+    // Must not panic: admin auth passes, check_upgrade_approval reports the
+    // exact uploaded hash as approved, and update_current_contract_wasm runs.
+    client.upgrade(&wasm_hash);
+}
+
+#[test]
+fn test_upgrade_rejected_when_not_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let _ = client.init(&admin, &token);
+
+    // No governance contract configured at all — check_upgrade_approval
+    // fails closed, so upgrade() must reject even with valid admin auth.
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
+}
+
+#[test]
+fn test_upgrade_rejected_when_hash_not_the_approved_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, BountyEscrowContract);
+    let client = BountyEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let _ = client.init(&admin, &token);
+
+    let gov_id = env.register_contract(None, mock_governance_upgrade::MockGovernanceUpgrade);
+    let gov_client = mock_governance_upgrade::MockGovernanceUpgradeClient::new(&env, &gov_id);
+    let _ = client.set_governance_contract(&gov_id);
+    let _ = client.set_min_governance_version(&2);
+
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+    gov_client.set_approved_hash(&approved_hash);
+
+    let attempted_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&attempted_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
 }
 
 #[test]

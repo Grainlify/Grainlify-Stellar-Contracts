@@ -1,6 +1,26 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
 
 pub const EVENT_VERSION_V2: u32 = 2;
+
+// ⚠ COMPATIBILITY CONTRACT FOR OFF-CHAIN CONSUMERS ⚠
+//
+// Every struct in this file is a BREAKING CHANGE boundary.
+// The off-chain event parser (e.g. `internal/soroban/event_parser.go`)
+// decodes these events by field POSITION and TYPE.  Any of the following
+// changes will silently break all consumers without a compile-time error:
+//
+//   • Adding, removing, or re-ordering fields in any event struct.
+//   • Changing a field's type (e.g. u64 → i128, Address → BytesN<32>).
+//   • Changing the `topics` tuple used in the corresponding `emit_*` fn.
+//   • Changing the `version` constant value.
+//
+// Before making ANY such change:
+//   1. Bump EVENT_VERSION_V2 (or introduce EVENT_VERSION_V3) so consumers
+//      can detect the new schema.
+//   2. Update `internal/soroban/event_parser.go` (and any other indexer)
+//      to handle both the old and new shapes during the migration window.
+//   3. Add or update the corresponding schema test in
+//      `src/test_event_schema.rs` to lock in the new shape.
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -76,6 +96,20 @@ pub struct BountyExpired {
 
 pub fn emit_bounty_expired(env: &Env, event: BountyExpired) {
     let topics = (symbol_short!("b_exp"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
+/// Emitted after a governance-approved WASM upgrade actually executes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeExecuted {
+    pub version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+}
+
+pub fn emit_upgrade_executed(env: &Env, event: UpgradeExecuted) {
+    let topics = (symbol_short!("upgrade"),);
     env.events().publish(topics, event.clone());
 }
 
@@ -222,6 +256,40 @@ pub struct ClaimCancelled {
 pub fn emit_claim_cancelled(env: &Env, event: ClaimCancelled) {
     let topics = (symbol_short!("claim"), symbol_short!("cancel"));
     env.events().publish(topics, event.clone());
+}
+
+/// Final outcome of a pending-claim dispute.
+///
+/// `Claimed` means the authorized recipient completed the claim.
+/// `Cancelled` means the admin cancelled a still-active claim.
+/// `Expired` means the admin cleared a claim after its claim window elapsed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisputeOutcome {
+    Claimed,
+    Cancelled,
+    Expired,
+}
+
+/// Emitted exactly once when a pending-claim dispute reaches a terminal outcome.
+///
+/// The `(dispute, resolved)` topic is stable for off-chain indexers. Existing
+/// claim lifecycle events remain emitted for backward compatibility.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeResolved {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub outcome: DisputeOutcome,
+    pub resolver: Address,
+    pub recipient: Address,
+    pub amount: i128,
+    pub resolved_at: u64,
+}
+
+pub fn emit_dispute_resolved(env: &Env, event: DisputeResolved) {
+    let topics = (symbol_short!("dispute"), symbol_short!("resolved"));
+    env.events().publish(topics, event);
 }
 
 pub fn emit_pause_state_changed(env: &Env, event: crate::PauseStateChanged) {
