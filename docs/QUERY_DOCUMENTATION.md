@@ -27,12 +27,14 @@ pub fn query_escrows(env: Env, filter: EscrowQueryFilter, offset: u32, limit: u3
 ```rust
 // Query all locked escrows with amount >= 1000
 let filter = EscrowQueryFilter {
-    status: Some(EscrowStatus::Locked),
-    depositor: None,
-    min_amount: Some(1000),
-    max_amount: None,
-    min_deadline: None,
-    max_deadline: None,
+    has_status_filter: true,
+    status: EscrowStatus::Locked,
+    has_depositor_filter: false,
+    depositor: Address::generate(&env), // ignored: has_depositor_filter is false
+    min_amount: 1000,
+    max_amount: i128::MAX,
+    min_deadline: 0,
+    max_deadline: u64::MAX,
 };
 let results = contract.query_escrows(env, filter, 0, 50);
 ```
@@ -73,7 +75,15 @@ pub fn get_escrows_by_status(env: Env, status: EscrowStatus, offset: u32, limit:
 pub fn get_escrow_count(env: Env) -> u32
 ```
 
-**Purpose**: Get total number of escrows in the system.
+**Purpose**: Get the lifetime total number of bounties ever locked. This is
+**not** a live count of currently-active bounties — `EscrowIndex` is
+append-only and never pruned, so the number only ever grows and includes
+every `Released`/`Refunded` bounty from the contract's entire history.
+
+For a live active count, use `count_bounties_by_status(EscrowStatus::Locked)`
+or the `count_locked` field from `get_aggregate_stats` above. The
+`get_total_bounties_created` alias has identical lifetime-total behavior and
+uses a less ambiguous name.
 
 ## Program Escrow Query Functions
 
@@ -135,21 +145,34 @@ pub fn get_payouts_by_recipient(env: Env, recipient: Address, offset: u32, limit
 
 **Purpose**: Retrieve all payouts for a specific recipient with pagination.
 
-### 6. Get Pending Schedules
+### 6. Get Program Release Schedules
 ```rust
-pub fn get_pending_schedules(env: Env) -> Vec<ProgramReleaseSchedule>
+pub fn get_program_release_schedules(
+    env: Env,
+    offset: u32,
+    limit: u32,
+) -> Vec<ProgramReleaseSchedule>
 ```
 
-**Purpose**: Get all schedules that haven't been released yet.
+**Purpose**: Retrieve a raw-index page of release schedules. `limit` is capped at 100 records.
 
-### 7. Get Due Schedules
+The compatibility wrapper `get_all_prog_release_schedules` accepts and forwards the same `offset` and `limit`.
+
+### 7. Get Pending Schedules
 ```rust
-pub fn get_due_schedules(env: Env) -> Vec<ProgramReleaseSchedule>
+pub fn get_pending_schedules(env: Env, offset: u32, limit: u32) -> Vec<ProgramReleaseSchedule>
 ```
 
-**Purpose**: Get all schedules that are ready to be released (timestamp <= now).
+**Purpose**: Get a capped page of schedules that have not been released yet. The offset counts matching pending schedules.
 
-### 8. Get Total Scheduled Amount
+### 8. Get Due Schedules
+```rust
+pub fn get_due_schedules(env: Env, offset: u32, limit: u32) -> Vec<ProgramReleaseSchedule>
+```
+
+**Purpose**: Get a capped page of unreleased schedules that are ready to be released (`timestamp <= now`). The offset counts matching due schedules.
+
+### 9. Get Total Scheduled Amount
 ```rust
 pub fn get_total_scheduled_amount(env: Env) -> i128
 ```
@@ -187,8 +210,14 @@ pub fn get_total_scheduled_amount(env: Env) -> i128
    
    // Less efficient: Filter all escrows by depositor
    let filter = EscrowQueryFilter {
-       depositor: Some(depositor),
-       ..Default::default()
+       has_status_filter: false,
+       status: EscrowStatus::Locked, // ignored: has_status_filter is false
+       has_depositor_filter: true,
+       depositor,
+       min_amount: 0,
+       max_amount: i128::MAX,
+       min_deadline: 0,
+       max_deadline: u64::MAX,
    };
    let results = contract.query_escrows(env, filter, 0, 50);
    ```
@@ -197,10 +226,14 @@ pub fn get_total_scheduled_amount(env: Env) -> i128
    ```rust
    // Efficient: Apply multiple filters in single query
    let filter = EscrowQueryFilter {
-       status: Some(EscrowStatus::Locked),
-       min_amount: Some(1000),
-       max_deadline: Some(current_time + 86400),
-       ..Default::default()
+       has_status_filter: true,
+       status: EscrowStatus::Locked,
+       has_depositor_filter: false,
+       depositor: Address::generate(&env), // ignored: has_depositor_filter is false
+       min_amount: 1000,
+       max_amount: i128::MAX,
+       min_deadline: 0,
+       max_deadline: current_time + 86400,
    };
    ```
 
@@ -286,8 +319,8 @@ let user_payouts = contract.get_payouts_by_recipient(
 ```rust
 // Daily statistics
 let stats = contract.get_program_aggregate_stats(env);
-let pending = contract.get_pending_schedules(env);
-let due = contract.get_due_schedules(env);
+let pending = contract.get_pending_schedules(env, 0, 50);
+let due = contract.get_due_schedules(env, 0, 50);
 
 // Generate report
 generate_daily_report(stats, pending, due);

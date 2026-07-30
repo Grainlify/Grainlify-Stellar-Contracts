@@ -32,6 +32,9 @@ impl<'a> Cx<'a> {
             .register_stellar_asset_contract_v2(token_admin.clone())
             .address();
         client.init(&admin, &token_id);
+        // authorize_claim now rejects an unconfigured (0) claim_window (#549);
+        // this fixture's claim-path tests need a nonzero window configured.
+        client.set_claim_window(&600u64);
         Self { env, admin, depositor, contributor, token_id, client }
     }
     fn fund(&self, who: &Address, amount: i128) {

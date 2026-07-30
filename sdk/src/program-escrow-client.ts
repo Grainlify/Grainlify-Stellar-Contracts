@@ -95,6 +95,19 @@ export interface ProgramAnalytics {
   operation_count: number;
 }
 
+/** Lifecycle status of a dispute. */
+export type DisputeStatus = 'None' | 'Open' | 'Resolved' | 'Cancelled';
+
+/** Record stored on-chain for an active or historical dispute. */
+export interface DisputeRecord {
+  opened_by: string;
+  opened_at: number;
+  reason: string;
+  status: DisputeStatus;
+  resolved_by?: string;
+  resolved_at?: number;
+}
+
 /**
  * Client for interacting with the ProgramEscrow Soroban contract
  */
@@ -318,6 +331,7 @@ export class ProgramEscrowClient {
     }
   }
 
+
   // ==========================================================================
   // Dispute resolution
   // ==========================================================================
@@ -335,6 +349,35 @@ export class ProgramEscrowClient {
   async resolveDispute(sourceKeypair: Keypair): Promise<void> {
     try {
       await this.invokeContract('resolve_dispute', [], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Cancel the currently open program-wide dispute, re-enabling payouts. Admin-only. */
+  async cancelDispute(sourceKeypair: Keypair): Promise<void> {
+    try {
+      await this.invokeContract('cancel_dispute', [], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Get the current or most recent program-wide dispute record, if any. */
+  async getDispute(): Promise<DisputeRecord | undefined> {
+    try {
+      const result = await this.invokeContract('get_dispute', []);
+      return (result ?? undefined) as DisputeRecord | undefined;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Whether a program-wide dispute is currently open. */
+  async isDisputed(): Promise<boolean> {
+    try {
+      const result = await this.invokeContract('is_disputed', []);
+      return Boolean(result);
     } catch (error) {
       throw this.handleError(error);
     }

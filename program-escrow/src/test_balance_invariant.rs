@@ -56,7 +56,7 @@ fn make_token(
 
 /// Sum all unreleased scheduled amounts from the on-chain schedule ledger.
 fn pending_scheduled_total(client: &ProgramEscrowContractClient) -> i128 {
-    let schedules = client.get_program_release_schedules();
+    let schedules = client.get_program_release_schedules(&0, &100);
     let mut total = 0_i128;
     for i in 0..schedules.len() {
         let schedule = schedules.get(i).unwrap();
