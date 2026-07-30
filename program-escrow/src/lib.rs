@@ -2824,14 +2824,20 @@ impl ProgramEscrowContract {
         panic!("Schedule not found");
     }
 
+    /// Alias for [`Self::get_program_release_schedules`], kept for backward
+    /// compatibility with callers using the `_prog_`-suffixed name.
     pub fn get_all_prog_release_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
         Self::get_program_release_schedules(env)
     }
 
+    /// Alias for [`Self::get_pending_schedules`], kept for backward
+    /// compatibility with callers using the `_program_`-suffixed name.
     pub fn get_pending_program_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
         Self::get_pending_schedules(env)
     }
 
+    /// Alias for [`Self::get_due_schedules`], kept for backward compatibility
+    /// with callers using the `_program_`-suffixed name.
     pub fn get_due_program_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
         Self::get_due_schedules(env)
     }
