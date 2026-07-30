@@ -2241,3 +2241,18 @@ fn test_pause_state_changed_event_for_refund_operation() {
     assert!(event.paused);
     assert_eq!(event.admin, admin);
 }
+
+// Regression guard for issue #458: get_fee_config previously panicked on a
+// freshly deployed, uninitialized contract (unwrap() on the not-yet-set
+// DataKey::Admin key inside the fee_recipient fallback), instead of
+// returning a graceful disabled default.
+#[test]
+fn test_get_fee_config_on_uninitialized_contract_does_not_panic() {
+    let (_env, client, _contract_id) = create_test_env();
+
+    let config = client.get_fee_config();
+
+    assert_eq!(config.lock_fee_rate, 0);
+    assert_eq!(config.release_fee_rate, 0);
+    assert!(!config.fee_enabled);
+}

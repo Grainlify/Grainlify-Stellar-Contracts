@@ -836,6 +836,12 @@ impl BountyEscrowContract {
     }
 
     /// Get fee configuration (internal helper)
+    ///
+    /// Falls back to a disabled config on a freshly deployed, uninitialized
+    /// contract (no `DataKey::Admin` set yet) rather than panicking --
+    /// `fee_recipient` is irrelevant while `fee_enabled` is false, so the
+    /// contract's own address is a safe placeholder until `init` configures
+    /// a real admin/fee recipient.
     fn get_fee_config_internal(env: &Env) -> FeeConfig {
         env.storage()
             .instance()
@@ -843,7 +849,11 @@ impl BountyEscrowContract {
             .unwrap_or_else(|| FeeConfig {
                 lock_fee_rate: 0,
                 release_fee_rate: 0,
-                fee_recipient: env.storage().instance().get(&DataKey::Admin).unwrap(),
+                fee_recipient: env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .unwrap_or_else(|| env.current_contract_address()),
                 fee_enabled: false,
             })
     }
