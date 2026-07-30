@@ -3932,11 +3932,13 @@ impl BountyEscrowContract {
     ///
     /// # Arguments
     /// * `min_amount` - Minimum remaining amount to consider "high-value"
-    /// * `limit` - Maximum number of results
+    /// * `limit` - Maximum number of results (capped at [`MAX_QUERY_LIMIT`])
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
     pub fn get_high_value_bounties(env: Env, min_amount: i128, limit: u32) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
+
         let index: Vec<u64> = env
             .storage()
             .persistent()
