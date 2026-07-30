@@ -248,6 +248,20 @@ export interface CircuitBreakerStatus {
   success_threshold: number;
 }
 
+/** A single circuit breaker error log entry (from `get_circuit_error_log`). */
+export interface ErrorLogEntry {
+  /** Symbol identifying the operation that failed. */
+  operation: string;
+  /** Bounty id the failure occurred on. */
+  bounty_id: bigint;
+  /** Numeric contract error code. */
+  error_code: number;
+  /** Timestamp the failure was recorded. */
+  timestamp: bigint;
+  /** Consecutive failure count at the time this entry was logged. */
+  failure_count_at_time: number;
+}
+
 /** A stable configuration snapshot for audit views. */
 export interface AdminConfigSnapshot {
   /** Schema version for this snapshot. */
@@ -1083,6 +1097,57 @@ export class BountyEscrowClient {
 
     try {
       await this.invokeContract('reset_circuit', [admin], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the circuit breaker's error log.
+   *
+   * @throws {ContractError} If the contract is not initialized.
+   */
+  async getCircuitErrorLog(): Promise<ErrorLogEntry[]> {
+    try {
+      const result = await this.invokeContract('get_circuit_error_log', []);
+      return result as ErrorLogEntry[];
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Sweep a batch of expired bounties, refunding each one's full remaining
+   * amount back to its own depositor. Permissionless (no caller
+   * authorization), matching `refund`'s keeper pattern.
+   *
+   * @param bountyIds - Bounty ids to sweep.
+   * @returns The number of bounties actually swept.
+   * @throws {ContractError} If the circuit breaker is open or a governance
+   *   version check fails.
+   */
+  async sweepExpiredRefunds(bountyIds: bigint[]): Promise<number> {
+    try {
+      const result = await this.invokeContract('sweep_expired_refunds', [bountyIds]);
+      return Number(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Execute an approved, timelock-delayed governance proposal.
+   *
+   * @param proposalId - The governance proposal id to execute.
+   * @param sourceKeypair - Signing keypair for the transaction.
+   * @throws {ContractError} If the contract is not initialized, the linked
+   *   governance contract version is too low, or the proposal is not
+   *   executable (missing, unapproved, delayed, rejected, or already
+   *   executed).
+   */
+  async executeGovernanceProposal(proposalId: number, sourceKeypair: Keypair): Promise<void> {
+    try {
+      await this.invokeContract('execute_governance_proposal', [proposalId], sourceKeypair);
     } catch (error) {
       throw this.handleError(error);
     }
