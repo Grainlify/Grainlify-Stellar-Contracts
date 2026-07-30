@@ -287,6 +287,19 @@ What the script does:
 6. Unless `--skip-verify` is set, calls `get_version` to check responsiveness.
 7. Appends an upgrade entry to `deployments/upgrades.json`.
 
+### Governance approval prerequisite for bounty_escrow and program-escrow
+
+For `bounty_escrow` and `program-escrow`, step 5 above (`upgrade --new_wasm_hash <hash>`) does not succeed on its own once the WASM is installed and the admin identity signs. Both contracts gate their `upgrade()` entrypoint on `governance_integration::check_upgrade_approval`, which fails closed:
+
+- A `grainlify-core` governance contract address must already be configured (readable via `get_governance_contract`), and the configured minimum governance version must be met (`get_min_governance_version`).
+- A `grainlify-core` governance proposal approving the **exact** `new_wasm_hash` you are about to install must already have been created, voted on, approved, finalized, and executed past its execution delay.
+
+If either condition is not met, `upgrade --new_wasm_hash <hash>` returns `UpgradeNotApproved` and the upgrade does not proceed, regardless of whether the source identity is a valid admin.
+
+Before running `scripts/upgrade.sh` against `bounty_escrow` or `program-escrow`, drive the governance proposal for the target `new_wasm_hash` to completion first. See `docs/GOVERNANCE_INTEGRATION.md` / `docs/grainlify-core/GOVERNANCE.md` for how to create, vote on, finalize, and execute that proposal.
+
+**This is a different mechanism from grainlify-core's own upgrade path.** `grainlify-core` itself upgrades through a separate single-admin/multisig timelock (`schedule_upgrade` / `is_upgrade_ready` / `execute_upgrade`), not through the governance-proposal gate described above. That timelock path is unrelated to this section and is tracked separately (see issues #480/#488 for gaps in `scripts/upgrade.sh` and `scripts/rollback.sh` calling `schedule_upgrade`). Completing one does not satisfy the other.
+
 The older `scripts/upgrade_contract.sh` is a thin helper that uploads a WASM with `soroban contract upload` and calls the same `upgrade --new_wasm_hash` entrypoint. Prefer `scripts/upgrade.sh` for reviewed operations because it includes config loading, dry-run mode, mainnet confirmation, verification, and registry logging.
 
 ## Rollback
@@ -471,6 +484,7 @@ Do not use `--force` on mainnet unless an incident commander explicitly approves
 | Network connectivity fails | RPC URL, passphrase, or network name is wrong. | Check the selected config file and retry against the correct network. |
 | Deploy succeeds but init fails | Init args are wrong or the contract does not support the expected init call. | Keep the contract id, review args, run manual init if safe, and document the failure in the registry notes. |
 | Upgrade invocation fails | Source is not admin, new WASM hash is invalid, or contract lacks `upgrade`. | Confirm admin identity, install hash, and contract upgrade interface before retrying. |
+| Upgrade fails with `UpgradeNotApproved` | For `bounty_escrow`/`program-escrow`: no `grainlify-core` governance contract is configured, the configured minimum governance version is not met, or no executed governance proposal approves this exact `new_wasm_hash`. | Confirm `get_governance_contract` and `get_min_governance_version` are set as expected, then confirm a governance proposal approving this exact wasm hash was created, voted, finalized, and executed past its delay. See `docs/GOVERNANCE_INTEGRATION.md`. Do not confuse this with grainlify-core's own `schedule_upgrade` timelock. |
 | Post-upgrade verification warns about `get_version` | The contract may not expose `get_version`. | Run `verify-deployment.sh -f <known_read_function>` or perform manual read checks. |
 | Rollback fails because hash is not installed | Previous WASM hash is not available on network. | Install the old WASM first, then rerun rollback using the installed hash. |
 | Rollback succeeds but behavior is broken | Contract state may be incompatible with old code. | Stop writes, run verification, inspect storage expectations, and plan manual data migration. |
