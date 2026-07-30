@@ -1523,3 +1523,4 @@ fn test_proposal_lifecycle_rejects_executing_already_executed_proposal() {
     );
 }
 }
+
