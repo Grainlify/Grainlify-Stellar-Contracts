@@ -11,4 +11,4 @@ debug = 0
 debug = 0
 
 [target.wasm32-unknown-unknown]
-#    rustflags = ["-C", "target-feature=+reference-types"]
+rustflags = ["-C", "target-feature=+reference-types"]

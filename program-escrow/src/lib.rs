@@ -273,6 +273,8 @@ mod test_granular_pause;
 
 #[cfg(test)]
 mod test_lifecycle;
+#[cfg(test)]
+mod test_schedule_pagination;
 
 #[cfg(test)]
 mod budget_profiling_tests;
@@ -560,6 +562,9 @@ pub struct ProgramAggregateStats {
 /// `trigger_program_releases` to bound per-invocation work).
 pub const MAX_BATCH_SIZE: u32 = 100;
 
+/// Maximum number of schedules returned by one public query invocation.
+pub const MAX_QUERY_LIMIT: u32 = 100;
+
 // ── Dispute Resolution Types ──────────────────────────────────────────────
 
 /// Status of a program-level dispute.
@@ -774,6 +779,42 @@ impl ProgramEscrowContract {
             .extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
 
+
+    /// Load the complete schedule vector for internal mutation and lookup paths.
+    ///
+    /// Public query functions must paginate this vector, but internal release
+    /// operations need access to schedules beyond the public page-size cap.
+    fn load_program_release_schedules(env: &Env) -> Vec<ProgramReleaseSchedule> {
+        let schedules = env
+            .storage()
+            .persistent()
+            .get(&SCHEDULES)
+            .unwrap_or_else(|| Vec::new(env));
+        Self::bump_persistent_symbol_ttl(env, &SCHEDULES);
+        schedules
+    }
+
+    /// Return a capped raw-index page from the supplied schedule vector.
+    fn paginate_program_release_schedules(
+        env: &Env,
+        schedules: &Vec<ProgramReleaseSchedule>,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ProgramReleaseSchedule> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
+        let mut results = Vec::new(env);
+
+        if limit == 0 || offset >= schedules.len() {
+            return results;
+        }
+
+        let end = offset.saturating_add(limit).min(schedules.len());
+        for index in offset..end {
+            results.push_back(schedules.get(index).unwrap());
+        }
+
+        results
+    }
 
     /// Get fee configuration (internal helper)
     fn get_fee_config_internal(env: &Env) -> FeeConfig {
@@ -1343,6 +1384,8 @@ impl ProgramEscrowContract {
     ///
     /// Direct payouts and release schedules for this recipient are blocked,
     /// while unrelated recipients remain payable unless a global dispute is open.
+    /// This is intentionally allowed before a recipient has a scheduled release
+    /// so a pending payout can be challenged preemptively.
     pub fn open_recipient_dispute(env: Env, recipient: Address, reason: String) {
         Self::open_dispute_at(
             &env,
@@ -1357,7 +1400,11 @@ impl ProgramEscrowContract {
     ///
     /// Only the selected release schedule is blocked unless a global or
     /// recipient-scoped dispute also applies.
+    ///
+    /// # Panics
+    /// * If the release schedule does not exist
     pub fn open_schedule_dispute(env: Env, schedule_id: u64, reason: String) {
+        Self::get_program_release_schedule(env.clone(), schedule_id);
         Self::open_dispute_at(
             &env,
             DataKey::ScheduleDispute(schedule_id),
@@ -1533,6 +1580,9 @@ impl ProgramEscrowContract {
         let admin = error_recovery::get_circuitadmin(&env).expect("Circuit admin not set");
         if caller != admin {
             panic!("Unauthorized: only circuit admin can configure");
+        }
+        if failure_threshold == 0 {
+            panic!("Invalid circuit breaker configuration: failure_threshold must be >= 1");
         }
         error_recovery::set_config(
             &env,
@@ -2242,6 +2292,25 @@ impl ProgramEscrowContract {
             panic!("Amount must be greater than zero");
         }
 
+        // Whitelist guard: a recipient blocked from a direct single_payout/
+        // batch_payout must not be payable by scheduling a release for them
+        // instead (Issue #436).
+        let whitelist_enforced = env
+            .storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforced)
+            .unwrap_or(false);
+        if whitelist_enforced {
+            let whitelisted = env
+                .storage()
+                .instance()
+                .get(&DataKey::Whitelist(recipient.clone()))
+                .unwrap_or(false);
+            if !whitelisted {
+                panic!("Recipient not whitelisted");
+            }
+        }
+
         let mut schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
             .persistent()
@@ -2338,6 +2407,25 @@ impl ProgramEscrowContract {
                 continue;
             }
 
+            // Re-check the whitelist at release time, not just at schedule
+            // creation: enforcement may have been enabled (or the recipient
+            // blacklisted) after this schedule was already created (Issue
+            // #436). Skip this schedule rather than aborting the whole
+            // batch, mirroring the disputed-schedule check above.
+            if env
+                .storage()
+                .instance()
+                .get(&DataKey::WhitelistEnforced)
+                .unwrap_or(false)
+                && !env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Whitelist(schedule.recipient.clone()))
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
             if schedule.amount > program_data.remaining_balance {
                 error_recovery::record_failure(
                     &env,
@@ -2406,13 +2494,14 @@ impl ProgramEscrowContract {
         released_count
     }
 
-    pub fn get_program_release_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        let val = env.storage()
-            .persistent()
-            .get(&SCHEDULES)
-            .unwrap_or_else(|| Vec::new(&env));
-        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
-        val
+    /// Get a capped page of release schedules.
+    pub fn get_program_release_schedules(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ProgramReleaseSchedule> {
+        let schedules = Self::load_program_release_schedules(&env);
+        Self::paginate_program_release_schedules(&env, &schedules, offset, limit)
     }
 
     pub fn get_program_release_history(env: Env) -> Vec<ProgramReleaseHistory> {
@@ -2454,7 +2543,9 @@ impl ProgramEscrowContract {
         Self::batch_payout(env, recipients, amounts)
     }
 
-    /// Query payout history by recipient with pagination
+    /// Query payout history by recipient with pagination.
+    ///
+    /// This is the canonical implementation shared by the legacy alias below.
     pub fn query_payouts_by_recipient(
         env: Env,
         recipient: Address,
@@ -2703,77 +2794,94 @@ impl ProgramEscrowContract {
         }
     }
 
-    /// Get payouts by recipient
+    /// Backward-compatible alias for [`Self::query_payouts_by_recipient`].
+    ///
+    /// Kept so existing callers can migrate without a second implementation
+    /// of the same payout-history query.
     pub fn get_payouts_by_recipient(
         env: Env,
         recipient: Address,
         offset: u32,
         limit: u32,
     ) -> Vec<PayoutRecord> {
-        let program_data: ProgramData = env
-            .storage()
-            .persistent()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
-        let history = program_data.payout_history;
-        let mut results = Vec::new(&env);
-        let mut count = 0u32;
-        let mut skipped = 0u32;
+        Self::query_payouts_by_recipient(env, recipient, offset, limit)
+    }
 
-        for i in 0..history.len() {
+    /// Get a capped page of pending schedules.
+    ///
+    /// `offset` counts matching, unreleased schedules rather than raw storage
+    /// positions.
+    pub fn get_pending_schedules(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ProgramReleaseSchedule> {
+        let schedules = Self::load_program_release_schedules(&env);
+        let limit = limit.min(MAX_QUERY_LIMIT);
+        let mut results = Vec::new(&env);
+        let mut skipped = 0u32;
+        let mut count = 0u32;
+
+        if limit == 0 {
+            return results;
+        }
+
+        for index in 0..schedules.len() {
             if count >= limit {
                 break;
             }
-            let record = history.get(i).unwrap();
-            if record.recipient == recipient {
+
+            let schedule = schedules.get(index).unwrap();
+            if !schedule.released {
                 if skipped < offset {
                     skipped += 1;
                     continue;
                 }
-                results.push_back(record);
+
+                results.push_back(schedule);
                 count += 1;
             }
         }
+
         results
     }
 
-    /// Get pending schedules (not yet released)
-    pub fn get_pending_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        let schedules: Vec<ProgramReleaseSchedule> = env
-            .storage()
-            .persistent()
-            .get(&SCHEDULES)
-            .unwrap_or_else(|| Vec::new(&env));
-        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
-        let mut results = Vec::new(&env);
-
-        for i in 0..schedules.len() {
-            let schedule = schedules.get(i).unwrap();
-            if !schedule.released {
-                results.push_back(schedule);
-            }
-        }
-        results
-    }
-
-    /// Get due schedules (ready to be released)
-    pub fn get_due_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        let schedules: Vec<ProgramReleaseSchedule> = env
-            .storage()
-            .persistent()
-            .get(&SCHEDULES)
-            .unwrap_or_else(|| Vec::new(&env));
-        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
+    /// Get a capped page of due, unreleased schedules.
+    ///
+    /// `offset` counts matching due schedules rather than raw storage positions.
+    pub fn get_due_schedules(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ProgramReleaseSchedule> {
+        let schedules = Self::load_program_release_schedules(&env);
+        let limit = limit.min(MAX_QUERY_LIMIT);
         let now = env.ledger().timestamp();
         let mut results = Vec::new(&env);
+        let mut skipped = 0u32;
+        let mut count = 0u32;
 
-        for i in 0..schedules.len() {
-            let schedule = schedules.get(i).unwrap();
+        if limit == 0 {
+            return results;
+        }
+
+        for index in 0..schedules.len() {
+            if count >= limit {
+                break;
+            }
+
+            let schedule = schedules.get(index).unwrap();
             if !schedule.released && schedule.release_timestamp <= now {
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+
                 results.push_back(schedule);
+                count += 1;
             }
         }
+
         results
     }
 
@@ -2815,7 +2923,7 @@ impl ProgramEscrowContract {
     }
 
     pub fn get_program_release_schedule(env: Env, schedule_id: u64) -> ProgramReleaseSchedule {
-        let schedules = Self::get_program_release_schedules(env);
+        let schedules = Self::load_program_release_schedules(&env);
         for s in schedules.iter() {
             if s.schedule_id == schedule_id {
                 return s;
@@ -2824,16 +2932,28 @@ impl ProgramEscrowContract {
         panic!("Schedule not found");
     }
 
-    pub fn get_all_prog_release_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        Self::get_program_release_schedules(env)
+    pub fn get_all_prog_release_schedules(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ProgramReleaseSchedule> {
+        Self::get_program_release_schedules(env, offset, limit)
     }
 
-    pub fn get_pending_program_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        Self::get_pending_schedules(env)
+    pub fn get_pending_program_schedules(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ProgramReleaseSchedule> {
+        Self::get_pending_schedules(env, offset, limit)
     }
 
-    pub fn get_due_program_schedules(env: Env) -> Vec<ProgramReleaseSchedule> {
-        Self::get_due_schedules(env)
+    pub fn get_due_program_schedules(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<ProgramReleaseSchedule> {
+        Self::get_due_schedules(env, offset, limit)
     }
 
     pub fn release_program_schedule_manual(env: Env, schedule_id: u64) {
@@ -2847,7 +2967,7 @@ impl ProgramEscrowContract {
             panic!("Circuit breaker open: manual release temporarily disabled");
         }
 
-        let mut schedules = Self::get_program_release_schedules(env.clone());
+        let mut schedules = Self::load_program_release_schedules(&env);
         let mut program_data = Self::get_program_info(env.clone());
 
         program_data.authorized_payout_key.require_auth();
@@ -2869,6 +2989,23 @@ impl ProgramEscrowContract {
                 {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Dispute in progress");
+                }
+
+                // Re-check the whitelist at release time, not just at
+                // schedule creation (Issue #436).
+                if env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::WhitelistEnforced)
+                    .unwrap_or(false)
+                    && !env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Whitelist(s.recipient.clone()))
+                        .unwrap_or(false)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Recipient not whitelisted");
                 }
 
                 // Transfer funds
@@ -2949,8 +3086,17 @@ impl ProgramEscrowContract {
             panic!("Circuit breaker open: automatic release temporarily disabled");
         }
 
-        let mut schedules = Self::get_program_release_schedules(env.clone());
+        let mut schedules = Self::load_program_release_schedules(&env);
         let mut program_data = Self::get_program_info(env.clone());
+
+        // Require the same authorization as the sibling release entrypoints
+        // (release_program_schedule_manual, trigger_program_releases) —
+        // without this, any address could choose the exact release timing
+        // for a due schedule and force gas costs onto whoever watches
+        // schedules, even though the recipient/amount are fixed and can't
+        // be redirected (Issue #435).
+        program_data.authorized_payout_key.require_auth();
+
         let now = env.ledger().timestamp();
         let mut released_schedule: Option<ProgramReleaseSchedule> = None;
 
@@ -2971,6 +3117,23 @@ impl ProgramEscrowContract {
                 {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Dispute in progress");
+                }
+
+                // Re-check the whitelist at release time, not just at
+                // schedule creation (Issue #436).
+                if env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::WhitelistEnforced)
+                    .unwrap_or(false)
+                    && !env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Whitelist(s.recipient.clone()))
+                        .unwrap_or(false)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Recipient not whitelisted");
                 }
 
                 // Transfer funds
@@ -3187,7 +3350,7 @@ mod integration_tests {
         assert!(!schedule.released);
 
         // Check pending schedules
-        let pending = client.get_pending_program_schedules();
+        let pending = client.get_pending_program_schedules(&0, &100);
         assert_eq!(pending.len(), 1);
 
         // Event verification can be added later - focusing on core functionality
@@ -3229,7 +3392,7 @@ mod integration_tests {
         client.create_program_release_schedule(&amount2, &2000, &winner2);
 
         // Verify both schedules exist
-        let all_schedules = client.get_all_prog_release_schedules();
+        let all_schedules = client.get_all_prog_release_schedules(&0, &100);
         assert_eq!(all_schedules.len(), 2);
 
         // Verify schedule IDs
@@ -3247,7 +3410,7 @@ mod integration_tests {
         assert_eq!(schedule2.recipient, winner2);
 
         // Check pending schedules
-        let pending = client.get_pending_program_schedules();
+        let pending = client.get_pending_program_schedules(&0, &100);
         assert_eq!(pending.len(), 2);
 
         // Event verification can be added later - focusing on core functionality
@@ -3300,7 +3463,7 @@ mod integration_tests {
         assert_eq!(schedule.released_by, Some(contract_id.clone()));
 
         // Check no pending schedules
-        let pending = client.get_pending_program_schedules();
+        let pending = client.get_pending_program_schedules(&0, &100);
         assert_eq!(pending.len(), 0);
 
         // Verify release history
@@ -3418,11 +3581,11 @@ mod integration_tests {
         assert_eq!(second_release.release_type, ReleaseType::Automatic);
 
         // Verify no pending schedules
-        let pending = client.get_pending_program_schedules();
+        let pending = client.get_pending_program_schedules(&0, &100);
         assert_eq!(pending.len(), 0);
 
         // Verify all schedules are marked as released
-        let all_schedules = client.get_all_prog_release_schedules();
+        let all_schedules = client.get_all_prog_release_schedules(&0, &100);
         assert_eq!(all_schedules.len(), 2);
         assert!(all_schedules.get(0).unwrap().released);
         assert!(all_schedules.get(1).unwrap().released);
@@ -3471,7 +3634,7 @@ mod integration_tests {
         env.ledger().set_timestamp(base_timestamp + 1);
 
         // Check due schedules (should be all 3)
-        let due = client.get_due_program_schedules();
+        let due = client.get_due_program_schedules(&0, &100);
         assert_eq!(due.len(), 3);
 
         // Release schedules one by one
@@ -3480,7 +3643,7 @@ mod integration_tests {
         client.release_prog_schedule_automatic(&3);
 
         // Verify all schedules are released
-        let pending = client.get_pending_program_schedules();
+        let pending = client.get_pending_program_schedules(&0, &100);
         assert_eq!(pending.len(), 0);
 
         // Verify complete history
@@ -4161,7 +4324,7 @@ mod integration_tests {
 
         // Initialize a program but never create any release schedule.
         client.initialize_program(&program_id, &authorized_key, &token);
-        assert_eq!(client.get_program_release_schedules().len(), 0);
+        assert_eq!(client.get_program_release_schedules(&0, &100).len(), 0);
 
         client.get_program_release_schedule(&1);
     }

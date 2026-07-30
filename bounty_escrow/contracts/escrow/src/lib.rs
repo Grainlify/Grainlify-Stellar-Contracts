@@ -415,6 +415,8 @@ pub enum Error {
     PendingClaimExists = 24,
     /// Returned when a governance proposal is missing, unapproved, delayed, rejected, or already executed
     GovernanceProposalNotExecutable = 25,
+    /// Returned when a release requires multisig approval but insufficient approvals have been collected
+    ApprovalRequired = 26,
     /// The requested WASM hash has no executed, post-delay governance
     /// proposal approving it (or no governance contract is configured at
     /// all — upgrades fail closed, they are never permitted by default).
@@ -429,6 +431,9 @@ pub enum Error {
     /// its own creation timestamp, which the recipient can never claim in
     /// a later transaction.
     ClaimWindowNotConfigured = 28,
+    /// Returned by `set_amount_policy` when `min_amount` exceeds `max_amount`.
+    /// Appended after ClaimWindowNotConfigured to preserve existing error codes.
+    InvalidAmountRange = 29,
 }
 
 #[contracttype]
@@ -842,6 +847,12 @@ impl BountyEscrowContract {
     }
 
     /// Get fee configuration (internal helper)
+    ///
+    /// Falls back to a disabled config on a freshly deployed, uninitialized
+    /// contract (no `DataKey::Admin` set yet) rather than panicking --
+    /// `fee_recipient` is irrelevant while `fee_enabled` is false, so the
+    /// contract's own address is a safe placeholder until `init` configures
+    /// a real admin/fee recipient.
     fn get_fee_config_internal(env: &Env) -> FeeConfig {
         env.storage()
             .instance()
@@ -849,7 +860,11 @@ impl BountyEscrowContract {
             .unwrap_or_else(|| FeeConfig {
                 lock_fee_rate: 0,
                 release_fee_rate: 0,
-                fee_recipient: env.storage().instance().get(&DataKey::Admin).unwrap(),
+                fee_recipient: env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .unwrap_or_else(|| env.current_contract_address()),
                 fee_enabled: false,
             })
     }
@@ -1519,6 +1534,8 @@ impl BountyEscrowContract {
             return Err(Error::FundsNotLocked);
         }
 
+        Self::check_release_approval(&env, bounty_id, escrow.amount)?;
+
         let _start = env.ledger().timestamp();
 
         // --- Reentrancy guard: set after all validation so it cannot leak. ---
@@ -1598,6 +1615,13 @@ impl BountyEscrowContract {
 
         // Clear reentrancy guard
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
+
+        // Consume the ReleaseApproval record so a stale approval cannot be
+        // replayed against a future release of the same bounty_id.
+        let approval_key = DataKey::ReleaseApproval(bounty_id);
+        if env.storage().persistent().has(&approval_key) {
+            env.storage().persistent().remove(&approval_key);
+        }
 
         Ok(())
     }
@@ -2018,6 +2042,14 @@ impl BountyEscrowContract {
             return Err(Error::InsufficientFunds);
         }
 
+        // Multisig large-release approval gate: if the escrow's original
+        // locked amount is at or above the configured threshold, require
+        // sufficient distinct signer approvals before any partial payout.
+        // Using escrow.amount (not payout_amount) prevents an attacker from
+        // splitting a large release into many small pieces to bypass the
+        // threshold.
+        Self::check_release_approval(&env, bounty_id, escrow.amount)?;
+
         // Defense in depth: token transfer is an external call. Block nested
         // entry into claim/release paths before interacting with the token.
         if env.storage().instance().has(&DataKey::ReentrancyGuard) {
@@ -2076,6 +2108,14 @@ impl BountyEscrowContract {
         );
 
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
+
+        // Consume the ReleaseApproval record so a stale approval cannot be
+        // replayed against a future release of the same bounty_id.
+        let approval_key = DataKey::ReleaseApproval(bounty_id);
+        if env.storage().persistent().has(&approval_key) {
+            env.storage().persistent().remove(&approval_key);
+        }
+
         Ok(())
     }
 
@@ -2871,12 +2911,34 @@ impl BountyEscrowContract {
         stats
     }
 
-    /// Get total count of escrows
-    /// Get total count of escrows
+    /// Returns the lifetime total number of bounties ever locked, not a live
+    /// count of currently-active bounties.
+    ///
+    /// `EscrowIndex` is append-only and never pruned, so this number only
+    /// ever grows — it includes every `Released` and `Refunded` bounty from
+    /// the contract's entire history alongside currently-`Locked` ones, and
+    /// never decreases when a bounty settles. For a live active count, use
+    /// `count_bounties_by_status(EscrowStatus::Locked)` instead, or
+    /// `get_aggregate_stats` for the full live breakdown by status.
+    ///
+    /// See also [`Self::get_total_bounties_created`], an identically-behaved
+    /// alias with a name that does not invite the "currently active" reading.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
     pub fn get_escrow_count(env: Env) -> u32 {
+        Self::get_total_bounties_created(env)
+    }
+
+    /// Lifetime total number of bounties ever locked into this contract.
+    /// Identical behavior to [`Self::get_escrow_count`] (kept for backward
+    /// compatibility) under a name that doesn't invite confusion with a
+    /// live/active count. See [`Self::get_escrow_count`]'s doc comment for
+    /// the full semantics and the correct live-count alternatives.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
+    pub fn get_total_bounties_created(env: Env) -> u32 {
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -2893,8 +2955,8 @@ impl BountyEscrowContract {
     /// immediately for subsequent lock_funds calls.
     ///
     /// Passing min_amount == max_amount restricts locking to a single exact value.
-    /// min_amount must not exceed max_amount — the call panics if this invariant
-    /// is violated.
+    /// min_amount must not exceed max_amount — returns `Error::InvalidAmountRange`
+    /// if this invariant is violated.
     pub fn set_amount_policy(
         env: Env,
         caller: Address,
@@ -2911,7 +2973,7 @@ impl BountyEscrowContract {
         admin.require_auth();
 
         if min_amount > max_amount {
-            panic!("invalid policy: min_amount cannot exceed max_amount");
+            return Err(Error::InvalidAmountRange);
         }
 
         // Persist the policy so lock_funds can enforce it on every subsequent call.
@@ -3142,6 +3204,45 @@ impl BountyEscrowContract {
         Ok(())
     }
 
+    /// Check whether the given release amount requires multisig approval,
+    /// and if so, that sufficient distinct signers have approved via
+    /// `approve_large_release`.
+    ///
+    /// When `amount < multisig_config.threshold_amount` (or no multisig config
+    /// has been set — the default threshold is `i128::MAX`), this is a
+    /// no-op and the release proceeds on admin auth alone.
+    ///
+    /// Otherwise the stored `ReleaseApproval(bounty_id)` record is loaded and
+    /// its `approvals.len()` must be at least `required_signatures`.
+    fn check_release_approval(env: &Env, bounty_id: u64, amount: i128) -> Result<(), Error> {
+        let multisig_config: MultisigConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::MultisigConfig)
+            .unwrap_or(MultisigConfig {
+                threshold_amount: i128::MAX,
+                signers: vec![env],
+                required_signatures: 0,
+            });
+
+        if amount < multisig_config.threshold_amount {
+            return Ok(());
+        }
+
+        let approval_key = DataKey::ReleaseApproval(bounty_id);
+        let approval: ReleaseApproval = env
+            .storage()
+            .persistent()
+            .get(&approval_key)
+            .ok_or(Error::ApprovalRequired)?;
+
+        if approval.approvals.len() < multisig_config.required_signatures {
+            return Err(Error::ApprovalRequired);
+        }
+
+        Ok(())
+    }
+
     /// Gets refund eligibility information for a bounty.
     ///
     /// # Arguments
@@ -3293,6 +3394,22 @@ impl BountyEscrowContract {
             // Validate amount
             if item.amount <= 0 {
                 return Err(Error::InvalidAmount);
+            }
+
+            // Enforce min/max amount policy if one has been configured (Issue #62).
+            // When no policy is set this block is skipped entirely, preserving
+            // backward-compatible behaviour for callers that never call set_amount_policy.
+            if let Some((min_amount, max_amount)) = env
+                .storage()
+                .instance()
+                .get::<DataKey, (i128, i128)>(&DataKey::AmountPolicy)
+            {
+                if item.amount < min_amount {
+                    return Err(Error::AmountBelowMinimum);
+                }
+                if item.amount > max_amount {
+                    return Err(Error::AmountAboveMaximum);
+                }
             }
 
             // Reject deadlines that are in the past or exactly now
@@ -3521,6 +3638,10 @@ impl BountyEscrowContract {
 
             // Update incremental aggregate counters
             Self::transition_locked_to_released(&env, escrow.amount);
+
+            // Update per-bounty analytics (mirrors single-item release_funds)
+            update_analytics_on_release(&env, item.bounty_id, escrow.amount, timestamp)
+                .map_err(|_| Error::AnalyticsOverflow)?;
 
             // Emit individual event for each released bounty
             emit_funds_released(
@@ -3915,11 +4036,13 @@ impl BountyEscrowContract {
     ///
     /// # Arguments
     /// * `min_amount` - Minimum remaining amount to consider "high-value"
-    /// * `limit` - Maximum number of results
+    /// * `limit` - Maximum number of results (capped at [`MAX_QUERY_LIMIT`])
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
     pub fn get_high_value_bounties(env: Env, min_amount: i128, limit: u32) -> Vec<u64> {
+        let limit = limit.min(MAX_QUERY_LIMIT);
+
         let index: Vec<u64> = env
             .storage()
             .persistent()
@@ -3992,6 +4115,9 @@ impl BountyEscrowContract {
         success_threshold: u32,
         max_error_log: u32,
     ) -> Result<(), Error> {
+        if failure_threshold == 0 {
+            return Err(Error::InvalidCircuitBreakerConfig);
+        }
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
@@ -4094,6 +4220,8 @@ mod test_balance_invariant;
 mod test_upgrade_scenarios;
 #[cfg(test)]
 mod test_multisig_approval_authz;
+#[cfg(test)]
+mod test_multisig_enforcement;
 mod test_admin_audit_views;
 #[cfg(test)]
 mod test_depositor_stats;
