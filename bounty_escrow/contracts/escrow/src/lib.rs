@@ -415,6 +415,8 @@ pub enum Error {
     PendingClaimExists = 24,
     /// Returned when a governance proposal is missing, unapproved, delayed, rejected, or already executed
     GovernanceProposalNotExecutable = 25,
+    /// Returned when a release requires multisig approval but insufficient approvals have been collected
+    ApprovalRequired = 26,
     /// The requested WASM hash has no executed, post-delay governance
     /// proposal approving it (or no governance contract is configured at
     /// all — upgrades fail closed, they are never permitted by default).
@@ -1525,6 +1527,8 @@ impl BountyEscrowContract {
             return Err(Error::FundsNotLocked);
         }
 
+        Self::check_release_approval(&env, bounty_id, escrow.amount)?;
+
         let _start = env.ledger().timestamp();
 
         // --- Reentrancy guard: set after all validation so it cannot leak. ---
@@ -1604,6 +1608,13 @@ impl BountyEscrowContract {
 
         // Clear reentrancy guard
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
+
+        // Consume the ReleaseApproval record so a stale approval cannot be
+        // replayed against a future release of the same bounty_id.
+        let approval_key = DataKey::ReleaseApproval(bounty_id);
+        if env.storage().persistent().has(&approval_key) {
+            env.storage().persistent().remove(&approval_key);
+        }
 
         Ok(())
     }
@@ -2015,6 +2026,14 @@ impl BountyEscrowContract {
             return Err(Error::InsufficientFunds);
         }
 
+        // Multisig large-release approval gate: if the escrow's original
+        // locked amount is at or above the configured threshold, require
+        // sufficient distinct signer approvals before any partial payout.
+        // Using escrow.amount (not payout_amount) prevents an attacker from
+        // splitting a large release into many small pieces to bypass the
+        // threshold.
+        Self::check_release_approval(&env, bounty_id, escrow.amount)?;
+
         // Defense in depth: token transfer is an external call. Block nested
         // entry into claim/release paths before interacting with the token.
         if env.storage().instance().has(&DataKey::ReentrancyGuard) {
@@ -2073,6 +2092,14 @@ impl BountyEscrowContract {
         );
 
         env.storage().instance().remove(&DataKey::ReentrancyGuard);
+
+        // Consume the ReleaseApproval record so a stale approval cannot be
+        // replayed against a future release of the same bounty_id.
+        let approval_key = DataKey::ReleaseApproval(bounty_id);
+        if env.storage().persistent().has(&approval_key) {
+            env.storage().persistent().remove(&approval_key);
+        }
+
         Ok(())
     }
 
@@ -3159,6 +3186,45 @@ impl BountyEscrowContract {
         Ok(())
     }
 
+    /// Check whether the given release amount requires multisig approval,
+    /// and if so, that sufficient distinct signers have approved via
+    /// `approve_large_release`.
+    ///
+    /// When `amount < multisig_config.threshold_amount` (or no multisig config
+    /// has been set — the default threshold is `i128::MAX`), this is a
+    /// no-op and the release proceeds on admin auth alone.
+    ///
+    /// Otherwise the stored `ReleaseApproval(bounty_id)` record is loaded and
+    /// its `approvals.len()` must be at least `required_signatures`.
+    fn check_release_approval(env: &Env, bounty_id: u64, amount: i128) -> Result<(), Error> {
+        let multisig_config: MultisigConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::MultisigConfig)
+            .unwrap_or(MultisigConfig {
+                threshold_amount: i128::MAX,
+                signers: vec![env],
+                required_signatures: 0,
+            });
+
+        if amount < multisig_config.threshold_amount {
+            return Ok(());
+        }
+
+        let approval_key = DataKey::ReleaseApproval(bounty_id);
+        let approval: ReleaseApproval = env
+            .storage()
+            .persistent()
+            .get(&approval_key)
+            .ok_or(Error::ApprovalRequired)?;
+
+        if approval.approvals.len() < multisig_config.required_signatures {
+            return Err(Error::ApprovalRequired);
+        }
+
+        Ok(())
+    }
+
     /// Gets refund eligibility information for a bounty.
     ///
     /// # Arguments
@@ -4129,6 +4195,8 @@ mod test_balance_invariant;
 mod test_upgrade_scenarios;
 #[cfg(test)]
 mod test_multisig_approval_authz;
+#[cfg(test)]
+mod test_multisig_enforcement;
 mod test_admin_audit_views;
 #[cfg(test)]
 mod test_depositor_stats;
