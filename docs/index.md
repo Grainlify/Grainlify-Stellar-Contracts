@@ -29,6 +29,7 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | [Implementation Checklist](bounty_escrow/IMPLEMENTATION_CHECKLIST.md) | Implementation task tracking |
 | [Analytics Documentation](bounty_escrow/ANALYTICS_DOCUMENTATION.md) | Analytics views and query functions |
 | [Analytics Implementation Summary](bounty_escrow/ANALYTICS_IMPLEMENTATION_SUMMARY.md) | Analytics module implementation details |
+| [Incremental Aggregates Implementation Notes](bounty_escrow/INCREMENTAL_AGGREGATES_IMPLEMENTATION_NOTES.md) | Historical implementation notes for O(1) aggregate counters |
 | [Feature Completion Report](bounty_escrow/FEATURE_COMPLETION_REPORT.md) | Feature delivery status report |
 | [Auto Refund Tests](bounty_escrow/contracts/escrow/AUTO_REFUND_TESTS.md) | Auto-refund test documentation |
 | [CI Checks Summary](bounty_escrow/contracts/escrow/CI_CHECKS_SUMMARY.md) | CI pipeline checks overview |
@@ -68,6 +69,7 @@ Welcome to the Grainlify Stellar Contracts documentation. This index provides a 
 | [SDK README](../sdk/README.md) | TypeScript SDK overview and usage |
 | [SDK API Reference](sdk/api/README.md) | Generated TypeDoc reference for SDK classes, methods, and exported types |
 | [SDK Error Mapping](sdk/ERROR_MAPPING.md) | SDK error types and mapping |
+| [Issue #84 Invocation Notes](sdk/ISSUE_84_INVOCATION_NOTES.md) | Historical notes for real Soroban SDK invocation |
 
 ## Security
 
