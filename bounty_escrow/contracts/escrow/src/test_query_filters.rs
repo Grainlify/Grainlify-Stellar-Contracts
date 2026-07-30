@@ -1130,3 +1130,28 @@ fn test_query_limit_clamped_to_max_query_limit() {
     let composite = s.escrow.query_escrows(&filter, &0, &u32::MAX);
     assert_eq!(composite.len(), MAX_QUERY_LIMIT);
 }
+
+// Regression guard for issue #486: docs/QUERY_DOCUMENTATION.md and
+// docs/QUERY_QUICK_REFERENCE.md previously showed an Option-based
+// EscrowQueryFilter shape that does not match this struct and would not
+// compile. This mirrors the "Query all locked escrows with amount >= 1000"
+// example verbatim, so if the struct's field shape ever drifts again, this
+// test (not just the docs) fails to compile.
+#[test]
+fn test_escrow_query_filter_doc_example_compiles() {
+    let s = Setup::new();
+
+    let filter = EscrowQueryFilter {
+        has_status_filter: true,
+        status: EscrowStatus::Locked,
+        has_depositor_filter: false,
+        depositor: Address::generate(&s.env),
+        min_amount: 1000,
+        max_amount: i128::MAX,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+    // Not asserting on contents here -- the point is that this construction
+    // and call compiles against the real struct/entrypoint shape.
+    let _results = s.escrow.query_escrows(&filter, &0, &50);
+}
