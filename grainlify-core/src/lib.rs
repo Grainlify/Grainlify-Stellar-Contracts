@@ -63,6 +63,7 @@
 //! | `cast_vote(voter, proposal_id, vote_type)` | Casts a `For`, `Against`, or `Abstain` vote. Derives voting power from the configured scheme. |
 //! | `finalize_proposal(proposal_id)` | After the voting period, evaluates quorum + threshold and sets the proposal to `Approved` or `Rejected`. |
 //! | `execute_proposal(proposal_id)` | Marks an `Approved` proposal as `Executed` after its execution delay. Does **not** perform a WASM update — it records that governance blessed the hash. |
+//! | `cancel_proposal(caller, proposal_id)` | Allows the proposer to cancel an active proposal before it is finalized. |
 //! | `is_upgrade_approved(wasm_hash)` | Returns `true` if an `Executed` proposal for this hash exists and its execution delay has elapsed. Used by escrow contracts as an upgrade gate. |
 //! | `get_proposal_status(proposal_id)` | Read-only status query. |
 //! | `sweep_expired_proposal(proposal_id)` | Flags an unfinalized, past-deadline proposal as `Expired` using the ledger timestamp. |
@@ -899,9 +900,26 @@ impl GrainlifyContract {
         governance::GovernanceContract::finalize_proposal(env, proposal_id)
     }
 
+    /// Cancel an active governance proposal as its proposer.
+    pub fn cancel_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u32,
+    ) -> Result<(), governance::Error> {
+        governance::GovernanceContract::cancel_proposal(env, caller, proposal_id)
+    }
+
     /// Mark an approved governance proposal as executed after its delay.
     pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), governance::Error> {
         governance::GovernanceContract::execute_proposal(env, proposal_id)
+    }
+
+    /// Mark an active proposal as expired after its voting period ends.
+    pub fn sweep_expired_proposal(
+        env: Env,
+        proposal_id: u32,
+    ) -> Result<(), governance::Error> {
+        governance::GovernanceContract::sweep_expired_proposal(env, proposal_id)
     }
 
     /// Query whether governance executed an upgrade proposal for `wasm_hash`.
@@ -3375,15 +3393,32 @@ mod test {
             "a freshly created proposal is never vetoed"
         );
 
-        env.as_contract(&contract_id, || {
-            governance::GovernanceContract::cancel_proposal(env.clone(), proposer, prop_id)
-                .unwrap();
-        });
+        client.cancel_proposal(&proposer, &prop_id);
 
         assert!(
             client.is_vetoed(&prop_id),
             "a cancelled proposal must report as vetoed"
         );
+    }
+
+    #[test]
+    fn test_sweep_expired_proposal_uses_public_entrypoint() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[2u8; 32]);
+        let prop_id = client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+        env.ledger().with_mut(|li| li.timestamp = 101);
+        client.sweep_expired_proposal(&prop_id);
+
+        assert_eq!(client.get_proposal_status(&prop_id), ProposalStatus::Expired);
     }
 
     // ============================================================
