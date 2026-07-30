@@ -4097,6 +4097,9 @@ impl BountyEscrowContract {
         success_threshold: u32,
         max_error_log: u32,
     ) -> Result<(), Error> {
+        if failure_threshold == 0 {
+            return Err(Error::InvalidCircuitBreakerConfig);
+        }
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
