@@ -439,6 +439,9 @@ fn test_invariant_multistep_scripted_sequence() {
     let (token_client, token_sac) = create_token(&env, &admin);
     let client = create_escrow_client(&env);
     client.init(&admin, &token_client.address);
+    // authorize_claim now rejects an unconfigured (0) claim_window (#549);
+    // step 7 below needs a nonzero window configured.
+    client.set_claim_window(&600u64);
 
     let init_balance = 20_000i128;
     token_sac.mint(&dep1, &init_balance);

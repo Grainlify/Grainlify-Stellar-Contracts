@@ -439,7 +439,14 @@ export class BountyEscrowClient {
   }
 
   /**
-   * Authorize a claim for a bounty
+   * Authorize a claim for a bounty.
+   *
+   * Requires setClaimWindow to have been called first with a nonzero
+   * value. If the contract's claim window is 0 (never configured, or
+   * explicitly set to 0), the on-chain call fails with
+   * ClaimWindowNotConfigured — a pending claim created with a 0 window
+   * would expire at its own creation timestamp and could never be
+   * claimed by the recipient.
    */
   async authorizeClaim(
     bountyId: bigint,
