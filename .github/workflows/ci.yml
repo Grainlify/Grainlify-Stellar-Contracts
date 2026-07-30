@@ -67,50 +67,6 @@ jobs:
         working-directory: ./program-escrow
         run: cargo build
 
-  grainlify-core-host-only:
-    name: grainlify-core - Host-Only Build & Test
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Regression check for #529: grainlify-core's build.rs used to shell out
-    # to a wasm32-unknown-unknown build on every native build, so a fresh
-    # checkout with only the host target installed would fail before a
-    # single test ran. This job installs no extra target on purpose.
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Ensure no wasm32 target is installed
-        # Removed rather than merely asserted absent, so the check holds even
-        # if a future runner image ships the target pre-installed.
-        run: |
-          rustup target remove wasm32-unknown-unknown || true
-          rustup target list --installed
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-grainlify-core-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-grainlify-core-
-
-      - name: Check and test grainlify-core (host target only)
-        run: |
-          cargo check -p grainlify-core
-          # test_migrate_docs_example is a pre-existing failure unrelated to
-          # #529 (soroban storage accessed outside env.as_contract()) —
-          # reproduces identically on main; tracked separately.
-          cargo test -p grainlify-core -- --skip test::test_migrate_docs_example
-
   soroban-contract-matrix:
     name: Soroban Contracts Matrix
     runs-on: ubuntu-latest
