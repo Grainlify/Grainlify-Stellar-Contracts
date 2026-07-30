@@ -25,6 +25,19 @@ pub enum VoteType {
 #[contracttype]
 pub enum VotingScheme {
     OnePersonOneVote,
+    /// **SECURITY WARNING — vote amplification via post-vote token
+    /// transfers.** Voting power is derived from each voter's *live* token
+    /// balance at `cast_vote` time, not a balance snapshotted at proposal
+    /// creation. `cast_vote` only blocks the same *address* from voting
+    /// twice on a proposal — nothing stops the same underlying tokens from
+    /// voting repeatedly through different addresses: vote from A with the
+    /// full balance, transfer to B, vote from B with that same balance,
+    /// transfer to C, and so on, all within one `voting_period`. A single
+    /// actor can accumulate many multiples of their true voting power this
+    /// way, undermining the "weighted by stake" premise of this scheme.
+    /// See `derive_voting_power` and `GovernanceConfig::snapshot_ledger`.
+    /// Deployments that cannot accept this risk should use
+    /// `OnePersonOneVote`, which is unaffected (see docs/grainlify-core/GOVERNANCE.md).
     TokenWeighted,
 }
 
@@ -57,6 +70,8 @@ pub struct GovernanceConfig {
     pub approval_threshold: u32,
     /// Minimum governance-token balance required to create a proposal.
     pub min_proposal_stake: i128,
+    /// See [`VotingScheme::TokenWeighted`]'s doc comment for a security
+    /// warning that applies when this is set to `TokenWeighted`.
     pub voting_scheme: VotingScheme,
     /// Soroban token used for token-weighted votes and proposal stake checks.
     pub governance_token: Address,
@@ -64,7 +79,14 @@ pub struct GovernanceConfig {
     pub one_person_total_voters: u32,
     /// Total token voting power for token-weighted quorum calculations.
     pub token_total_voting_power: i128,
-    /// Optional ledger recorded by governance policy for snapshot/stake-lock semantics.
+    /// Recorded policy metadata only — **not enforced**. This field does not
+    /// cause any balance to actually be snapshotted; `derive_voting_power`
+    /// always reads a live balance regardless of this value. Setting it does
+    /// not close the vote-amplification gap described on
+    /// [`VotingScheme::TokenWeighted`]; the standard Soroban token interface
+    /// does not expose historical/checkpointed balances, so real snapshotting
+    /// would require either a checkpoint-capable token or a separate
+    /// lock/escrow mechanism — neither is implemented here.
     pub snapshot_ledger: Option<u32>,
 }
 
@@ -504,9 +526,19 @@ impl GovernanceContract {
 /// Derives voting power for the configured scheme.
 ///
 /// `OnePersonOneVote` always returns `1` for an authenticated address.
-/// `TokenWeighted` reads the voter's current balance from the configured
-/// governance token. `snapshot_ledger` is recorded policy metadata only; the
-/// standard Soroban token interface does not expose historical balances.
+///
+/// **SECURITY WARNING**: `TokenWeighted` reads the voter's *current, live*
+/// balance from the configured governance token at the moment this is
+/// called — not a balance snapshotted at proposal creation or first-vote
+/// time. `GovernanceConfig::snapshot_ledger` is recorded policy metadata
+/// only and does not change this. Combined with `cast_vote` only blocking
+/// the same *address* from voting twice (not the same underlying tokens),
+/// a holder can vote from address A, transfer their tokens to address B,
+/// vote again from B with that same balance, and repeat — accumulating
+/// many multiples of their true voting power within a single voting
+/// period. This is the classic governance-token flash-loan / vote
+/// amplification vulnerability class; see [`VotingScheme::TokenWeighted`]
+/// and `docs/grainlify-core/GOVERNANCE.md` for deployment guidance.
 fn derive_voting_power(env: &Env, config: &GovernanceConfig, voter: &Address) -> i128 {
     match config.voting_scheme {
         VotingScheme::OnePersonOneVote => 1,
@@ -876,6 +908,88 @@ mod test {
         assert_eq!(
             token_client.finalize_proposal(&token_prop),
             ProposalStatus::Rejected
+        );
+    }
+
+    /// Issue #477: documents the vote-amplification gap explicitly.
+    /// `cast_vote` only blocks the same *address* from voting twice on a
+    /// proposal; it derives voting power from a *live* token balance, so the
+    /// same underlying tokens can vote repeatedly by transferring between
+    /// addresses within a single voting period. This test is a deliberate,
+    /// documented demonstration of that tradeoff — not a claim that it is
+    /// fixed. See the security warnings on `VotingScheme::TokenWeighted`,
+    /// `derive_voting_power`, and `docs/grainlify-core/GOVERNANCE.md`.
+    #[test]
+    fn test_token_weighted_vote_amplification_via_transfer_between_addresses() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_address = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
+        let token_client = token::Client::new(&env, &token_address);
+
+        let config = GovernanceConfig {
+            voting_period: 100,
+            execution_delay: 0,
+            quorum_percentage: 1000,
+            approval_threshold: 5000,
+            min_proposal_stake: 0,
+            voting_scheme: VotingScheme::TokenWeighted,
+            governance_token: token_address,
+            one_person_total_voters: 0,
+            token_total_voting_power: 100,
+            snapshot_ledger: None,
+        };
+        client.init_governance(&admin, &config);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+
+        // A single pool of 100 tokens, entirely controlled by one actor,
+        // starting out at address A.
+        token_admin_client.mint(&voter_a, &100);
+
+        let prop_id = create_test_proposal(&env, &client, &proposer);
+
+        // Vote once from A with the full balance.
+        client.cast_vote(&voter_a, &prop_id, &VoteType::For);
+
+        // Move the SAME 100 tokens to a different address the same actor
+        // controls — nothing about this requires the tokens to leave the
+        // actor's control, just a different on-chain address.
+        token_client.transfer(&voter_a, &voter_b, &100);
+
+        // Vote AGAIN from B with that same, now-live balance. AlreadyVoted
+        // only tracks (proposal_id, voter address), so a never-before-seen
+        // address sails through even though it holds the exact same tokens
+        // that already voted once under a different address.
+        client.cast_vote(&voter_b, &prop_id, &VoteType::For);
+
+        let proposals: Map<u32, Proposal> = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&PROPOSALS).unwrap()
+        });
+        let proposal = proposals.get(prop_id).unwrap();
+
+        // The vulnerability, made concrete: two distinct ballots were
+        // accepted (total_votes == 2) and the tally double-counts the same
+        // 100-token balance as 200 votes_for — a single pool of tokens
+        // exerted twice its true voting power within one voting period.
+        assert_eq!(
+            proposal.total_votes, 2,
+            "both A's and B's ballots must be recorded as separate votes"
+        );
+        assert_eq!(
+            proposal.votes_for, 200,
+            "the same 100-token balance must be double-counted across A and B — \
+             this is the vote-amplification gap, not a bug in this test"
         );
     }
 

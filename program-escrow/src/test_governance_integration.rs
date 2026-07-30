@@ -39,6 +39,16 @@ mod mock_governance {
         pub fn set_vetoed(env: Env, proposal_id: u32) {
             env.storage().instance().set(&VETOED_KEY, &proposal_id);
         }
+
+        /// Always succeeds. `execute_governance_proposal`'s own veto check
+        /// short-circuits before this is ever reached for a vetoed proposal,
+        /// so this mock only needs to model the non-vetoed, approved case.
+        pub fn execute_proposal(
+            _env: Env,
+            _proposal_id: u32,
+        ) -> Result<(), crate::governance_integration::GovernanceError> {
+            Ok(())
+        }
     }
 }
 
@@ -236,6 +246,71 @@ fn test_upgrade_approval_denies_when_governance_is_not_configured() {
             &env, &wasm_hash,
         ));
     });
+}
+
+// ---- Issue #472: upgrade() entrypoint wiring check_upgrade_approval ----
+
+#[test]
+fn test_upgrade_executes_when_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    gov_client.set_proposal(&1, &wasm_hash, &4); // 4 = Executed
+
+    // Must not panic: admin auth passes, check_upgrade_approval reports the
+    // exact uploaded hash as approved, and update_current_contract_wasm runs.
+    client.upgrade(&wasm_hash);
+}
+
+#[test]
+fn test_upgrade_rejected_when_not_governance_approved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    // No governance contract configured at all — check_upgrade_approval
+    // fails closed, so upgrade() must reject even with valid admin auth.
+    let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
+}
+
+#[test]
+fn test_upgrade_rejected_when_hash_not_the_approved_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_id = env.register_contract(None, mock_governance_with_state::MockGovernanceWithState);
+    let gov_client = mock_governance_with_state::MockGovernanceWithStateClient::new(&env, &gov_id);
+    client.set_governance_contract(&gov_id);
+    client.set_min_governance_version(&2);
+
+    let approved_hash = BytesN::from_array(&env, &[7u8; 32]);
+    gov_client.set_proposal(&1, &approved_hash, &4); // Executed, but a different hash
+
+    let attempted_hash = env.deployer().upload_contract_wasm([].as_slice());
+    let result = client.try_upgrade(&attempted_hash);
+    assert_eq!(result, Err(Ok(Error::UpgradeNotApproved)));
 }
 
 #[test]
@@ -643,6 +718,70 @@ fn test_veto_after_execution_does_not_retroactively_revoke_approval() {
         );
         assert!(vetoed, "vetoed must be true to block the late-veto scenario");
     });
+}
+
+// ============================================================================
+// Issue #473: check_proposal_vetoed must actually be consulted by a real
+// code path, not just declared. execute_governance_proposal is that path.
+// ============================================================================
+
+/// A vetoed proposal must be rejected by execute_governance_proposal even
+/// though the mock's execute_proposal itself would otherwise succeed —
+/// proving check_proposal_vetoed is now genuinely wired into the contract,
+/// not merely callable in isolation from tests.
+#[test]
+fn test_execute_governance_proposal_rejects_vetoed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client = mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    gov_client.set_vetoed(&0);
+
+    let result = client.try_execute_governance_proposal(&0);
+    assert_eq!(
+        result,
+        Err(Ok(Error::GovernanceProposalNotExecutable)),
+        "a vetoed proposal must be rejected even though the mock's execute_proposal would succeed"
+    );
+}
+
+/// A non-vetoed proposal proceeds normally through execute_governance_proposal
+/// — the veto wiring must not block legitimate governance actions.
+#[test]
+fn test_execute_governance_proposal_succeeds_for_non_vetoed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.setadmin(&admin);
+
+    let gov_contract_id = env.register_contract(None, mock_governance::MockGovernanceContract);
+    let gov_client = mock_governance::MockGovernanceContractClient::new(&env, &gov_contract_id);
+
+    client.set_governance_contract(&gov_contract_id);
+    client.set_min_governance_version(&2);
+
+    // proposal 1 was never vetoed (only proposal 0 is ever marked in these tests).
+    gov_client.set_vetoed(&0);
+
+    let result = client.try_execute_governance_proposal(&1);
+    assert_eq!(
+        result,
+        Ok(Ok(())),
+        "a non-vetoed proposal must proceed normally"
+    );
 }
 
 /// Issue #386: grainlify-core's is_vetoed used to be a hardcoded stub that

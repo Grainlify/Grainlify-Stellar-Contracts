@@ -74,6 +74,7 @@ export enum ContractErrorCode {
   AMOUNT_BELOW_MIN         = 'AMOUNT_BELOW_MIN',
   AMOUNT_ABOVE_MAX         = 'AMOUNT_ABOVE_MAX',
   GOVERNANCE_VERSION_TOO_LOW = 'GOVERNANCE_VERSION_TOO_LOW',
+  INVALID_THRESHOLD_BPS    = 'INVALID_THRESHOLD_BPS',
 
   // ── Bounty-Escrow (contracts/bounty_escrow) ────────────────────────────
   BOUNTY_ALREADY_INITIALIZED = 'BOUNTY_ALREADY_INITIALIZED',   // 1
@@ -115,7 +116,11 @@ export enum ContractErrorCode {
   GOV_PROPOSAL_NOT_APPROVED  = 'GOV_PROPOSAL_NOT_APPROVED',    // 12
   GOV_EXECUTION_DELAY_NOT_MET = 'GOV_EXECUTION_DELAY_NOT_MET', // 13
   GOV_PROPOSAL_EXPIRED       = 'GOV_PROPOSAL_EXPIRED',         // 14
+  GOV_ZERO_VOTING_POWER      = 'GOV_ZERO_VOTING_POWER',        // 15
+  GOV_INVALID_TOTAL_VOTING_POWER = 'GOV_INVALID_TOTAL_VOTING_POWER', // 16
+  GOV_UNAUTHORIZED           = 'GOV_UNAUTHORIZED',              // 17
   GOV_VOTE_WEIGHT_OVERFLOW   = 'GOV_VOTE_WEIGHT_OVERFLOW',     // 18
+  GOV_ALREADY_INITIALIZED    = 'GOV_ALREADY_INITIALIZED',      // 19
 
   // ── Circuit-Breaker / Error-Recovery ────────────────────────────────────
   CIRCUIT_OPEN               = 'CIRCUIT_OPEN',                 // 1001
@@ -140,6 +145,7 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.AMOUNT_BELOW_MIN]:          'Amount is below the minimum allowed by policy',
   [ContractErrorCode.AMOUNT_ABOVE_MAX]:          'Amount exceeds the maximum allowed by policy',
   [ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW]: 'Linked governance contract version is below the required minimum',
+  [ContractErrorCode.INVALID_THRESHOLD_BPS]:     'Large-payout threshold must not exceed 10,000 basis points',
 
   // Bounty-Escrow
   [ContractErrorCode.BOUNTY_ALREADY_INITIALIZED]: 'Bounty escrow contract is already initialized',
@@ -181,7 +187,11 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
   [ContractErrorCode.GOV_PROPOSAL_NOT_APPROVED]:  'Proposal has not been approved',
   [ContractErrorCode.GOV_EXECUTION_DELAY_NOT_MET]: 'Execution delay period has not elapsed yet',
   [ContractErrorCode.GOV_PROPOSAL_EXPIRED]:       'Proposal has expired',
+  [ContractErrorCode.GOV_ZERO_VOTING_POWER]:      'Voter has zero voting power',
+  [ContractErrorCode.GOV_INVALID_TOTAL_VOTING_POWER]: 'Total voting power must be greater than zero',
+  [ContractErrorCode.GOV_UNAUTHORIZED]:           'Unauthorized: caller cannot perform this governance action',
   [ContractErrorCode.GOV_VOTE_WEIGHT_OVERFLOW]:   'Vote weight overflow',
+  [ContractErrorCode.GOV_ALREADY_INITIALIZED]:    'Governance has already been initialized',
 
   // Circuit-Breaker
   [ContractErrorCode.CIRCUIT_OPEN]:               'Circuit breaker is open; operation rejected without attempting',
@@ -196,6 +206,7 @@ const CONTRACT_ERROR_MESSAGES: Record<ContractErrorCode, string> = {
 /** Program-escrow #[contracterror] discriminants → SDK code */
 export const PROGRAM_ESCROW_ERROR_MAP: Record<number, ContractErrorCode> = {
   4: ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW,
+  5: ContractErrorCode.INVALID_THRESHOLD_BPS,
 };
 
 /** Bounty-escrow #[contracterror] discriminants → SDK code */
@@ -241,7 +252,11 @@ export const GOVERNANCE_ERROR_MAP: Record<number, ContractErrorCode> = {
   12: ContractErrorCode.GOV_PROPOSAL_NOT_APPROVED,
   13: ContractErrorCode.GOV_EXECUTION_DELAY_NOT_MET,
   14: ContractErrorCode.GOV_PROPOSAL_EXPIRED,
+  15: ContractErrorCode.GOV_ZERO_VOTING_POWER,
+  16: ContractErrorCode.GOV_INVALID_TOTAL_VOTING_POWER,
+  17: ContractErrorCode.GOV_UNAUTHORIZED,
   18: ContractErrorCode.GOV_VOTE_WEIGHT_OVERFLOW,
+  19: ContractErrorCode.GOV_ALREADY_INITIALIZED,
 };
 
 /** Circuit-breaker u32 error constants → SDK code */
@@ -340,6 +355,15 @@ export function parseContractError(error: any): ContractError {
   }
   if (!hasBountyContext && (errorMessage.includes('GovernanceVersionTooLow') || errorMessage.includes('Governance version requirement not met'))) {
     return createContractError(ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW);
+  }
+  if (
+    !hasBountyContext
+    && (
+      errorMessage.includes('InvalidThresholdBps')
+      || /threshold_bps.*(?:exceeds|greater than).*10_?000/i.test(errorMessage)
+    )
+  ) {
+    return createContractError(ContractErrorCode.INVALID_THRESHOLD_BPS);
   }
 
   // ── Bounty-escrow patterns ─────────────────────────────────────────────

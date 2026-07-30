@@ -22,6 +22,31 @@ fn create_escrow_contract<'a>(e: &Env) -> BountyEscrowContractClient<'a> {
     BountyEscrowContractClient::new(e, &contract_id)
 }
 
+fn last_claim_cancelled_event_data(env: &Env) -> Val {
+    let claim_topic = Symbol::new(env, "claim");
+    let cancel_topic = Symbol::new(env, "cancel");
+    let mut matched = None;
+
+    for (_contract, topics, data) in env.events().all().iter() {
+        if topics.len() != 2 {
+            continue;
+        }
+
+        let first = topics
+            .get(0)
+            .and_then(|value| Symbol::try_from_val(env, &value).ok());
+        let second = topics
+            .get(1)
+            .and_then(|value| Symbol::try_from_val(env, &value).ok());
+
+        if first == Some(claim_topic.clone()) && second == Some(cancel_topic.clone()) {
+            matched = Some(data);
+        }
+    }
+
+    matched.expect("cancel should emit the legacy ClaimCancelled event")
+}
+
 struct TestSetup<'a> {
     env: Env,
     admin: Address,
@@ -221,8 +246,7 @@ fn test_cancel_expired_claim_emits_expired_reason() {
 
     setup.escrow.cancel_pending_claim(&bounty_id);
 
-    let events = setup.env.events().all();
-    let (_contract, _topics, data) = events.last().expect("cancel should emit an event");
+    let data = last_claim_cancelled_event_data(&setup.env);
     let data_map: Map<Symbol, Val> =
         Map::try_from_val(&setup.env, &data).expect("event payload should be a map");
     let reason_val = data_map
@@ -256,8 +280,7 @@ fn test_cancel_active_claim_emits_manual_reason() {
 
     setup.escrow.cancel_pending_claim(&bounty_id);
 
-    let events = setup.env.events().all();
-    let (_contract, _topics, data) = events.last().expect("cancel should emit an event");
+    let data = last_claim_cancelled_event_data(&setup.env);
     let data_map: Map<Symbol, Val> =
         Map::try_from_val(&setup.env, &data).expect("event payload should be a map");
     let reason_val = data_map
@@ -291,8 +314,7 @@ fn test_cancel_claim_at_boundary_emits_manual_reason() {
 
     setup.escrow.cancel_pending_claim(&bounty_id);
 
-    let events = setup.env.events().all();
-    let (_contract, _topics, data) = events.last().expect("cancel should emit an event");
+    let data = last_claim_cancelled_event_data(&setup.env);
     let data_map: Map<Symbol, Val> =
         Map::try_from_val(&setup.env, &data).expect("event payload should be a map");
     let reason_val = data_map
