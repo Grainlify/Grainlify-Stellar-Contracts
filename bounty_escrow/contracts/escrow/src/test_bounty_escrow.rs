@@ -1080,6 +1080,182 @@ fn test_lock_funds_within_range_succeeds() {
     assert_eq!(escrow.status, crate::EscrowStatus::Locked);
 }
 
+/// batch_lock_funds must enforce the same AmountPolicy as lock_funds.
+/// A batch containing an item strictly below the configured minimum must
+/// be rejected entirely with AmountBelowMinimum.
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")] // AmountBelowMinimum
+fn test_batch_lock_funds_below_minimum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    // Policy: min=100, max=10_000.  Attempting to lock 50 must be rejected.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 50,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds must enforce the same AmountPolicy as lock_funds.
+/// A batch containing an item strictly above the configured maximum must
+/// be rejected entirely with AmountAboveMaximum.
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")] // AmountAboveMaximum
+fn test_batch_lock_funds_above_maximum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &100_000);
+
+    // Policy: min=100, max=10_000.  Attempting to lock 50_000 must be rejected.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 50_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds must reject the whole batch if any item violates the
+/// AmountPolicy, even when other items in the batch are valid.
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")] // AmountBelowMinimum
+fn test_batch_lock_funds_mixed_valid_and_below_minimum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &100_000);
+
+    // Policy: min=100, max=10_000.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    // First item violates the policy (below min), second is valid.
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 50,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds must reject the whole batch if any item exceeds the
+/// AmountPolicy maximum, even when other items in the batch are valid.
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")] // AmountAboveMaximum
+fn test_batch_lock_funds_mixed_valid_and_above_maximum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &100_000);
+
+    // Policy: min=100, max=10_000.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    // First item is valid, second item violates the policy (above max).
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 50_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds succeeds when no AmountPolicy has been set (unrestricted).
+#[test]
+fn test_batch_lock_funds_without_amount_policy_succeeds() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &10_000);
+
+    // No AmountPolicy set — any positive amount should succeed.
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+
+    let escrow = client.get_escrow_info(&1);
+    assert_eq!(escrow.amount, 5_000);
+    assert_eq!(escrow.status, crate::EscrowStatus::Locked);
+}
+
 /// Only the admin may call `set_amount_policy`.  Any other caller must be
 /// rejected with an Unauthorized error.
 #[test]
@@ -1123,9 +1299,11 @@ fn test_no_policy_set_allows_any_positive_amount() {
     assert_eq!(client.get_escrow_info(&7).amount, 999_999);
 }
 
-/// Supplying min > max is a logically invalid policy and must be rejected.
+/// Supplying min > max is a logically invalid policy and must be rejected
+/// with the typed InvalidAmountRange error (issue #467: this previously
+/// used an untyped panic!() instead).
 #[test]
-#[should_panic] // InvalidPolicy / contract-defined panic for malformed config
+#[should_panic(expected = "Error(Contract, #28)")] // InvalidAmountRange
 fn test_set_amount_policy_min_greater_than_max_rejected() {
     let (env, client, _) = create_test_env();
     let admin = Address::generate(&env);
@@ -1136,8 +1314,25 @@ fn test_set_amount_policy_min_greater_than_max_rejected() {
     let (token, _token_client, _) = create_token_contract(&env, &token_admin);
     client.init(&admin, &token);
 
-    // min=5_000 > max=100 — invalid policy, must panic.
+    // min=5_000 > max=100 — invalid policy, must be rejected.
     client.set_amount_policy(&admin, &5_000_i128, &100_i128);
+}
+
+/// The non-panicking try_ variant surfaces the same InvalidAmountRange
+/// error as a typed Result, without panicking.
+#[test]
+fn test_set_amount_policy_min_greater_than_max_returns_typed_error() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, _) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+
+    let result = client.try_set_amount_policy(&admin, &5_000_i128, &100_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidAmountRange)));
 }
 
 /// The admin must be able to update the policy after initial configuration, and
@@ -2240,4 +2435,19 @@ fn test_pause_state_changed_event_for_refund_operation() {
     assert_eq!(event.operation, symbol_short!("refund"));
     assert!(event.paused);
     assert_eq!(event.admin, admin);
+}
+
+// Regression guard for issue #458: get_fee_config previously panicked on a
+// freshly deployed, uninitialized contract (unwrap() on the not-yet-set
+// DataKey::Admin key inside the fee_recipient fallback), instead of
+// returning a graceful disabled default.
+#[test]
+fn test_get_fee_config_on_uninitialized_contract_does_not_panic() {
+    let (_env, client, _contract_id) = create_test_env();
+
+    let config = client.get_fee_config();
+
+    assert_eq!(config.lock_fee_rate, 0);
+    assert_eq!(config.release_fee_rate, 0);
+    assert!(!config.fee_enabled);
 }

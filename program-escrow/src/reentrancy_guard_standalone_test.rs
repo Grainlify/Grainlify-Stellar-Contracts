@@ -18,6 +18,35 @@ where
     env.as_contract(&contract_id, || f(env.clone()))
 }
 
+/// Minimal recursive harness used to validate that the guard blocks a nested
+/// invocation while the outer call is still marked as entered.
+fn guarded_nested_call(env: &Env, depth: u8) {
+    check_not_entered(env);
+    set_entered(env);
+
+    if depth > 0 {
+        guarded_nested_call(env, depth - 1);
+    }
+
+    clear_entered(env);
+}
+
+/// Minimal harness that simulates an outer call that returns either success or
+/// an error after the guard has been armed.
+fn guarded_outer_call(env: &Env, should_error: bool) -> Result<(), &'static str> {
+    check_not_entered(env);
+    set_entered(env);
+
+    let result = if should_error {
+        Err("outer call failed")
+    } else {
+        Ok(())
+    };
+
+    clear_entered(env);
+    result
+}
+
 #[test]
 fn test_guard_initially_not_set() {
     let env = Env::default();
@@ -47,6 +76,50 @@ fn test_guard_can_be_set_and_cleared() {
             !is_entered(&env),
             "Guard should be cleared after clear_entered"
         );
+    });
+}
+
+#[test]
+#[should_panic(expected = "Reentrancy detected")]
+fn test_guard_blocks_nested_call_while_entered() {
+    with_contract_env(|env| {
+        guarded_nested_call(&env, 1);
+    });
+}
+
+#[test]
+fn test_guard_resets_after_normal_outer_call() {
+    with_contract_env(|env| {
+        let result = guarded_outer_call(&env, false);
+        assert!(result.is_ok(), "outer call should succeed");
+        assert!(
+            !is_entered(&env),
+            "guard should be cleared after a successful outer call"
+        );
+
+        // A later unrelated call should be allowed once the guard has been reset.
+        check_not_entered(&env);
+        set_entered(&env);
+        clear_entered(&env);
+        assert!(!is_entered(&env));
+    });
+}
+
+#[test]
+fn test_guard_resets_after_error_returning_outer_call() {
+    with_contract_env(|env| {
+        let result = guarded_outer_call(&env, true);
+        assert_eq!(result, Err("outer call failed"));
+        assert!(
+            !is_entered(&env),
+            "guard should be cleared after an error-returning outer call"
+        );
+
+        // The contract should still be usable for a subsequent non-nested call.
+        check_not_entered(&env);
+        set_entered(&env);
+        clear_entered(&env);
+        assert!(!is_entered(&env));
     });
 }
 
