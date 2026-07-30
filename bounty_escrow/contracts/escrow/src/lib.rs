@@ -3175,6 +3175,22 @@ impl BountyEscrowContract {
                 return Err(Error::InvalidAmount);
             }
 
+            // Enforce min/max amount policy if one has been configured (Issue #62).
+            // When no policy is set this block is skipped entirely, preserving
+            // backward-compatible behaviour for callers that never call set_amount_policy.
+            if let Some((min_amount, max_amount)) = env
+                .storage()
+                .instance()
+                .get::<DataKey, (i128, i128)>(&DataKey::AmountPolicy)
+            {
+                if item.amount < min_amount {
+                    return Err(Error::AmountBelowMinimum);
+                }
+                if item.amount > max_amount {
+                    return Err(Error::AmountAboveMaximum);
+                }
+            }
+
             // Reject deadlines that are in the past or exactly now
             if item.deadline <= timestamp {
                 return Err(Error::InvalidDeadline);
