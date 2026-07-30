@@ -2,7 +2,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, Ledger},
     token, vec, Address, Env, String, Symbol, TryFromVal,
 };
 
@@ -284,4 +284,93 @@ fn test_whitelist_atomicity_prevents_mid_flight_removal_race() {
     let res2 = client.try_single_payout(&recipient, &10_000);
     assert!(res2.is_err());
     assert_eq!(token_client.balance(&recipient), 10_000); // Balance unchanged
+}
+
+// ---- Issue #436: scheduled-release paths must not bypass the whitelist ----
+
+#[test]
+#[should_panic(expected = "Recipient not whitelisted")]
+fn test_create_program_release_schedule_with_enforcement_non_whitelisted_panics() {
+    let env = Env::default();
+    let (client, _admin, _, _) = setup_whitelist_test(&env, 100_000);
+    let recipient = Address::generate(&env);
+
+    client.set_whitelist_enforced(&true);
+    // Non-whitelisted recipient must not be schedulable, mirroring
+    // single_payout/batch_payout — otherwise this is a direct bypass of
+    // the whitelist via the scheduled-release path.
+    client.create_program_release_schedule(&10_000, &1_000, &recipient);
+}
+
+#[test]
+fn test_create_program_release_schedule_with_enforcement_whitelisted_succeeds() {
+    let env = Env::default();
+    let (client, _admin, _, _) = setup_whitelist_test(&env, 100_000);
+    let recipient = Address::generate(&env);
+
+    client.set_whitelist_enforced(&true);
+    client.set_whitelist(&recipient, &true);
+
+    let schedule = client.create_program_release_schedule(&10_000, &1_000, &recipient);
+    assert_eq!(schedule.recipient, recipient);
+}
+
+#[test]
+#[should_panic(expected = "Recipient not whitelisted")]
+fn test_release_program_schedule_manual_rejects_since_blacklisted_recipient() {
+    let env = Env::default();
+    let (client, _admin, _, _) = setup_whitelist_test(&env, 100_000);
+    let recipient = Address::generate(&env);
+
+    // Schedule created while enforcement is off.
+    let schedule = client.create_program_release_schedule(&10_000, &1_000, &recipient);
+
+    // Enforcement is enabled afterward, and the recipient is never
+    // whitelisted — release must be blocked at release time even though it
+    // was permitted at schedule-creation time.
+    client.set_whitelist_enforced(&true);
+    client.release_program_schedule_manual(&schedule.schedule_id);
+}
+
+#[test]
+#[should_panic(expected = "Recipient not whitelisted")]
+fn test_release_prog_schedule_automatic_rejects_since_blacklisted_recipient() {
+    let env = Env::default();
+    let (client, _admin, _, _) = setup_whitelist_test(&env, 100_000);
+    let recipient = Address::generate(&env);
+
+    let schedule = client.create_program_release_schedule(&10_000, &1_000, &recipient);
+    client.set_whitelist_enforced(&true);
+
+    env.ledger().set_timestamp(1_000);
+    client.release_prog_schedule_automatic(&schedule.schedule_id);
+}
+
+#[test]
+fn test_trigger_program_releases_skips_since_blacklisted_recipient() {
+    let env = Env::default();
+    let (client, _admin, token_client, _) = setup_whitelist_test(&env, 100_000);
+    let recipient = Address::generate(&env);
+
+    let schedule = client.create_program_release_schedule(&10_000, &1_000, &recipient);
+    client.set_whitelist_enforced(&true);
+
+    env.ledger().set_timestamp(1_000);
+    // A batch call must skip the now-blocked schedule rather than aborting
+    // the whole batch or paying out the blocked recipient.
+    let released_count = client.trigger_program_releases();
+    assert_eq!(released_count, 0);
+    assert_eq!(token_client.balance(&recipient), 0);
+
+    let refreshed = client.get_program_release_schedules();
+    let still_pending = refreshed.get(0).unwrap();
+    assert_eq!(still_pending.schedule_id, schedule.schedule_id);
+    assert!(!still_pending.released);
+
+    // Whitelisting the recipient afterward lets the same schedule release
+    // normally on a later trigger call.
+    client.set_whitelist(&recipient, &true);
+    let released_count = client.trigger_program_releases();
+    assert_eq!(released_count, 1);
+    assert_eq!(token_client.balance(&recipient), 10_000);
 }
