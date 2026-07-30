@@ -123,6 +123,40 @@ export interface AggregateStats {
   count_refunded: number;
 }
 
+/** Per-bounty analytics snapshot (from `get_bounty_analytics`). */
+export interface BountyAnalytics {
+  total_amount_locked: bigint;
+  total_amount_released: bigint;
+  total_amount_refunded: bigint;
+  remaining_amount: bigint;
+  created_at: bigint;
+  last_updated: bigint;
+  partial_releases_count: number;
+  partial_refunds_count: number;
+}
+
+/** Contract-wide analytics snapshot (from `get_contract_analytics`). */
+export interface ContractAnalytics {
+  active_bounty_count: number;
+  released_bounty_count: number;
+  refunded_bounty_count: number;
+  total_locked: bigint;
+  total_released: bigint;
+  total_refunded: bigint;
+  average_bounty_amount: bigint;
+  snapshot_timestamp: bigint;
+}
+
+/** Per-depositor lifetime stats (from `get_depositor_stats`), by escrow status. */
+export interface DepositorStats {
+  locked_count: number;
+  locked_amount: bigint;
+  released_count: number;
+  released_amount: bigint;
+  refunded_count: number;
+  refunded_amount: bigint;
+}
+
 /** Admin approval record required before a refund can be executed. */
 export interface RefundApproval {
   /** Application-level bounty identifier. */
@@ -670,6 +704,100 @@ export class BountyEscrowClient {
     try {
       const result = await this.invokeContract('get_aggregate_stats', []);
       return result as AggregateStats;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the per-bounty analytics snapshot (accumulators updated on every
+   * state transition -- O(1) read, suitable for regular polling).
+   *
+   * @throws {ContractError} If the bounty does not exist.
+   */
+  async getBountyAnalytics(bountyId: bigint): Promise<BountyAnalytics> {
+    try {
+      const result = await this.invokeContract('get_bounty_analytics', [bountyId]);
+      return result as BountyAnalytics;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get the contract-wide analytics snapshot.
+   */
+  async getContractAnalytics(): Promise<ContractAnalytics> {
+    try {
+      const result = await this.invokeContract('get_contract_analytics', []);
+      return result as ContractAnalytics;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Count bounties currently in the given status.
+   */
+  async countBountiesByStatus(status: EscrowStatus): Promise<number> {
+    try {
+      const result = await this.invokeContract('count_bounties_by_status', [status]);
+      return Number(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Total volume (sum of amounts) of bounties currently in the given status.
+   */
+  async getVolumeByStatus(status: EscrowStatus): Promise<bigint> {
+    try {
+      const result = await this.invokeContract('get_volume_by_status', [status]);
+      return result as bigint;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get a depositor's lifetime bounty stats, broken down by status.
+   */
+  async getDepositorStats(depositor: string): Promise<DepositorStats> {
+    this.validateAddress(depositor, 'depositor');
+    try {
+      const [lockedCount, lockedAmount, releasedCount, releasedAmount, refundedCount, refundedAmount] =
+        (await this.invokeContract('get_depositor_stats', [depositor])) as [
+          number,
+          bigint,
+          number,
+          bigint,
+          number,
+          bigint
+        ];
+      return {
+        locked_count: lockedCount,
+        locked_amount: lockedAmount,
+        released_count: releasedCount,
+        released_amount: releasedAmount,
+        refunded_count: refundedCount,
+        refunded_amount: refundedAmount,
+      };
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get bounty ids with a remaining amount at or above `minAmount`, newest first.
+   *
+   * @param minAmount - Minimum remaining amount (inclusive).
+   * @param limit - Maximum number of ids to return.
+   */
+  async getHighValueBounties(minAmount: bigint, limit: number): Promise<bigint[]> {
+    try {
+      const result = await this.invokeContract('get_high_value_bounties', [minAmount, limit]);
+      return result as bigint[];
     } catch (error) {
       throw this.handleError(error);
     }
