@@ -215,6 +215,7 @@ fn ser_error_enum_all_variants() {
     roundtrip(&env, Error::BatchSizeMismatch);
     roundtrip(&env, Error::DuplicateBountyId);
     roundtrip(&env, Error::InvalidAmount);
+    roundtrip(&env, Error::InvalidCircuitBreakerConfig);
     roundtrip(&env, Error::InvalidDeadline);
     roundtrip(&env, Error::InsufficientFunds);
     roundtrip(&env, Error::RefundNotApproved);

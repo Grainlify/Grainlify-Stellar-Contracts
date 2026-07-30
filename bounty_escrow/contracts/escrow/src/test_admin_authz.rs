@@ -265,6 +265,14 @@ fn non_admin_cannot_set_circuit_breaker_config() {
 }
 
 #[test]
+fn admin_cannot_set_zero_failure_threshold() {
+    let s = AuthzSetup::new();
+    s.env.mock_all_auths();
+    let result = s.client.try_set_circuit_breaker_config(&0u32, &2u32, &10u32);
+    assert!(result.is_err());
+}
+
+#[test]
 fn non_admin_cannot_reset_circuit() {
     let s = AuthzSetup::new();
     let res = s.client.try_reset_circuit(&s.random.clone());
