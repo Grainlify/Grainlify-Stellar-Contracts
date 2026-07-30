@@ -75,12 +75,15 @@ pub fn get_escrows_by_status(env: Env, status: EscrowStatus, offset: u32, limit:
 pub fn get_escrow_count(env: Env) -> u32
 ```
 
-**Purpose**: Lifetime total number of bounties ever locked (append-only,
-never decreases — includes settled `Released`/`Refunded` bounties, not
-just active ones). For a live/active count use
-`count_bounties_by_status(EscrowStatus::Locked)` or `get_aggregate_stats`
-instead. `get_total_bounties_created` is an identically-behaved alias
-with a less ambiguous name.
+**Purpose**: Get the lifetime total number of bounties ever locked. This is
+**not** a live count of currently-active bounties — `EscrowIndex` is
+append-only and never pruned, so the number only ever grows and includes
+every `Released`/`Refunded` bounty from the contract's entire history.
+
+For a live active count, use `count_bounties_by_status(EscrowStatus::Locked)`
+or the `count_locked` field from `get_aggregate_stats` above. The
+`get_total_bounties_created` alias has identical lifetime-total behavior and
+uses a less ambiguous name.
 
 ## Program Escrow Query Functions
 

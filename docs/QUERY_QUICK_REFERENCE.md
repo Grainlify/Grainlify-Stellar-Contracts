@@ -7,8 +7,10 @@
 // Get single escrow
 let escrow = contract.get_escrow_info(env, bounty_id)?;
 
-// Get total count
-let count = contract.get_escrow_count(env);
+// Get lifetime total (never decreases — NOT a live active count; use
+// count_bounties_by_status(EscrowStatus::Locked) or get_aggregate_stats
+// for that)
+let lifetime_count = contract.get_escrow_count(env);
 
 // Get contract balance
 let balance = contract.get_balance(env)?;
@@ -173,9 +175,12 @@ loop {
 ### Dashboard Stats
 ```rust
 // Bounty Escrow Dashboard
-let stats = contract.get_aggregate_stats(env.clone());
+let stats = contract.get_aggregate_stats(env.clone()); // live counts by status
 let user_escrows = contract.query_escrows_by_depositor(env.clone(), user_addr, 0, 10);
-let total_count = contract.get_escrow_count(env); // lifetime total, not a live/active count
+// get_escrow_count is a lifetime total, not a live dashboard metric — it
+// never decreases as bounties settle. Prefer stats.count_locked (above)
+// for "currently active" widgets; only use this for "all-time created".
+let lifetime_bounties_created = contract.get_escrow_count(env);
 
 // Program Escrow Dashboard
 let stats = contract.get_program_aggregate_stats(env.clone());

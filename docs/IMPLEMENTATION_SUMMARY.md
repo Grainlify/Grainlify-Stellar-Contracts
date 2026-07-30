@@ -20,7 +20,7 @@ Successfully implemented comprehensive query functions for both Bounty Escrow an
 1. **query_escrows()** - Filter escrows with pagination
 2. **query_escrows_by_depositor()** - Indexed lookup by depositor
 3. **get_aggregate_stats()** - System-wide statistics
-4. **get_escrow_count()** - Total escrow count
+4. **get_escrow_count()** - Lifetime total bounties ever created (not a live active count)
 5. **get_escrows_by_status()** - Filter by status with pagination
 
 #### Index Maintenance

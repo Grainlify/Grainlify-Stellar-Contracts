@@ -2895,16 +2895,18 @@ impl BountyEscrowContract {
         stats
     }
 
-    /// Returns the **lifetime total** number of bounties ever locked into
-    /// this contract — `EscrowIndex` is append-only and never pruned, so
-    /// this count never decreases and includes every `Released`/`Refunded`
-    /// bounty from the contract's entire history, not just currently-active
-    /// ones. For a live/active count use
-    /// [`Self::count_bounties_by_status`]`(EscrowStatus::Locked)` or
-    /// [`Self::get_aggregate_stats`] instead.
+    /// Returns the lifetime total number of bounties ever locked, not a live
+    /// count of currently-active bounties.
+    ///
+    /// `EscrowIndex` is append-only and never pruned, so this number only
+    /// ever grows — it includes every `Released` and `Refunded` bounty from
+    /// the contract's entire history alongside currently-`Locked` ones, and
+    /// never decreases when a bounty settles. For a live active count, use
+    /// `count_bounties_by_status(EscrowStatus::Locked)` instead, or
+    /// `get_aggregate_stats` for the full live breakdown by status.
     ///
     /// See also [`Self::get_total_bounties_created`], an identically-behaved
-    /// alias with a name that doesn't invite the "currently active" reading.
+    /// alias with a name that does not invite the "currently active" reading.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
