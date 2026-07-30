@@ -518,6 +518,17 @@ fn test_schedule_dispute_skips_only_target_schedule_release() {
     assert_eq!(data.payout_history.len(), 1);
 }
 
+/// A schedule dispute must reject an ID that is not present in the program.
+#[test]
+#[should_panic(expected = "Schedule not found")]
+fn test_schedule_dispute_rejects_unknown_schedule() {
+    let env = Env::default();
+    let (client, _admin, _cid) = setup(&env, 100_000);
+    let reason = String::from_str(&env, "Unknown schedule challenged");
+
+    client.open_schedule_dispute(&999, &reason);
+}
+
 // ─── Test 17: resolve schedule dispute re-enables release ────────────────────
 
 /// Resolving an open schedule-scoped dispute re-enables release/payment for that schedule.

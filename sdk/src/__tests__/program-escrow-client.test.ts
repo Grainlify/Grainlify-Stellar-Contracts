@@ -64,6 +64,34 @@ describe('ProgramEscrowClient', () => {
       expect(invoke).toHaveBeenCalledWith('resolve_dispute', [], sourceKeypair);
     });
 
+    it('cancelDispute calls cancel_dispute', async () => {
+      const invoke = mockInvoke();
+      await client.cancelDispute(sourceKeypair);
+      expect(invoke).toHaveBeenCalledWith('cancel_dispute', [], sourceKeypair);
+    });
+
+    it('getDispute returns the contract result', async () => {
+      const record = {
+        opened_by: validAddress,
+        opened_at: 100,
+        reason: 'fraud suspected',
+        status: 'Open',
+      };
+      mockInvoke(record);
+      await expect(client.getDispute()).resolves.toEqual(record);
+    });
+
+    it('getDispute returns undefined when there is no dispute', async () => {
+      mockInvoke(null);
+      await expect(client.getDispute()).resolves.toBeUndefined();
+    });
+
+    it('isDisputed returns the contract result', async () => {
+      const invoke = mockInvoke(true);
+      await expect(client.isDisputed()).resolves.toBe(true);
+      expect(invoke).toHaveBeenCalledWith('is_disputed', []);
+    });
+
     it('isRecipientDisputed rejects an invalid address', async () => {
       await expect(client.isRecipientDisputed('invalid')).rejects.toThrow(ValidationError);
     });
