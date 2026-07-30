@@ -3,7 +3,7 @@ set -e
 
 # Configuration
 NETWORK="testnet"
-CONTRACT_DIR="contracts/grainlify-core"
+CONTRACT_DIR="grainlify-core"
 SRC_FILE="$CONTRACT_DIR/src/lib.rs"
 SOURCE="demo_user"
 
@@ -27,7 +27,7 @@ echo "Contract Deployed: $ID"
 # 4. Initialize V1
 echo "[4/9] Initializing V1..."
 ADMIN_ADDR=$(soroban keys address "$SOURCE")
-soroban contract invoke --id "$ID" --source "$SOURCE" --network "$NETWORK" --send=yes -- init --admin "$ADMIN_ADDR"
+soroban contract invoke --id "$ID" --source "$SOURCE" --network "$NETWORK" --send=yes -- init_admin --admin "$ADMIN_ADDR"
 
 # 5. Check Version
 echo "[5/9] Checking Version (Expect: 1)..."
