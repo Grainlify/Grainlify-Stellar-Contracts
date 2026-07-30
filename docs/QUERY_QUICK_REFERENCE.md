@@ -77,7 +77,7 @@ let info = contract.get_program_info(env);
 let balance = contract.get_remaining_balance(env);
 
 // Get all schedules
-let schedules = contract.get_program_release_schedules(env);
+let schedules = contract.get_program_release_schedules(env, 0, 50);
 
 // Get release history
 let history = contract.get_program_release_history(env);
@@ -112,10 +112,10 @@ let payouts = contract.query_payout_history(env, filter, 0, 50);
 ### Schedule Queries
 ```rust
 // All pending schedules
-let pending = contract.get_pending_schedules(env);
+let pending = contract.get_pending_schedules(env, 0, 50);
 
 // Schedules ready to release
-let due = contract.get_due_schedules(env);
+let due = contract.get_due_schedules(env, 0, 50);
 
 // Total scheduled amount
 let total = contract.get_total_scheduled_amount(env);
@@ -180,8 +180,8 @@ let total_count = contract.get_escrow_count(env); // lifetime total, not a live/
 // Program Escrow Dashboard
 let stats = contract.get_program_aggregate_stats(env.clone());
 let user_payouts = contract.get_payouts_by_recipient(env.clone(), user_addr, 0, 10);
-let pending = contract.get_pending_schedules(env.clone());
-let due = contract.get_due_schedules(env);
+let pending = contract.get_pending_schedules(env.clone(), 0, 50);
+let due = contract.get_due_schedules(env, 0, 50);
 ```
 
 ### Monitoring Alerts
@@ -201,7 +201,7 @@ let filter = EscrowQueryFilter {
 let expiring = contract.query_escrows(env, filter, 0, 100);
 
 // Check for due releases
-let due = contract.get_due_schedules(env);
+let due = contract.get_due_schedules(env, 0, 50);
 if !due.is_empty() {
     trigger_release_process();
 }
