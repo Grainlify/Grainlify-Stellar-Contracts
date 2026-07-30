@@ -423,6 +423,8 @@ pub enum Error {
     /// would overflow `i128` or `u32`.  Appended last to preserve
     /// existing discriminant ordering.
     AnalyticsOverflow = 27,
+    /// Returned by `set_amount_policy` when `min_amount` exceeds `max_amount`.
+    InvalidAmountRange = 28,
 }
 
 #[contracttype]
@@ -2888,8 +2890,8 @@ impl BountyEscrowContract {
     /// immediately for subsequent lock_funds calls.
     ///
     /// Passing min_amount == max_amount restricts locking to a single exact value.
-    /// min_amount must not exceed max_amount — the call panics if this invariant
-    /// is violated.
+    /// min_amount must not exceed max_amount — returns `Error::InvalidAmountRange`
+    /// if this invariant is violated.
     pub fn set_amount_policy(
         env: Env,
         caller: Address,
@@ -2906,7 +2908,7 @@ impl BountyEscrowContract {
         admin.require_auth();
 
         if min_amount > max_amount {
-            panic!("invalid policy: min_amount cannot exceed max_amount");
+            return Err(Error::InvalidAmountRange);
         }
 
         // Persist the policy so lock_funds can enforce it on every subsequent call.
