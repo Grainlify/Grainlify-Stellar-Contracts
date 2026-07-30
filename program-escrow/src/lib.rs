@@ -1576,6 +1576,9 @@ impl ProgramEscrowContract {
         success_threshold: u32,
         max_error_log: u32,
     ) {
+        if failure_threshold == 0 {
+            panic!("failure_threshold must be greater than zero");
+        }
         caller.require_auth();
         let admin = error_recovery::get_circuitadmin(&env).expect("Circuit admin not set");
         if caller != admin {

@@ -425,6 +425,9 @@ pub enum Error {
     /// would overflow `i128` or `u32`.  Appended last to preserve
     /// existing discriminant ordering.
     AnalyticsOverflow = 27,
+    /// Returned when a circuit breaker threshold is zero.
+    /// Appended after the existing error codes to preserve their discriminants.
+    InvalidCircuitBreakerConfig = 30,
     /// Returned by authorize_claim when the effective claim_window is 0
     /// (set_claim_window was never called, or was explicitly called with
     /// 0) — using it would create a pending claim whose expires_at equals

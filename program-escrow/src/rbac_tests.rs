@@ -279,6 +279,14 @@ fn test_circuit_admin_can_configure_circuit_breaker() {
 }
 
 #[test]
+#[should_panic(expected = "failure_threshold must be greater than zero")]
+fn test_circuit_breaker_rejects_zero_failure_threshold() {
+    let setup = RbacSetup::new();
+    setup.env.mock_all_auths();
+    setup.client.configure_circuit_breaker(&setup.pauser, &0, &1, &10);
+}
+
+#[test]
 fn test_circuit_admin_can_emergency_open_circuit() {
     let setup = RbacSetup::new();
     setup.env.mock_all_auths();
