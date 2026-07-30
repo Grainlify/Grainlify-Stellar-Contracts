@@ -2868,12 +2868,32 @@ impl BountyEscrowContract {
         stats
     }
 
-    /// Get total count of escrows
-    /// Get total count of escrows
+    /// Returns the **lifetime total** number of bounties ever locked into
+    /// this contract — `EscrowIndex` is append-only and never pruned, so
+    /// this count never decreases and includes every `Released`/`Refunded`
+    /// bounty from the contract's entire history, not just currently-active
+    /// ones. For a live/active count use
+    /// [`Self::count_bounties_by_status`]`(EscrowStatus::Locked)` or
+    /// [`Self::get_aggregate_stats`] instead.
+    ///
+    /// See also [`Self::get_total_bounties_created`], an identically-behaved
+    /// alias with a name that doesn't invite the "currently active" reading.
     ///
     /// # Authorization
     /// None — callable by anyone (read-only query).
     pub fn get_escrow_count(env: Env) -> u32 {
+        Self::get_total_bounties_created(env)
+    }
+
+    /// Lifetime total number of bounties ever locked into this contract.
+    /// Identical behavior to [`Self::get_escrow_count`] (kept for backward
+    /// compatibility) under a name that doesn't invite confusion with a
+    /// live/active count. See [`Self::get_escrow_count`]'s doc comment for
+    /// the full semantics and the correct live-count alternatives.
+    ///
+    /// # Authorization
+    /// None — callable by anyone (read-only query).
+    pub fn get_total_bounties_created(env: Env) -> u32 {
         let index: Vec<u64> = env
             .storage()
             .persistent()
