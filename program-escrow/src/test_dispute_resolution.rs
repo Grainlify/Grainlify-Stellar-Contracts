@@ -462,7 +462,7 @@ fn test_recipient_dispute_skips_only_target_schedule_release() {
     let released_count = client.trigger_program_releases();
     assert_eq!(released_count, 1);
 
-    let schedules = client.get_program_release_schedules();
+    let schedules = client.get_program_release_schedules(&0, &100);
     let first = schedules.get(0).unwrap();
     let second = schedules.get(1).unwrap();
 
@@ -501,7 +501,7 @@ fn test_schedule_dispute_skips_only_target_schedule_release() {
     let released_count = client.trigger_program_releases();
     assert_eq!(released_count, 1);
 
-    let schedules = client.get_program_release_schedules();
+    let schedules = client.get_program_release_schedules(&0, &100);
     let first = schedules.get(0).unwrap();
     let second = schedules.get(1).unwrap();
 
@@ -516,6 +516,17 @@ fn test_schedule_dispute_skips_only_target_schedule_release() {
     let data = client.get_program_info();
     assert_eq!(data.remaining_balance, 90_000);
     assert_eq!(data.payout_history.len(), 1);
+}
+
+/// A schedule dispute must reject an ID that is not present in the program.
+#[test]
+#[should_panic(expected = "Schedule not found")]
+fn test_schedule_dispute_rejects_unknown_schedule() {
+    let env = Env::default();
+    let (client, _admin, _cid) = setup(&env, 100_000);
+    let reason = String::from_str(&env, "Unknown schedule challenged");
+
+    client.open_schedule_dispute(&999, &reason);
 }
 
 // ─── Test 17: resolve schedule dispute re-enables release ────────────────────

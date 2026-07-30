@@ -53,6 +53,7 @@ Additional fields are considered additive and should be ignored by forward-compa
     - [5.12 `ClaimExecuted`](#512-claimexecuted)
       - [v2 Payload Example](#v2-payload-example-9)
     - [5.13 `ClaimCancelled`](#513-claimcancelled)
+    - [5.14 `UpgradeExecuted`](#514-upgradeexecuted)
       - [v2 Payload Example](#v2-payload-example-10)
   - [6. Contract: `program_escrow`](#6-contract-program_escrow)
     - [6.1 `ProgramInitialized`](#61-programinitialized)
@@ -66,6 +67,7 @@ Additional fields are considered additive and should be ignored by forward-compa
     - [6.5 `PauseStateChanged` (program)](#65-pausestatechanged-program)
       - [Payload (raw tuple)](#payload-raw-tuple)
     - [6.6 Circuit Breaker Events (`bounty_escrow` and `program_escrow`)](#66-circuit-breaker-events-bounty_escrow-and-program_escrow)
+    - [6.7 `UpgradeExecutedEvent`](#67-upgradeexecutedevent)
       - [Payload (raw tuple)](#payload-raw-tuple-1)
   - [7. Contract: `grainlify-core`](#7-contract-grainlify-core)
     - [7.1 `MigrationEvent`](#71-migrationevent)
@@ -767,6 +769,40 @@ pub struct ClaimCancelled {
 
 ---
 
+### 5.14 `UpgradeExecuted`
+
+**Emitted by:** `emit_upgrade_executed()`
+**Topics:** `(symbol_short!("upgrade"),)`
+**Struct:** `UpgradeExecuted`
+**Lifecycle phase:** Contract upgrade — emitted when the `upgrade()` entrypoint executes successfully
+
+```rust
+#[contracttype]
+pub struct UpgradeExecuted {
+    pub version:   u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin:     Address,
+}
+```
+
+#### v2 Payload Example
+
+```json
+{
+  "version":   2,
+  "wasm_hash": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0",
+  "admin":     "GADM…"
+}
+```
+
+| Field       | Rust type      | v2 required | Description |
+|-------------|----------------|-------------|-------------|
+| `version`   | `u32`          | **Yes**     | Always `2` (EVENT_VERSION_V2) |
+| `wasm_hash` | `BytesN<32>`   | **Yes**     | Hash of the deployed WASM blob after the upgrade |
+| `admin`     | `Address`      | **Yes**     | Address of the admin who executed the upgrade |
+
+---
+
 ## 6. Contract: `program_escrow`
 
 > **Source:** `contracts/program_escrow/src/lib.rs`
@@ -1021,6 +1057,41 @@ fn emit_circuit_event(env: &Env, event_type: Symbol, value: u32) {
 > payload is always the raw 2-element tuple above, regardless of schema
 > version elsewhere in the contract. Indexers must key off the `event_type`
 > topic Symbol (not a payload field) to distinguish the five variants.
+
+---
+
+### 6.7 `UpgradeExecutedEvent`
+
+**Emitted by:** the `upgrade()` entrypoint
+**Topics:** `(UPGRADE_EXECUTED,)` where `UPGRADE_EXECUTED = symbol_short!("UpgExec")`
+**Struct:** `UpgradeExecutedEvent`
+**Lifecycle phase:** Contract upgrade — emitted on successful WASM upgrade
+
+```rust
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecutedEvent {
+    pub version:   u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin:     Address,
+}
+```
+
+#### v2 Payload Example
+
+```json
+{
+  "version":   2,
+  "wasm_hash": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0",
+  "admin":     "GADM…"
+}
+```
+
+| Field       | Rust type      | v2 required | Description |
+|-------------|----------------|-------------|-------------|
+| `version`   | `u32`          | **Yes**     | Always `2` |
+| `wasm_hash` | `BytesN<32>`   | **Yes**     | Hash of the deployed WASM after upgrade |
+| `admin`     | `Address`      | **Yes**     | Admin address that executed the upgrade |
 
 ---
 

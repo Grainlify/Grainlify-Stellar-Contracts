@@ -65,7 +65,7 @@
 //! | `execute_proposal(proposal_id)` | Marks an `Approved` proposal as `Executed` after its execution delay. Does **not** perform a WASM update — it records that governance blessed the hash. |
 //! | `is_upgrade_approved(wasm_hash)` | Returns `true` if an `Executed` proposal for this hash exists and its execution delay has elapsed. Used by escrow contracts as an upgrade gate. |
 //! | `get_proposal_status(proposal_id)` | Read-only status query. |
-//! | `sweep_expired_proposal(proposal_id, current_time)` | Flags an unfinalized, past-deadline proposal as `Expired` (flag-not-delete pattern). |
+//! | `sweep_expired_proposal(proposal_id)` | Flags an unfinalized, past-deadline proposal as `Expired` using the ledger timestamp. |
 //!
 //! ### Voting schemes
 //!
@@ -3283,7 +3283,14 @@ mod test {
         assert!(found_upg_exec);
     }
 
+    // Requires a prebuilt grainlify-core wasm32v1-none release artifact for
+    // the include_bytes! below (`cargo build -p grainlify-core --release
+    // --target wasm32v1-none`) — gated behind a feature so the default
+    // host-only `cargo test -p grainlify-core` doesn't need that target
+    // (Issue #529). Run explicitly with `--features wasm-upgrade-test`
+    // after building the artifact.
     #[test]
+    #[cfg(feature = "wasm-upgrade-test")]
     fn test_upgrade_replay_guard_and_rescheduling() {
         let env = Env::default();
         env.mock_all_auths();
@@ -3491,4 +3498,3 @@ mod test {
         assert_eq!(stats.avg_time, if stats.call_count > 0 { stats.total_time / stats.call_count } else { 0 });
     }
 }
-

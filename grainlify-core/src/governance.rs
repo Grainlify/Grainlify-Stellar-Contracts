@@ -484,7 +484,6 @@ impl GovernanceContract {
     /// # Arguments
     /// * `env` - The contract environment
     /// * `proposal_id` - ID of the proposal to sweep
-    /// * `current_time` - Current ledger timestamp (passed in for testability)
     ///
     /// # Errors
     /// * `ProposalsNotFound` - No proposals exist in storage
@@ -495,10 +494,10 @@ impl GovernanceContract {
     /// # Example
     /// ```ignore
     /// // Sweep an expired proposal after voting ended
-    /// let current_time = env.ledger().timestamp();
-    /// client.sweep_expired_proposal(&proposal_id, &current_time);
+    /// client.sweep_expired_proposal(&proposal_id);
     /// ```
-    pub fn sweep_expired_proposal(env: Env, proposal_id: u32, current_time: u64) -> Result<(), Error> {
+    pub fn sweep_expired_proposal(env: Env, proposal_id: u32) -> Result<(), Error> {
+        let current_time = env.ledger().timestamp();
         let mut proposals: Map<u32, Proposal> = env
             .storage()
             .instance()
@@ -1066,10 +1065,9 @@ mod test {
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
-        // Test current_time strictly before proposal.voting_end (99 < 100)
-        let current_time = 99;
-
-        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        // Test the ledger timestamp strictly before proposal.voting_end (99 < 100).
+        env.ledger().with_mut(|li| li.timestamp = 99);
+        let result = client.try_sweep_expired_proposal(&prop_id);
         assert_eq!(result, Err(Ok(Error::VotingStillActive)));
 
         // Verify proposal status remains Active and unchanged after rejected sweep attempt
@@ -1085,10 +1083,9 @@ mod test {
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
-        // Test boundary case current_time == proposal.voting_end (100 == 100)
-        let current_time = 100;
-
-        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        // Test the ledger timestamp at proposal.voting_end (100 == 100).
+        env.ledger().with_mut(|li| li.timestamp = 100);
+        let result = client.try_sweep_expired_proposal(&prop_id);
         assert_eq!(result, Err(Ok(Error::VotingStillActive)));
 
         // Verify proposal status remains Active and unchanged after exact-at-end rejected sweep attempt
@@ -1104,10 +1101,9 @@ mod test {
         let prop_id = create_test_proposal(&env, &client, &proposer);
 
         // Proposal voting_end is created_at (0) + voting_period (100) = 100.
-        // Test current_time == proposal.voting_end + 1 (101 > 100)
-        let current_time = 101;
-
-        let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+        // Test the ledger timestamp at proposal.voting_end + 1 (101 > 100).
+        env.ledger().with_mut(|li| li.timestamp = 101);
+        let result = client.try_sweep_expired_proposal(&prop_id);
         assert!(result.is_ok());
 
         // Verify proposal status is updated to Expired after successful sweep
@@ -1121,7 +1117,7 @@ fn test_sweep_expired_proposal_nonexistent_fails() {
     let (client, _, _, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let non_existent_id = 999;
 
-    let result = client.try_sweep_expired_proposal(&non_existent_id, &150);
+    let result = client.try_sweep_expired_proposal(&non_existent_id);
     assert_eq!(result, Err(Ok(Error::ProposalsNotFound)));  // Changed from ProposalNotFound to ProposalsNotFound
 }
 
@@ -1132,8 +1128,8 @@ fn test_sweep_expired_proposal_already_expired_fails() {
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
     // First sweep after expiry
-    let current_time = 150;
-    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+    env.ledger().with_mut(|li| li.timestamp = 150);
+    let result = client.try_sweep_expired_proposal(&prop_id);
     assert!(result.is_ok());
 
     // Verify status is Expired - no unwrap needed
@@ -1141,7 +1137,8 @@ fn test_sweep_expired_proposal_already_expired_fails() {
     assert_eq!(status, ProposalStatus::Expired);
 
     // Try to sweep again - should fail because proposal is no longer Active
-    let result2 = client.try_sweep_expired_proposal(&prop_id, &200);
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let result2 = client.try_sweep_expired_proposal(&prop_id);
     assert_eq!(result2, Err(Ok(Error::ProposalNotActive)));
 }
 
@@ -1161,7 +1158,8 @@ fn test_sweep_expired_proposal_already_finalized_fails() {
     assert_eq!(status, ProposalStatus::Approved);
 
     // Try to sweep - should fail because proposal is not Active
-    let result = client.try_sweep_expired_proposal(&prop_id, &200);
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    let result = client.try_sweep_expired_proposal(&prop_id);
     assert_eq!(result, Err(Ok(Error::ProposalNotActive)));
 }
 
@@ -1280,8 +1278,8 @@ fn test_cancel_proposal_after_sweep_expired_fails() {
     let (client, _, proposer, _) = setup_test(&env, VotingScheme::OnePersonOneVote, 1000, 0, 10);
     let prop_id = create_test_proposal(&env, &client, &proposer);
 
-    let current_time = 150;
-    let result = client.try_sweep_expired_proposal(&prop_id, &current_time);
+    env.ledger().with_mut(|li| li.timestamp = 150);
+    let result = client.try_sweep_expired_proposal(&prop_id);
     assert!(result.is_ok());
 
     let status = client.get_proposal_status(&prop_id);
@@ -1523,3 +1521,4 @@ fn test_proposal_lifecycle_rejects_executing_already_executed_proposal() {
     );
 }
 }
+
