@@ -221,6 +221,7 @@ println!("Refunded: {}", bounty.total_amount_refunded);
    - Minimal changes to existing code
    - Analytics updated atomically with escrow state
    - No divergence between data and metrics
+  > **⚠️ Caveat (see issue #537):** `batch_release_funds` does not currently call `update_analytics_on_release`, so per-bounty `BountyAnalytics` records may be stale for bounties released through the batch path. The contract-wide aggregate counters (`AggregateStats`) remain correct. This claim will be fully true once #537 is resolved.
 
 2. **Off-Chain Ready**
    - Events for real-time indexing
