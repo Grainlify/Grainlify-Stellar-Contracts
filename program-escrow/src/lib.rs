@@ -1343,6 +1343,8 @@ impl ProgramEscrowContract {
     ///
     /// Direct payouts and release schedules for this recipient are blocked,
     /// while unrelated recipients remain payable unless a global dispute is open.
+    /// This is intentionally allowed before a recipient has a scheduled release
+    /// so a pending payout can be challenged preemptively.
     pub fn open_recipient_dispute(env: Env, recipient: Address, reason: String) {
         Self::open_dispute_at(
             &env,
@@ -1357,7 +1359,11 @@ impl ProgramEscrowContract {
     ///
     /// Only the selected release schedule is blocked unless a global or
     /// recipient-scoped dispute also applies.
+    ///
+    /// # Panics
+    /// * If the release schedule does not exist
     pub fn open_schedule_dispute(env: Env, schedule_id: u64, reason: String) {
+        Self::get_program_release_schedule(env.clone(), schedule_id);
         Self::open_dispute_at(
             &env,
             DataKey::ScheduleDispute(schedule_id),
