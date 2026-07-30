@@ -2492,7 +2492,9 @@ impl ProgramEscrowContract {
         Self::batch_payout(env, recipients, amounts)
     }
 
-    /// Query payout history by recipient with pagination
+    /// Query payout history by recipient with pagination.
+    ///
+    /// This is the canonical implementation shared by the legacy alias below.
     pub fn query_payouts_by_recipient(
         env: Env,
         recipient: Address,
@@ -2741,39 +2743,17 @@ impl ProgramEscrowContract {
         }
     }
 
-    /// Get payouts by recipient
+    /// Backward-compatible alias for [`Self::query_payouts_by_recipient`].
+    ///
+    /// Kept so existing callers can migrate without a second implementation
+    /// of the same payout-history query.
     pub fn get_payouts_by_recipient(
         env: Env,
         recipient: Address,
         offset: u32,
         limit: u32,
     ) -> Vec<PayoutRecord> {
-        let program_data: ProgramData = env
-            .storage()
-            .persistent()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
-        let history = program_data.payout_history;
-        let mut results = Vec::new(&env);
-        let mut count = 0u32;
-        let mut skipped = 0u32;
-
-        for i in 0..history.len() {
-            if count >= limit {
-                break;
-            }
-            let record = history.get(i).unwrap();
-            if record.recipient == recipient {
-                if skipped < offset {
-                    skipped += 1;
-                    continue;
-                }
-                results.push_back(record);
-                count += 1;
-            }
-        }
-        results
+        Self::query_payouts_by_recipient(env, recipient, offset, limit)
     }
 
     /// Get pending schedules (not yet released)
