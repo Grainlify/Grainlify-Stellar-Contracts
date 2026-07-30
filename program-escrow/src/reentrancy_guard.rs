@@ -104,3 +104,80 @@ macro_rules! with_reentrancy_guard {
         result
     }};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ProgramEscrowContract;
+    use soroban_sdk::Env;
+
+    fn with_contract_env<F, T>(f: F) -> T
+    where
+        F: FnOnce(Env) -> T,
+    {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        env.as_contract(&contract_id, || f(env.clone()))
+    }
+
+    fn nested_guarded_call(env: &Env, depth: u8) {
+        check_not_entered(env);
+        set_entered(env);
+
+        if depth > 0 {
+            nested_guarded_call(env, depth - 1);
+        }
+
+        clear_entered(env);
+    }
+
+    fn outer_guarded_call(env: &Env, should_error: bool) -> Result<(), &'static str> {
+        check_not_entered(env);
+        set_entered(env);
+
+        let result = if should_error {
+            Err("outer call failed")
+        } else {
+            Ok(())
+        };
+
+        clear_entered(env);
+        result
+    }
+
+    #[test]
+    #[should_panic(expected = "Reentrancy detected")]
+    fn guard_blocks_nested_call_while_entered() {
+        with_contract_env(|env| {
+            nested_guarded_call(&env, 1);
+        });
+    }
+
+    #[test]
+    fn guard_resets_after_normal_outer_call() {
+        with_contract_env(|env| {
+            let result = outer_guarded_call(&env, false);
+            assert!(result.is_ok());
+            assert!(!is_entered(&env));
+
+            check_not_entered(&env);
+            set_entered(&env);
+            clear_entered(&env);
+            assert!(!is_entered(&env));
+        });
+    }
+
+    #[test]
+    fn guard_resets_after_error_returning_outer_call() {
+        with_contract_env(|env| {
+            let result = outer_guarded_call(&env, true);
+            assert_eq!(result, Err("outer call failed"));
+            assert!(!is_entered(&env));
+
+            check_not_entered(&env);
+            set_entered(&env);
+            clear_entered(&env);
+            assert!(!is_entered(&env));
+        });
+    }
+}

@@ -120,6 +120,17 @@ governance-triggered escrow action proceeds. The guard delegates to
 threshold, execution delay, and replay protection are re-validated by the
 governance module instead of trusting a caller-supplied flag.
 
+### Veto / Cancellation Check
+
+`grainlify-core::is_vetoed(proposal_id)` returns `true` when the proposal is
+in `ProposalStatus::Cancelled`. Both escrow integrations call this query from
+`check_proposal_vetoed` before `execute_governance_proposal`; a cancelled
+proposal is rejected and cannot authorize a governance-triggered escrow action.
+Cancellation is performed by the proposal proposer during the permitted
+proposal lifecycle. The core functions are implemented and tested, but their
+deployment-facing entrypoints still need to be exposed through the
+`GrainlifyContract` interface; see [issue #535](https://github.com/Grainlify/Grainlify-Stellar-Contracts/issues/535).
+
 ## Integration Points
 
 ### Admin Operations Protected by Governance
@@ -386,8 +397,7 @@ cargo test
 Potential improvements for future versions:
 
 1. **Multi-Contract Governance**: Support governance across multiple contracts
-2. **Veto Mechanism**: Allow governance to veto admin actions
-3. **Delegation**: Support vote delegation in governance
+2. **Delegation**: Support vote delegation in governance
 
 ## References
 
@@ -397,6 +407,10 @@ Potential improvements for future versions:
 - [Soroban Documentation](https://soroban.stellar.org/docs)
 
 ## Changelog
+
+### Version 1.2.0
+- Documented the implemented veto check backed by cancelled proposal state.
+- Both escrow contracts reject vetoed proposals before governance-triggered execution.
 
 ### Version 1.1.0
 - Hash-specific upgrade approval through executed governance proposals

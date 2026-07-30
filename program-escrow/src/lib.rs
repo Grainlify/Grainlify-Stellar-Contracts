@@ -1384,6 +1384,8 @@ impl ProgramEscrowContract {
     ///
     /// Direct payouts and release schedules for this recipient are blocked,
     /// while unrelated recipients remain payable unless a global dispute is open.
+    /// This is intentionally allowed before a recipient has a scheduled release
+    /// so a pending payout can be challenged preemptively.
     pub fn open_recipient_dispute(env: Env, recipient: Address, reason: String) {
         Self::open_dispute_at(
             &env,
@@ -1398,7 +1400,11 @@ impl ProgramEscrowContract {
     ///
     /// Only the selected release schedule is blocked unless a global or
     /// recipient-scoped dispute also applies.
+    ///
+    /// # Panics
+    /// * If the release schedule does not exist
     pub fn open_schedule_dispute(env: Env, schedule_id: u64, reason: String) {
+        Self::get_program_release_schedule(env.clone(), schedule_id);
         Self::open_dispute_at(
             &env,
             DataKey::ScheduleDispute(schedule_id),
@@ -1574,6 +1580,9 @@ impl ProgramEscrowContract {
         let admin = error_recovery::get_circuitadmin(&env).expect("Circuit admin not set");
         if caller != admin {
             panic!("Unauthorized: only circuit admin can configure");
+        }
+        if failure_threshold == 0 {
+            panic!("Invalid circuit breaker configuration: failure_threshold must be >= 1");
         }
         error_recovery::set_config(
             &env,
@@ -2283,6 +2292,25 @@ impl ProgramEscrowContract {
             panic!("Amount must be greater than zero");
         }
 
+        // Whitelist guard: a recipient blocked from a direct single_payout/
+        // batch_payout must not be payable by scheduling a release for them
+        // instead (Issue #436).
+        let whitelist_enforced = env
+            .storage()
+            .instance()
+            .get(&DataKey::WhitelistEnforced)
+            .unwrap_or(false);
+        if whitelist_enforced {
+            let whitelisted = env
+                .storage()
+                .instance()
+                .get(&DataKey::Whitelist(recipient.clone()))
+                .unwrap_or(false);
+            if !whitelisted {
+                panic!("Recipient not whitelisted");
+            }
+        }
+
         let mut schedules: Vec<ProgramReleaseSchedule> = env
             .storage()
             .persistent()
@@ -2376,6 +2404,25 @@ impl ProgramEscrowContract {
             }
 
             if Self::is_schedule_scope_disputed(&env, schedule.schedule_id, &schedule.recipient) {
+                continue;
+            }
+
+            // Re-check the whitelist at release time, not just at schedule
+            // creation: enforcement may have been enabled (or the recipient
+            // blacklisted) after this schedule was already created (Issue
+            // #436). Skip this schedule rather than aborting the whole
+            // batch, mirroring the disputed-schedule check above.
+            if env
+                .storage()
+                .instance()
+                .get(&DataKey::WhitelistEnforced)
+                .unwrap_or(false)
+                && !env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Whitelist(schedule.recipient.clone()))
+                    .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -2496,7 +2543,9 @@ impl ProgramEscrowContract {
         Self::batch_payout(env, recipients, amounts)
     }
 
-    /// Query payout history by recipient with pagination
+    /// Query payout history by recipient with pagination.
+    ///
+    /// This is the canonical implementation shared by the legacy alias below.
     pub fn query_payouts_by_recipient(
         env: Env,
         recipient: Address,
@@ -2745,39 +2794,17 @@ impl ProgramEscrowContract {
         }
     }
 
-    /// Get payouts by recipient
+    /// Backward-compatible alias for [`Self::query_payouts_by_recipient`].
+    ///
+    /// Kept so existing callers can migrate without a second implementation
+    /// of the same payout-history query.
     pub fn get_payouts_by_recipient(
         env: Env,
         recipient: Address,
         offset: u32,
         limit: u32,
     ) -> Vec<PayoutRecord> {
-        let program_data: ProgramData = env
-            .storage()
-            .persistent()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| panic!("Program not initialized"));
-        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
-        let history = program_data.payout_history;
-        let mut results = Vec::new(&env);
-        let mut count = 0u32;
-        let mut skipped = 0u32;
-
-        for i in 0..history.len() {
-            if count >= limit {
-                break;
-            }
-            let record = history.get(i).unwrap();
-            if record.recipient == recipient {
-                if skipped < offset {
-                    skipped += 1;
-                    continue;
-                }
-                results.push_back(record);
-                count += 1;
-            }
-        }
-        results
+        Self::query_payouts_by_recipient(env, recipient, offset, limit)
     }
 
     /// Get a capped page of pending schedules.
@@ -2964,6 +2991,23 @@ impl ProgramEscrowContract {
                     panic!("Dispute in progress");
                 }
 
+                // Re-check the whitelist at release time, not just at
+                // schedule creation (Issue #436).
+                if env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::WhitelistEnforced)
+                    .unwrap_or(false)
+                    && !env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Whitelist(s.recipient.clone()))
+                        .unwrap_or(false)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Recipient not whitelisted");
+                }
+
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
@@ -3044,6 +3088,15 @@ impl ProgramEscrowContract {
 
         let mut schedules = Self::load_program_release_schedules(&env);
         let mut program_data = Self::get_program_info(env.clone());
+
+        // Require the same authorization as the sibling release entrypoints
+        // (release_program_schedule_manual, trigger_program_releases) —
+        // without this, any address could choose the exact release timing
+        // for a due schedule and force gas costs onto whoever watches
+        // schedules, even though the recipient/amount are fixed and can't
+        // be redirected (Issue #435).
+        program_data.authorized_payout_key.require_auth();
+
         let now = env.ledger().timestamp();
         let mut released_schedule: Option<ProgramReleaseSchedule> = None;
 
@@ -3064,6 +3117,23 @@ impl ProgramEscrowContract {
                 {
                     reentrancy_guard::clear_entered(&env);
                     panic!("Dispute in progress");
+                }
+
+                // Re-check the whitelist at release time, not just at
+                // schedule creation (Issue #436).
+                if env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::WhitelistEnforced)
+                    .unwrap_or(false)
+                    && !env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Whitelist(s.recipient.clone()))
+                        .unwrap_or(false)
+                {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Recipient not whitelisted");
                 }
 
                 // Transfer funds

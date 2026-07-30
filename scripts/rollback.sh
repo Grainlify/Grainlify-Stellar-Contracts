@@ -244,6 +244,10 @@ load_rollback_config() {
     : "${SOROBAN_NETWORK:=$NETWORK}"
     : "${DEPLOYER_IDENTITY:=default}"
     : "${CLI_TIMEOUT:=120}"
+    # How long perform_rollback will poll/sleep for a scheduled upgrade's
+    # timelock to elapse before giving up and asking the operator to re-run.
+    # grainlify-core's default delay is 24h — never auto-wait for that long.
+    : "${MAX_AUTO_WAIT_SECONDS:=300}"
 
     ROLLBACK_LOG="${PROJECT_ROOT}/deployments/rollbacks.json"
 
@@ -335,6 +339,102 @@ record_rollback() {
 }
 
 # ------------------------------------------------------------------------------
+# Upgrade Timelock Helpers
+# ------------------------------------------------------------------------------
+#
+# grainlify-core's upgrade() requires a prior schedule_upgrade() call and an
+# elapsed timelock (require_scheduled_upgrade). These helpers query that
+# state via read-only invokes so the rollback flow can account for it instead
+# of failing blind at the upgrade step.
+
+# Read grainlify-core's configured upgrade delay, in seconds.
+# Prints the delay, or "0" if the call fails (contract predates this
+# feature, or the read itself errored) so callers can treat it as "no
+# timelock" rather than crashing.
+query_upgrade_delay() {
+    local cli_cmd
+    cli_cmd=$(get_cli_command)
+
+    local delay
+    if ! delay=$(run_with_timeout "$CLI_TIMEOUT" \
+        $cli_cmd contract invoke \
+        --id "$CONTRACT_ID" \
+        --network "$SOROBAN_NETWORK" \
+        --source "$DEPLOYER_IDENTITY" \
+        -- \
+        get_upgrade_delay 2>/dev/null); then
+        echo "0"
+        return 0
+    fi
+
+    delay=$(echo "$delay" | tr -dc '0-9')
+    echo "${delay:-0}"
+}
+
+# Returns 0 (true) if a scheduled upgrade for $1 (a wasm hash) exists and its
+# timelock has already elapsed — i.e. calling upgrade() right now would
+# succeed without a preceding schedule_upgrade() call.
+query_is_upgrade_ready() {
+    local wasm_hash="$1"
+    local cli_cmd
+    cli_cmd=$(get_cli_command)
+
+    local result
+    result=$($cli_cmd contract invoke \
+        --id "$CONTRACT_ID" \
+        --network "$SOROBAN_NETWORK" \
+        --source "$DEPLOYER_IDENTITY" \
+        -- \
+        is_upgrade_ready \
+        --wasm_hash "$wasm_hash" 2>/dev/null || echo "false")
+
+    [[ "$result" == "true" ]]
+}
+
+# Extracts the executable_at unix timestamp from get_scheduled_upgrade's
+# output. Handles both JSON-object output (newer CLI versions) and plain
+# text, mirroring extract_wasm_hash's fallback approach in
+# verify-deployment.sh, since the exact stellar/soroban CLI return-value
+# format for a struct varies by version.
+extract_executable_at() {
+    local output="$1"
+    local value=""
+
+    if command -v jq &> /dev/null && echo "$output" | jq -e . > /dev/null 2>&1; then
+        value=$(echo "$output" | jq -r '
+            .executable_at // .executableAt // empty
+        ' 2>/dev/null | head -n 1)
+    fi
+
+    if [[ -z "$value" ]]; then
+        value=$(echo "$output" \
+            | grep -Eoi '"?executable_at"?[" :]+([0-9]+)' \
+            | grep -Eo '[0-9]+$' \
+            | head -n 1 || true)
+    fi
+
+    echo "$value"
+}
+
+# Prints the executable_at timestamp of the active scheduled upgrade for
+# $CONTRACT_ID (any hash — this just reads whatever is currently scheduled),
+# or empty string if none is scheduled or the read fails.
+query_scheduled_executable_at() {
+    local cli_cmd
+    cli_cmd=$(get_cli_command)
+
+    local result
+    result=$($cli_cmd contract invoke \
+        --id "$CONTRACT_ID" \
+        --network "$SOROBAN_NETWORK" \
+        --source "$DEPLOYER_IDENTITY" \
+        -- \
+        get_scheduled_upgrade 2>/dev/null || echo "")
+
+    extract_executable_at "$result"
+}
+
+# ------------------------------------------------------------------------------
 # Rollback Execution
 # ------------------------------------------------------------------------------
 
@@ -343,6 +443,34 @@ perform_rollback() {
 
     local cli_cmd
     cli_cmd=$(get_cli_command)
+
+    # Check the timelock BEFORE anything else so the operator sees whether
+    # this rollback can execute immediately, up front — not as a surprise
+    # after they've already committed to it. See issue #488: grainlify-core's
+    # upgrade() requires a prior schedule_upgrade() call and an elapsed
+    # delay (default 24h); discovering that only at failure time is the
+    # worst possible surprise during an active incident.
+    local upgrade_delay upgrade_ready
+    upgrade_delay=$(query_upgrade_delay)
+    if query_is_upgrade_ready "$PREVIOUS_WASM_HASH"; then
+        upgrade_ready="true"
+    else
+        upgrade_ready="false"
+    fi
+
+    echo ""
+    if [[ "$upgrade_ready" == "true" ]]; then
+        log_success "An upgrade to this WASM hash is already scheduled and its timelock has elapsed — rollback can execute immediately."
+    elif [[ "$upgrade_delay" -gt 0 ]]; then
+        log_warn "Configured upgrade delay: ${upgrade_delay}s — this rollback must call schedule_upgrade first and CANNOT take effect until that timelock elapses."
+        if [[ "$upgrade_delay" -le "$MAX_AUTO_WAIT_SECONDS" ]]; then
+            log_warn "Delay is within MAX_AUTO_WAIT_SECONDS (${MAX_AUTO_WAIT_SECONDS}s) — this script will wait it out automatically."
+        else
+            log_warn "Delay exceeds MAX_AUTO_WAIT_SECONDS (${MAX_AUTO_WAIT_SECONDS}s) — this script will schedule the rollback, print the exact time it becomes executable, and exit. Re-run the same command after that time."
+        fi
+    else
+        log_info "No upgrade timelock configured (delay: 0s) — rollback can execute immediately after scheduling."
+    fi
 
     # Display critical warning
     echo ""
@@ -368,6 +496,7 @@ perform_rollback() {
     echo "  Target WASM Hash: $PREVIOUS_WASM_HASH"
     echo "  Network:          $SOROBAN_NETWORK"
     echo "  Source:           $DEPLOYER_IDENTITY"
+    echo "  Upgrade Delay:    ${upgrade_delay}s ($([[ "$upgrade_ready" == "true" ]] && echo "already elapsed" || echo "will start counting once scheduled below"))"
     echo ""
 
     # Mainnet extra warning
@@ -398,9 +527,75 @@ perform_rollback() {
     # Dry run mode
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "[DRY RUN] Would execute the following:"
-        log_warn "  $cli_cmd contract invoke --id $CONTRACT_ID -- upgrade --new_wasm_hash $PREVIOUS_WASM_HASH"
+        if [[ "$upgrade_ready" != "true" ]]; then
+            log_warn "  1. $cli_cmd contract invoke --id $CONTRACT_ID -- schedule_upgrade --wasm_hash $PREVIOUS_WASM_HASH"
+            log_warn "     (then wait out or re-run after the ${upgrade_delay}s timelock)"
+            log_warn "  2. $cli_cmd contract invoke --id $CONTRACT_ID -- upgrade --new_wasm_hash $PREVIOUS_WASM_HASH"
+        else
+            log_warn "  $cli_cmd contract invoke --id $CONTRACT_ID -- upgrade --new_wasm_hash $PREVIOUS_WASM_HASH"
+            log_warn "  (schedule_upgrade already elapsed for this hash — no scheduling step needed)"
+        fi
         log_success "[DRY RUN] Simulation complete"
         return 0
+    fi
+
+    # Schedule the upgrade first, unless it's already scheduled-and-ready for
+    # this exact wasm hash (e.g. an operator pre-scheduled it proactively
+    # ahead of an incident). grainlify-core's upgrade() panics with
+    # "No scheduled upgrade" / "Upgrade timelock not elapsed" without this.
+    if [[ "$upgrade_ready" != "true" ]]; then
+        log_info "Scheduling rollback (schedule_upgrade)..."
+
+        local schedule_result
+        if ! schedule_result=$(run_with_timeout "$CLI_TIMEOUT" \
+            $cli_cmd contract invoke \
+            --id "$CONTRACT_ID" \
+            --network "$SOROBAN_NETWORK" \
+            --source "$DEPLOYER_IDENTITY" \
+            --send=yes \
+            -- \
+            schedule_upgrade \
+            --wasm_hash "$PREVIOUS_WASM_HASH" 2>&1); then
+
+            log_error "schedule_upgrade failed!"
+            log_error "Output: $schedule_result"
+            log_error ""
+            log_error "Possible causes:"
+            log_error "  - Source is not contract admin"
+            log_error "  - Network issues"
+            exit 1
+        fi
+
+        log_success "Rollback scheduled"
+
+        local executable_at now remaining
+        executable_at=$(query_scheduled_executable_at)
+        now=$(date +%s)
+
+        if [[ -n "$executable_at" ]]; then
+            remaining=$(( executable_at - now ))
+            [[ "$remaining" -lt 0 ]] && remaining=0
+            log_info "Executable at: $(date -u -d "@$executable_at" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -r "$executable_at" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "$executable_at (unix)") (in ${remaining}s)"
+        else
+            log_warn "Could not read back executable_at from get_scheduled_upgrade; falling back to the configured delay (${upgrade_delay}s)."
+            remaining="$upgrade_delay"
+        fi
+
+        if [[ "$remaining" -gt "$MAX_AUTO_WAIT_SECONDS" ]]; then
+            log_warn ""
+            log_warn "Timelock exceeds MAX_AUTO_WAIT_SECONDS (${MAX_AUTO_WAIT_SECONDS}s) — not blocking this session for it."
+            log_warn "Re-run this exact command in ${remaining}s (or later) to complete the rollback:"
+            log_warn "  $0 $CONTRACT_ID $PREVIOUS_WASM_HASH -n $NETWORK -s $DEPLOYER_IDENTITY${FORCE:+ --force}"
+            log_success "Rollback scheduled successfully — awaiting timelock, no further action needed until then."
+            return 0
+        fi
+
+        if [[ "$remaining" -gt 0 ]]; then
+            log_info "Waiting ${remaining}s for the timelock to elapse..."
+            sleep "$remaining"
+        fi
+    else
+        log_info "Rollback already scheduled and its timelock has elapsed — skipping schedule_upgrade."
     fi
 
     # Execute rollback (call upgrade with old hash)
@@ -424,6 +619,7 @@ perform_rollback() {
         log_error "  - WASM hash not installed on network"
         log_error "  - Source is not contract admin"
         log_error "  - Network issues"
+        log_error "  - No scheduled upgrade exists for this hash yet, or its timelock hasn't elapsed"
         log_error ""
         log_error "If the WASM hash is not installed, you need the original .wasm file:"
         log_error "  stellar contract install --wasm old_contract.wasm --network $NETWORK"

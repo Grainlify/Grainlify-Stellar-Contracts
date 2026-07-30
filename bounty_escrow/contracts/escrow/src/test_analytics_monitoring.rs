@@ -273,6 +273,38 @@ fn test_escrow_count_increments_on_each_lock() {
     assert_eq!(escrow.get_escrow_count(), 3);
 }
 
+// Regression guard for issue #476: get_escrow_count's name invites reading it
+// as a live/active count, when it's actually the lifetime total (never
+// decreases, includes settled bounties). get_total_bounties_created is an
+// identically-behaved alias with an unambiguous name; this asserts the two
+// never diverge, release/refund included.
+#[test]
+fn test_get_total_bounties_created_matches_get_escrow_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, token_admin) = create_token_contract(&env, &admin);
+    let escrow = create_escrow_contract(&env);
+    escrow.init(&admin, &token.address);
+    token_admin.mint(&depositor, &1_000_000);
+
+    let deadline = env.ledger().timestamp() + 1000;
+
+    assert_eq!(escrow.get_total_bounties_created(), escrow.get_escrow_count());
+
+    escrow.lock_funds(&depositor, &70, &100, &deadline);
+    escrow.lock_funds(&depositor, &71, &100, &deadline);
+    assert_eq!(escrow.get_total_bounties_created(), escrow.get_escrow_count());
+    assert_eq!(escrow.get_total_bounties_created(), 2);
+
+    // Settling a bounty must not decrease either count -- both are lifetime totals.
+    escrow.release_funds(&70, &contributor);
+    assert_eq!(escrow.get_total_bounties_created(), escrow.get_escrow_count());
+    assert_eq!(escrow.get_total_bounties_created(), 2);
+}
+
 #[test]
 fn test_escrow_count_does_not_decrement_after_release() {
     let env = Env::default();
