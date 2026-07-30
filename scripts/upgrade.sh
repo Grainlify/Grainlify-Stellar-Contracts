@@ -379,11 +379,13 @@ perform_upgrade() {
         fi
     fi
 
-    # Dry run mode
+   # Dry run mode
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "[DRY RUN] Would execute the following:"
         log_warn "  1. Install WASM: $cli_cmd contract install --wasm $NEW_WASM_PATH"
-        log_warn "  2. Upgrade contract: $cli_cmd contract invoke --id $CONTRACT_ID -- upgrade --new_wasm_hash <hash>"
+        log_warn "  2. Schedule upgrade: $cli_cmd contract invoke --id $CONTRACT_ID -- schedule_upgrade --wasm_hash <hash>"
+        log_warn "  3. Read back get_scheduled_upgrade to compute executable_at"
+        log_warn "  4. Upgrade contract: $cli_cmd contract invoke --id $CONTRACT_ID -- upgrade --new_wasm_hash <hash>"
         log_success "[DRY RUN] Simulation complete"
         return 0
     fi
@@ -405,8 +407,99 @@ perform_upgrade() {
 
     log_success "New WASM installed: $new_wasm_hash"
 
-    # Step 2: Call upgrade function
-    log_info "Step 2/3: Invoking upgrade function..."
+   # Step 2/4: Schedule the upgrade (grainlify-core enforces a timelock before
+    # 'upgrade' will succeed — see require_scheduled_upgrade in lib.rs)
+    log_info "Step 2/4: Ensuring upgrade is scheduled..."
+
+    local executable_at=""
+    local existing_schedule
+    existing_schedule=$($cli_cmd contract invoke \
+        --id "$CONTRACT_ID" \
+        --network "$SOROBAN_NETWORK" \
+        --source "$DEPLOYER_IDENTITY" \
+        -- \
+        get_scheduled_upgrade 2>/dev/null || true)
+
+    local existing_hash=""
+    if [[ -n "$existing_schedule" ]]; then
+        existing_hash=$(echo "$existing_schedule" | jq -r '.wasm_hash // empty' 2>/dev/null || true)
+    fi
+
+    if [[ -n "$existing_hash" && "$existing_hash" == "$new_wasm_hash" ]]; then
+        # A matching schedule already exists (e.g. this is a re-run after
+        # waiting out the timelock) — don't call schedule_upgrade again, that
+        # would reset the clock. Just read the existing executable_at.
+        log_info "Matching upgrade already scheduled — skipping schedule_upgrade"
+        executable_at=$(echo "$existing_schedule" | jq -r '.executable_at // empty')
+    else
+        local schedule_result
+        if ! schedule_result=$(run_with_timeout "$CLI_TIMEOUT" \
+            $cli_cmd contract invoke \
+            --id "$CONTRACT_ID" \
+            --network "$SOROBAN_NETWORK" \
+            --source "$DEPLOYER_IDENTITY" \
+            --send=yes \
+            -- \
+            schedule_upgrade \
+            --wasm_hash "$new_wasm_hash" 2>&1); then
+
+            log_error "schedule_upgrade invocation failed"
+            log_error "Output: $schedule_result"
+            log_error ""
+            log_error "Possible causes:"
+            log_error "  - Source identity is not the contract admin"
+            log_error "  - Contract does not have a 'schedule_upgrade' function"
+            exit 1
+        fi
+
+        log_success "schedule_upgrade invoked"
+
+        local scheduled_json
+        if ! scheduled_json=$($cli_cmd contract invoke \
+            --id "$CONTRACT_ID" \
+            --network "$SOROBAN_NETWORK" \
+            --source "$DEPLOYER_IDENTITY" \
+            -- \
+            get_scheduled_upgrade 2>&1); then
+            log_error "Could not read back get_scheduled_upgrade after scheduling"
+            log_error "Output: $scheduled_json"
+            exit 1
+        fi
+        executable_at=$(echo "$scheduled_json" | jq -r '.executable_at // empty')
+    fi
+
+    if [[ -z "$executable_at" ]]; then
+        log_warn "Could not determine executable_at from get_scheduled_upgrade output"
+        log_warn "Re-run this script once you've confirmed the timelock has elapsed"
+        exit 0
+    fi
+
+    local now_epoch
+    now_epoch=$(date +%s)
+    local executable_human
+    executable_human=$(date -u -d "@$executable_at" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null \
+        || date -u -r "$executable_at" '+%Y-%m-%d %H:%M:%S UTC')
+
+    if (( now_epoch < executable_at )); then
+        local wait_seconds=$(( executable_at - now_epoch ))
+        log_section "Upgrade Scheduled — Timelock Pending"
+        echo ""
+        echo "  Contract ID:    $CONTRACT_ID"
+        echo "  New WASM Hash:  $new_wasm_hash"
+        echo "  Executable at:  $executable_human ($executable_at)"
+        echo "  Time remaining: ${wait_seconds}s"
+        echo ""
+        echo "  Re-run this exact command after the time above to complete the upgrade:"
+        echo "    $0 $CONTRACT_ID $NEW_WASM_PATH -n $NETWORK -s $DEPLOYER_IDENTITY"
+        echo ""
+        log_info "Exiting — timelock not yet elapsed. Nothing else to do until then."
+        exit 0
+    fi
+
+    log_success "Timelock has elapsed (executable at $executable_human) — proceeding to upgrade"
+
+    # Step 3/4: Call upgrade function
+    log_info "Step 3/4: Invoking upgrade function..."
 
     local upgrade_result
     if ! upgrade_result=$(run_with_timeout "$CLI_TIMEOUT" \
@@ -426,14 +519,15 @@ perform_upgrade() {
         log_error "  - Source identity is not the contract admin"
         log_error "  - Contract does not have an 'upgrade' function"
         log_error "  - Contract upgrade function has different signature"
+        log_error "  - No scheduled upgrade exists yet, or its timelock hasn't elapsed"
         exit 1
     fi
 
     log_success "Upgrade function invoked successfully"
-
     # Step 3: Verify upgrade (optional)
-    if [[ "$SKIP_VERIFY" != "true" ]]; then
-        log_info "Step 3/3: Verifying upgrade..."
+    else
+        log_info "Step 3/3: Verification skipped (--skip-verify)"
+    fi
 
         # Brief pause for state propagation
         sleep 2
@@ -451,7 +545,7 @@ perform_upgrade() {
             log_warn "Manual verification recommended"
         fi
     else
-        log_info "Step 3/3: Verification skipped (--skip-verify)"
+        log_info "Step 4/4: Verification skipped (--skip-verify)"
     fi
 
     # Record the upgrade
