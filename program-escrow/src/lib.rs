@@ -652,6 +652,8 @@ pub enum Error {
     /// proposal approving it (or no governance contract is configured at
     /// all — upgrades fail closed, they are never permitted by default).
     UpgradeNotApproved = 7,
+    /// The requested migration-wrapper program ID does not match this instance.
+    ProgramIdMismatch = 8,
 }
 
 #[contracttype]
@@ -2517,33 +2519,59 @@ impl ProgramEscrowContract {
     }
 
     // ========================================================================
-    // Multi-tenant / Multi-program Migration Wrappers (ignore id for now)
+    // Single-program migration wrappers. The ID is validated so callers cannot
+    // accidentally move funds against a different assumed program context.
     // ========================================================================
 
-    pub fn get_program_info_v2(env: Env, _program_id: String) -> ProgramData {
-        Self::get_program_info(env)
+    fn validate_program_id(env: &Env, program_id: &String) -> Result<(), Error> {
+        let program_data: ProgramData = env
+            .storage()
+            .persistent()
+            .get(&PROGRAM_DATA)
+            .ok_or(Error::ProgramIdMismatch)?;
+        if program_data.program_id != program_id.clone() {
+            return Err(Error::ProgramIdMismatch);
+        }
+        Ok(())
     }
 
-    pub fn lock_program_funds_v2(env: Env, _program_id: String, from: Address, amount: i128) -> ProgramData {
-        Self::lock_program_funds(env, from, amount)
+    /// Read this instance's program after validating its single program ID.
+    pub fn get_program_info_v2(env: Env, program_id: String) -> Result<ProgramData, Error> {
+        Self::validate_program_id(&env, &program_id)?;
+        Ok(Self::get_program_info(env))
     }
 
+    /// Lock funds only when `program_id` matches this single-program instance.
+    pub fn lock_program_funds_v2(
+        env: Env,
+        program_id: String,
+        from: Address,
+        amount: i128,
+    ) -> Result<ProgramData, Error> {
+        Self::validate_program_id(&env, &program_id)?;
+        Ok(Self::lock_program_funds(env, from, amount))
+    }
+
+    /// Pay one recipient only when `program_id` matches this instance.
     pub fn single_payout_v2(
         env: Env,
-        _program_id: String,
+        program_id: String,
         recipient: Address,
         amount: i128,
-    ) -> ProgramData {
-        Self::single_payout(env, recipient, amount)
+    ) -> Result<ProgramData, Error> {
+        Self::validate_program_id(&env, &program_id)?;
+        Ok(Self::single_payout(env, recipient, amount))
     }
 
+    /// Pay multiple recipients only when `program_id` matches this instance.
     pub fn batch_payout_v2(
         env: Env,
-        _program_id: String,
+        program_id: String,
         recipients: Vec<Address>,
         amounts: Vec<i128>,
-    ) -> ProgramData {
-        Self::batch_payout(env, recipients, amounts)
+    ) -> Result<ProgramData, Error> {
+        Self::validate_program_id(&env, &program_id)?;
+        Ok(Self::batch_payout(env, recipients, amounts))
     }
 
     /// Query payout history by recipient with pagination.
@@ -3685,6 +3713,22 @@ mod integration_tests {
         // Verify it exists
         assert!(client.program_exists());
         assert_eq!(client.get_program_count(), 1);
+    }
+
+    #[test]
+    fn test_v2_program_id_mismatch_is_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let backend = Address::generate(&env);
+        let token = Address::generate(&env);
+        let actual_id = String::from_str(&env, "Hackathon2024");
+        let wrong_id = String::from_str(&env, "DifferentProgram");
+        client.initialize_program(&actual_id, &backend, &token);
+
+        let result = client.try_get_program_info_v2(&wrong_id);
+        assert_eq!(result, Err(Ok(Error::ProgramIdMismatch)));
     }
 
     #[test]

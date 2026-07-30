@@ -1,5 +1,14 @@
 # Program Escrow - Implementation Summaries
 
+## Single-program migration wrappers
+
+Each deployed `ProgramEscrowContract` instance owns exactly one `ProgramData`
+record. The `*_v2` compatibility entrypoints accept a `program_id` so callers
+can state which instance they expect to address, but they now validate that ID
+against the initialized record before reading or moving funds. A mismatch
+returns the typed `Error::ProgramIdMismatch`; it never silently operates on the
+instance's other program context.
+
 This document consolidates the implementation summaries for features and fixes implemented in the Program Escrow contract.
 
 ---
