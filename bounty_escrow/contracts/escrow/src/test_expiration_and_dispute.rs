@@ -672,32 +672,34 @@ fn test_admin_can_cancel_expired_claim() {
     assert_eq!(setup.token.balance(&setup.escrow.address), amount);
 }
 
-// Zero-length claim windows (instant expiration)
+// Zero-length claim windows are rejected outright by authorize_claim (#549):
+// a window of 0 would make expires_at equal the creation timestamp, which
+// the recipient's later, separate claim() transaction could never beat.
 #[test]
-fn test_claim_window_zero_prevents_all_claims() {
+fn test_claim_window_zero_rejected_by_authorize_claim() {
     let setup = TestSetup::new();
     let bounty_id = 6;
     let amount = 800;
     let now = setup.env.ledger().timestamp();
     let deadline = now + 1000;
 
-    // Set window to 0 (instant expiration)
+    // Explicitly set window to 0 (instant expiration if it were allowed)
     setup.escrow.set_claim_window(&0);
 
     setup
         .escrow
         .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 
-    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+    let result = setup.escrow.try_authorize_claim(&bounty_id, &setup.contributor);
+    assert_eq!(result, Err(Ok(Error::ClaimWindowNotConfigured)));
 
-    let claim = setup.escrow.get_pending_claim(&bounty_id);
+    // No unclaimable claim was created; escrow is still Locked and can be
+    // recovered by reconfiguring the window and retrying, or by a direct
+    // refund/release once its own deadline passes.
+    let escrow = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, EscrowStatus::Locked);
 
-    // Advance well past the deadline
     setup.env.ledger().set_timestamp(deadline + 1);
-
-    // Admin cancels the zero-window claim
-    setup.escrow.cancel_pending_claim(&bounty_id);
-
     setup.escrow.refund(&bounty_id);
 
     let final_escrow = setup.escrow.get_escrow_info(&bounty_id);

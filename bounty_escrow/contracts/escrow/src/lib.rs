@@ -423,6 +423,12 @@ pub enum Error {
     /// would overflow `i128` or `u32`.  Appended last to preserve
     /// existing discriminant ordering.
     AnalyticsOverflow = 27,
+    /// Returned by authorize_claim when the effective claim_window is 0
+    /// (set_claim_window was never called, or was explicitly called with
+    /// 0) — using it would create a pending claim whose expires_at equals
+    /// its own creation timestamp, which the recipient can never claim in
+    /// a later transaction.
+    ClaimWindowNotConfigured = 28,
 }
 
 #[contracttype]
@@ -1613,6 +1619,12 @@ impl BountyEscrowContract {
     /// Authorize a release as a pending claim instead of immediate transfer.
     /// Admin calls this instead of release_funds when claim period is active.
     /// Beneficiary must call claim() within the window to receive funds.
+    ///
+    /// Requires set_claim_window to have been called first with a nonzero
+    /// value. If the effective claim_window is 0 (never configured, or
+    /// explicitly set to 0), this call fails with
+    /// Error::ClaimWindowNotConfigured instead of creating a pending claim
+    /// that expires at its own creation timestamp and can never be claimed.
     pub fn authorize_claim(env: Env, bounty_id: u64, recipient: Address) -> Result<(), Error> {
 
         if !env.storage().instance().has(&DataKey::Admin) {
@@ -1654,6 +1666,9 @@ impl BountyEscrowContract {
             .instance()
             .get(&DataKey::ClaimWindow)
             .unwrap_or(0);
+        if claim_window == 0 {
+            return Err(Error::ClaimWindowNotConfigured);
+        }
         // Use remaining_amount, not the original amount — a prior
         // partial_release can have already paid some of this escrow out, and
         // claim() blindly transfers whatever this record says. Using the

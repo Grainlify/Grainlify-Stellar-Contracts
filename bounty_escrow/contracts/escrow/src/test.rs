@@ -778,10 +778,12 @@ fn test_claim_does_not_affect_other_bounties() {
     assert_eq!(setup.token.balance(&setup.escrow.address), amount);
 }
 
-/// When no claim window is explicitly set (default 0) authorize_claim creates a
-/// claim that expires immediately (expires_at == now). Any claim() call must fail.
+/// When no claim window is explicitly set (default 0), authorize_claim used
+/// to create a claim that expired immediately (expires_at == now), which
+/// claim() could never successfully redeem. Fixed for #549: authorize_claim
+/// itself now rejects a 0 claim_window outright, so this never gets as far
+/// as creating an unclaimable claim in the first place.
 #[test]
-#[should_panic(expected = "Error(Contract, #22)")] // ClaimExpired
 fn test_authorize_claim_zero_window_expires_immediately() {
     let setup = TestSetup::new();
     let bounty_id = 108_u64;
@@ -793,14 +795,8 @@ fn test_authorize_claim_zero_window_expires_immediately() {
         .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 
     // Do NOT set a claim window — default is 0
-    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
-
-    // Even without time advancing, expires_at == now so claim must fail
-    // Advance by 1 second to make now > expires_at
-    let now = setup.env.ledger().timestamp();
-    setup.env.ledger().set_timestamp(now + 1);
-
-    setup.escrow.claim(&bounty_id);
+    let result = setup.escrow.try_authorize_claim(&bounty_id, &setup.contributor);
+    assert_eq!(result, Err(Ok(Error::ClaimWindowNotConfigured)));
 }
 
 /// Claim at the exact boundary (now == expires_at) must succeed — the window
@@ -871,10 +867,13 @@ fn test_authorize_claim_on_refunded_bounty() {
     setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
 }
 
-/// When set_claim_window has never been called the default window (0) is used.
-/// The pending claim's expires_at must equal the ledger timestamp at auth time.
+/// When set_claim_window has never been called the default window (0) would
+/// previously produce a pending claim whose expires_at equals its own
+/// creation timestamp — unclaimable by the time the recipient's separate
+/// claim() transaction could land. authorize_claim now rejects this case
+/// outright instead of silently creating that unclaimable claim (#549).
 #[test]
-fn test_authorize_claim_default_window_used_when_not_set() {
+fn test_authorize_claim_rejects_when_claim_window_never_configured() {
     let setup = TestSetup::new();
     let bounty_id = 112_u64;
     let amount = 1_000_i128;
@@ -884,11 +883,13 @@ fn test_authorize_claim_default_window_used_when_not_set() {
         .escrow
         .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 
-    let auth_time = setup.env.ledger().timestamp();
-    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+    let result = setup.escrow.try_authorize_claim(&bounty_id, &setup.contributor);
+    assert_eq!(result, Err(Ok(Error::ClaimWindowNotConfigured)));
 
-    let pending = setup.escrow.get_pending_claim(&bounty_id);
-    assert_eq!(pending.expires_at, auth_time);
+    // No pending claim, and escrow remains untouched, ready for a correctly
+    // configured retry or a direct release_funds/refund.
+    let escrow = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, EscrowStatus::Locked);
 }
 
 /// Verifies set_claim_window stores the value and authorize_claim uses it.
