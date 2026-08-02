@@ -541,6 +541,9 @@ pub enum BatchError {
 pub enum Error {
     /// Governance contract version is below the minimum required for admin operations.
     GovernanceVersionTooLow = 4,
+    /// The sum of milestone/release-schedule amounts does not equal the
+    /// program's total funded amount (either under-sum or over-sum).
+    MilestoneSumMismatch = 5,
 }
 
 #[contracttype]
@@ -2062,6 +2065,120 @@ impl ProgramEscrowContract {
         schedule
     }
 
+    /// Configure a full set of release milestones for a program in a single call.
+    ///
+    /// This is the milestone-configuration entry point: it validates that the
+    /// sum of every `amounts` entry exactly equals the program's total funded
+    /// amount (`total_funds`) *before* creating any schedule entries. Use this
+    /// (instead of repeated calls to [`Self::create_program_release_schedule`])
+    /// whenever the full milestone breakdown for a program's funds is known
+    /// up front — at initial configuration or when re-configuring/updating the
+    /// milestone breakdown — so that milestones can never be committed in a
+    /// way that leaves funds stuck (under-sum) or promises more than is
+    /// actually escrowed (over-sum).
+    ///
+    /// # Arguments
+    /// * `amounts` - Milestone amounts, one per recipient/timestamp pair. Each must be > 0.
+    /// * `release_timestamps` - Timestamp at/after which each milestone unlocks.
+    /// * `recipients` - Recipient address for each milestone.
+    ///
+    /// # Errors
+    /// Returns `Error::MilestoneSumMismatch` if:
+    /// * the sum of `amounts` overflows `i128` while being computed, or
+    /// * the sum of `amounts` does not exactly equal the program's `total_funds`.
+    ///
+    /// The sum is computed with checked (non-overflowing) arithmetic, so an
+    /// overflow is reported as the same typed error rather than panicking.
+    ///
+    /// # Panics
+    /// * `"Program not initialized"` — if no program has been set up yet.
+    /// * `"Milestone arrays must have matching lengths"` — if `amounts`,
+    ///   `release_timestamps`, and `recipients` are not the same length.
+    /// * `"At least one milestone is required"` — if `amounts` is empty.
+    /// * `"Milestone amount must be greater than zero"` — if any amount is <= 0.
+    ///
+    /// # Returns
+    /// The newly created `ProgramReleaseSchedule` entries, in the same order
+    /// as the input vectors.
+    pub fn create_program_release_schedules(
+        env: Env,
+        amounts: Vec<i128>,
+        release_timestamps: Vec<u64>,
+        recipients: Vec<Address>,
+    ) -> Result<Vec<ProgramReleaseSchedule>, Error> {
+        let program_data: ProgramData = env
+            .storage()
+            .persistent()
+            .get(&PROGRAM_DATA)
+            .unwrap_or_else(|| panic!("Program not initialized"));
+        Self::bump_persistent_symbol_ttl(&env, &PROGRAM_DATA);
+
+        program_data.authorized_payout_key.require_auth();
+
+        let milestone_count = amounts.len();
+        if milestone_count != release_timestamps.len() || milestone_count != recipients.len() {
+            panic!("Milestone arrays must have matching lengths");
+        }
+        if milestone_count == 0 {
+            panic!("At least one milestone is required");
+        }
+
+        // Sum milestone amounts with checked arithmetic so validating the sum
+        // never itself introduces an overflow risk.
+        let mut sum: i128 = 0;
+        for amount in amounts.iter() {
+            if amount <= 0 {
+                panic!("Milestone amount must be greater than zero");
+            }
+            sum = match sum.checked_add(amount) {
+                Some(next) => next,
+                None => return Err(Error::MilestoneSumMismatch),
+            };
+        }
+
+        if sum != program_data.total_funds {
+            return Err(Error::MilestoneSumMismatch);
+        }
+
+        let mut schedules: Vec<ProgramReleaseSchedule> = env
+            .storage()
+            .persistent()
+            .get(&SCHEDULES)
+            .unwrap_or_else(|| Vec::new(&env));
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
+
+        let mut next_schedule_id: u64 = env
+            .storage()
+            .instance()
+            .get(&NEXT_SCHEDULE_ID)
+            .unwrap_or(1_u64);
+
+        let mut created: Vec<ProgramReleaseSchedule> = Vec::new(&env);
+        for i in 0..milestone_count {
+            let schedule = ProgramReleaseSchedule {
+                schedule_id: next_schedule_id,
+                recipient: recipients.get(i).unwrap(),
+                amount: amounts.get(i).unwrap(),
+                release_timestamp: release_timestamps.get(i).unwrap(),
+                released: false,
+                released_at: None,
+                released_by: None,
+            };
+            schedules.push_back(schedule.clone());
+            created.push_back(schedule);
+            next_schedule_id += 1;
+        }
+
+        env.storage().persistent().set(&SCHEDULES, &schedules);
+        Self::bump_persistent_symbol_ttl(&env, &SCHEDULES);
+        env.storage()
+            .instance()
+            .set(&NEXT_SCHEDULE_ID, &next_schedule_id);
+
+        Self::bump_instance_ttl(&env);
+        Ok(created)
+    }
+
     /// Trigger all due schedules where `now >= release_timestamp`.
     pub fn trigger_program_releases(env: Env) -> u32 {
         // Reentrancy guard: Check and set
@@ -3014,6 +3131,144 @@ mod integration_tests {
         assert_eq!(pending.len(), 2);
 
         // Event verification can be added later - focusing on core functionality
+    }
+
+    // ========================================================================
+    // Milestone Amount Sum Validation Tests (create_program_release_schedules)
+    // ========================================================================
+
+    #[test]
+    fn test_milestone_exact_sum_configuration_succeeds() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let winner1 = Address::generate(&env);
+        let winner2 = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+        let amount1 = 600_0000000;
+        let amount2 = 400_0000000;
+        let total_amount = amount1 + amount2;
+
+        env.mock_all_auths();
+
+        let token_client = create_token_contract(&env, &authorized_key);
+        client.initialize_program(&program_id, &authorized_key, &token_client.address);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
+
+        let mut amounts: Vec<i128> = Vec::new(&env);
+        amounts.push_back(amount1);
+        amounts.push_back(amount2);
+
+        let mut timestamps: Vec<u64> = Vec::new(&env);
+        timestamps.push_back(1000);
+        timestamps.push_back(2000);
+
+        let mut recipients: Vec<Address> = Vec::new(&env);
+        recipients.push_back(winner1.clone());
+        recipients.push_back(winner2.clone());
+
+        // Sum of milestone amounts exactly equals the total program amount,
+        // so configuration should succeed.
+        let created = client.create_program_release_schedules(&amounts, &timestamps, &recipients);
+        assert_eq!(created.len(), 2);
+        assert_eq!(created.get(0).unwrap().amount, amount1);
+        assert_eq!(created.get(1).unwrap().amount, amount2);
+
+        let all_schedules = client.get_all_prog_release_schedules();
+        assert_eq!(all_schedules.len(), 2);
+    }
+
+    #[test]
+    fn test_milestone_under_sum_configuration_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let winner1 = Address::generate(&env);
+        let winner2 = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+        let amount1 = 600_0000000;
+        let amount2 = 300_0000000; // Sum is less than total_amount below.
+        let total_amount = 1000_0000000;
+
+        env.mock_all_auths();
+
+        let token_client = create_token_contract(&env, &authorized_key);
+        client.initialize_program(&program_id, &authorized_key, &token_client.address);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
+
+        let mut amounts: Vec<i128> = Vec::new(&env);
+        amounts.push_back(amount1);
+        amounts.push_back(amount2);
+
+        let mut timestamps: Vec<u64> = Vec::new(&env);
+        timestamps.push_back(1000);
+        timestamps.push_back(2000);
+
+        let mut recipients: Vec<Address> = Vec::new(&env);
+        recipients.push_back(winner1.clone());
+        recipients.push_back(winner2.clone());
+
+        // Under-sum: milestone amounts sum to less than the total program
+        // amount, which would leave funds stuck. Must be rejected.
+        let result = client.try_create_program_release_schedules(&amounts, &timestamps, &recipients);
+        assert_eq!(result, Err(Ok(Error::MilestoneSumMismatch)));
+
+        // No schedules should have been created on the rejected attempt.
+        let all_schedules = client.get_all_prog_release_schedules();
+        assert_eq!(all_schedules.len(), 0);
+    }
+
+    #[test]
+    fn test_milestone_over_sum_configuration_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let authorized_key = Address::generate(&env);
+        let winner1 = Address::generate(&env);
+        let winner2 = Address::generate(&env);
+        let program_id = String::from_str(&env, "Hackathon2024");
+        let amount1 = 700_0000000;
+        let amount2 = 500_0000000; // Sum exceeds total_amount below.
+        let total_amount = 1000_0000000;
+
+        env.mock_all_auths();
+
+        let token_client = create_token_contract(&env, &authorized_key);
+        client.initialize_program(&program_id, &authorized_key, &token_client.address);
+        let tokenadmin = token::StellarAssetClient::new(&env, &token_client.address);
+        tokenadmin.mint(&authorized_key, &total_amount);
+        client.lock_program_funds(&authorized_key, &total_amount);
+
+        let mut amounts: Vec<i128> = Vec::new(&env);
+        amounts.push_back(amount1);
+        amounts.push_back(amount2);
+
+        let mut timestamps: Vec<u64> = Vec::new(&env);
+        timestamps.push_back(1000);
+        timestamps.push_back(2000);
+
+        let mut recipients: Vec<Address> = Vec::new(&env);
+        recipients.push_back(winner1.clone());
+        recipients.push_back(winner2.clone());
+
+        // Over-sum: milestone amounts sum to more than the total program
+        // amount, which would over-commit funds that cannot be paid out.
+        // Must be rejected.
+        let result = client.try_create_program_release_schedules(&amounts, &timestamps, &recipients);
+        assert_eq!(result, Err(Ok(Error::MilestoneSumMismatch)));
+
+        // No schedules should have been created on the rejected attempt.
+        let all_schedules = client.get_all_prog_release_schedules();
+        assert_eq!(all_schedules.len(), 0);
     }
 
     #[test]
