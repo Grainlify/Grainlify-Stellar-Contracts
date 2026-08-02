@@ -82,6 +82,55 @@ Before a live deployment, confirm the exact `.wasm` path and record the commit S
 
 ## Deploy and initialize
 
+> ### ⚠️ Always deploy and initialize in one invocation
+>
+> **Do not deploy first and initialize as a separate step.** The admin
+> bootstrap entrypoints — `bounty_escrow::init`, `program-escrow::initialize_contract`
+> and `program-escrow::setadmin` — are guarded only by "has this already been
+> called". Between the deploy transaction and a later initialization
+> transaction there is a window in which **any observer of the public network
+> can front-run you and claim the admin role permanently**.
+>
+> Each contract requires the incoming admin address to authorize its own
+> installation, so an attacker cannot install an address *you* control. That
+> raises the bar but **does not close the race**: an attacker who names an
+> address *they* control and signs for it still wins.
+>
+> Losing the race is effectively unrecoverable:
+>
+> | Contract | Recovery |
+> | --- | --- |
+> | `bounty_escrow` | **None.** `init` is the only writer of the admin key and there is no rotation entrypoint. |
+> | `program-escrow` | Only `propose_admin` → `accept_admin`, which the **current** admin must initiate. If an attacker holds it, they must cooperate. |
+>
+> The admin gates pausing, fee configuration, rate limits, whitelists and
+> governance linkage — and in `bounty_escrow`, the token address the entire
+> contract's accounting is denominated in.
+>
+> **Do this:**
+>
+> ```bash
+> ./scripts/deploy.sh <wasm_file> -n <network> -N <name> -- --admin G... --token C...
+> ```
+>
+> **Not this:**
+>
+> ```bash
+> ./scripts/deploy.sh <wasm_file>          # deployed, admin unclaimed
+> stellar contract invoke --id <id> -- init --admin G...   # racing an attacker
+> ```
+>
+> If a contract does end up deployed but uninitialized, treat it as
+> compromised until proven otherwise: initialize immediately, then **confirm
+> the stored admin is yours** (`getadmin` on `program-escrow`,
+> `get_admin_audit_view` on `bounty_escrow`) **before funding it**. If it is
+> not yours, abandon the contract and redeploy — there is no way to evict an
+> illegitimate admin.
+>
+> A permanent fix requires deploy-time initialization (constructor arguments
+> passed at deploy rather than a separate `contract invoke -- init`), which is
+> not available on the pinned `soroban-sdk 21.0.0`. Tracked in issue #491.
+
 Preferred script:
 
 ```bash
@@ -134,6 +183,13 @@ What the script does:
 
 If init fails after deploy, the contract id is still printed and the deployment may already be in the registry. Record the failure, verify the deployed contract manually, and either run the correct `init` invocation manually or decide whether a fresh deploy is required.
 
+**This is exactly the race window described above.** From the moment the deploy
+succeeds until an initialization transaction lands, the admin role is unclaimed
+and an attacker can take it. Re-run `init` immediately, then verify the stored
+admin is the address you intended before funding the contract. Because the
+initialization is a separate transaction here, a fresh deploy is the safer
+choice whenever the contract has not yet been funded.
+
 ## Verify a deployment
 
 Preferred script:
@@ -154,7 +210,7 @@ Common options:
 | `--expected-admin <address>` | Compare the admin getter result with an expected address. |
 | `--expected-wasm <path>` | Calculate SHA-256 for a local WASM artifact and compare it with the deployed WASM hash. |
 | `--expected-wasm-hash <hash>` | Compare the deployed WASM hash with a known expected hash. |
-| `--smoke-functions <list>` | Comma-separated read-only functions to call. Defaults to `get_version,get_admin,get_pause_flags`. |
+| `--smoke-functions <list>` | Comma-separated read-only functions to call. Override as needed for contract-specific view names such as `program-escrow` (`get_version,getadmin,get_pause_flags`). |
 | `--skip-smoke` | Skip the default read-only smoke checks. |
 | `--json` | Emit machine-readable JSON. |
 | `-v, --verbose` | Enable debug logs. |
@@ -170,8 +226,9 @@ Examples:
 ```
 
 By default, verification now performs the primary `--function` check and read-only
-smoke calls for `get_version`, `get_admin`, and `get_pause_flags`. Use
-`--smoke-functions` for contracts with a different view surface, or `--skip-smoke`
+smoke calls for version, admin, and pause-flag getters. Use `--smoke-functions`
+for contracts with a different view surface, including `program-escrow`, which
+exposes `getadmin`, or use `--skip-smoke`
 when verifying a minimal contract that does not expose those getters. When a WASM
 artifact or expected hash is provided, the script reads the deployed hash with
 `stellar contract info hash --contract-id` and fails the verification if the
@@ -229,6 +286,19 @@ What the script does:
 5. Calls `upgrade --new_wasm_hash <hash>` on the contract.
 6. Unless `--skip-verify` is set, calls `get_version` to check responsiveness.
 7. Appends an upgrade entry to `deployments/upgrades.json`.
+
+### Governance approval prerequisite for bounty_escrow and program-escrow
+
+For `bounty_escrow` and `program-escrow`, step 5 above (`upgrade --new_wasm_hash <hash>`) does not succeed on its own once the WASM is installed and the admin identity signs. Both contracts gate their `upgrade()` entrypoint on `governance_integration::check_upgrade_approval`, which fails closed:
+
+- A `grainlify-core` governance contract address must already be configured (readable via `get_governance_contract`), and the configured minimum governance version must be met (`get_min_governance_version`).
+- A `grainlify-core` governance proposal approving the **exact** `new_wasm_hash` you are about to install must already have been created, voted on, approved, finalized, and executed past its execution delay.
+
+If either condition is not met, `upgrade --new_wasm_hash <hash>` returns `UpgradeNotApproved` and the upgrade does not proceed, regardless of whether the source identity is a valid admin.
+
+Before running `scripts/upgrade.sh` against `bounty_escrow` or `program-escrow`, drive the governance proposal for the target `new_wasm_hash` to completion first. See `docs/GOVERNANCE_INTEGRATION.md` / `docs/grainlify-core/GOVERNANCE.md` for how to create, vote on, finalize, and execute that proposal.
+
+**This is a different mechanism from grainlify-core's own upgrade path.** `grainlify-core` itself upgrades through a separate single-admin/multisig timelock (`schedule_upgrade` / `is_upgrade_ready` / `execute_upgrade`), not through the governance-proposal gate described above. That timelock path is unrelated to this section and is tracked separately (see issues #480/#488 for gaps in `scripts/upgrade.sh` and `scripts/rollback.sh` calling `schedule_upgrade`). Completing one does not satisfy the other.
 
 The older `scripts/upgrade_contract.sh` is a thin helper that uploads a WASM with `soroban contract upload` and calls the same `upgrade --new_wasm_hash` entrypoint. Prefer `scripts/upgrade.sh` for reviewed operations because it includes config loading, dry-run mode, mainnet confirmation, verification, and registry logging.
 
@@ -388,6 +458,8 @@ Before any mainnet deploy, upgrade, or rollback:
 - Confirm `SOROBAN_NETWORK_PASSPHRASE` is `Public Global Stellar Network ; September 2015`.
 - Confirm `DEPLOYER_IDENTITY` is the mainnet identity and has enough XLM.
 - Confirm admin addresses, token addresses, oracle addresses, and fee values.
+- Confirm the init arguments are passed in the **same** `deploy.sh` invocation. Never deploy to mainnet and initialize as a separate step — see the race warning under "Deploy and initialize".
+- Immediately after deploy, confirm the stored admin is yours (`getadmin` / `get_admin_audit_view`) **before funding the contract**.
 - Back up existing registry files.
 - Capture the old WASM hash before upgrade.
 - Confirm rollback hash availability and whether the previous WASM is installed on network.
@@ -412,6 +484,7 @@ Do not use `--force` on mainnet unless an incident commander explicitly approves
 | Network connectivity fails | RPC URL, passphrase, or network name is wrong. | Check the selected config file and retry against the correct network. |
 | Deploy succeeds but init fails | Init args are wrong or the contract does not support the expected init call. | Keep the contract id, review args, run manual init if safe, and document the failure in the registry notes. |
 | Upgrade invocation fails | Source is not admin, new WASM hash is invalid, or contract lacks `upgrade`. | Confirm admin identity, install hash, and contract upgrade interface before retrying. |
+| Upgrade fails with `UpgradeNotApproved` | For `bounty_escrow`/`program-escrow`: no `grainlify-core` governance contract is configured, the configured minimum governance version is not met, or no executed governance proposal approves this exact `new_wasm_hash`. | Confirm `get_governance_contract` and `get_min_governance_version` are set as expected, then confirm a governance proposal approving this exact wasm hash was created, voted, finalized, and executed past its delay. See `docs/GOVERNANCE_INTEGRATION.md`. Do not confuse this with grainlify-core's own `schedule_upgrade` timelock. |
 | Post-upgrade verification warns about `get_version` | The contract may not expose `get_version`. | Run `verify-deployment.sh -f <known_read_function>` or perform manual read checks. |
 | Rollback fails because hash is not installed | Previous WASM hash is not available on network. | Install the old WASM first, then rerun rollback using the installed hash. |
 | Rollback succeeds but behavior is broken | Contract state may be incompatible with old code. | Stop writes, run verification, inspect storage expectations, and plan manual data migration. |
@@ -420,10 +493,11 @@ Do not use `--force` on mainnet unless an incident commander explicitly approves
 
 1. Build: `cargo build --target wasm32-unknown-unknown --release`
 2. Dry-run deploy: `./scripts/deploy.sh <wasm> -n <network> --dry-run`
-3. Deploy and optionally init: `./scripts/deploy.sh <wasm> -n <network> -N <name> -- [init args]`
-4. Verify: `./scripts/verify-deployment.sh <contract_id> -n <network>`
-5. Save registry files and deployment output.
-6. Dry-run upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> --dry-run`
-7. Upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> -s <admin_identity>`
-8. Verify again with `verify-deployment.sh`.
-9. If rollback is needed, find `old_wasm_hash`, run `rollback.sh --dry-run`, then execute rollback only after confirming state compatibility risk.
+3. Deploy **and init in the same invocation**: `./scripts/deploy.sh <wasm> -n <network> -N <name> -- <init args>` — do not split these into two transactions (see the race warning under "Deploy and initialize").
+4. Confirm the stored admin is the address you intended, before funding: `getadmin` (`program-escrow`) or `get_admin_audit_view` (`bounty_escrow`).
+5. Verify: `./scripts/verify-deployment.sh <contract_id> -n <network>`
+6. Save registry files and deployment output.
+7. Dry-run upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> --dry-run`
+8. Upgrade: `./scripts/upgrade.sh <contract_id> <new_wasm> -n <network> -s <admin_identity>`
+9. Verify again with `verify-deployment.sh`.
+10. If rollback is needed, find `old_wasm_hash`, run `rollback.sh --dry-run`, then execute rollback only after confirming state compatibility risk.

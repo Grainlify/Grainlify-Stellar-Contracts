@@ -51,6 +51,63 @@ export interface ProgramReleaseSchedule {
   released: boolean;
 }
 
+/** Configuration for the circuit breaker. */
+export interface CircuitBreakerConfig {
+  /** Count of consecutive errors required to open the circuit. */
+  failure_threshold: number;
+  /** Count of consecutive successes required to close the circuit in half-open state. */
+  success_threshold: number;
+  /** Maximum number of records in the error log. */
+  max_error_log: number;
+}
+
+/** Possible states for the circuit breaker. */
+export type CircuitState = 'Closed' | 'Open' | 'HalfOpen';
+
+/** Current status snapshot of the circuit breaker. */
+export interface CircuitBreakerStatus {
+  /** The state of the circuit breaker. */
+  state: CircuitState;
+  /** Number of consecutive failures in closed state. */
+  failure_count: number;
+  /** Number of consecutive successes in half-open state. */
+  success_count: number;
+  /** Timestamp of the last recorded failure. */
+  last_failure_timestamp: bigint;
+  /** Timestamp of when the circuit was opened. */
+  opened_at: bigint;
+}
+
+/** Contract-wide health snapshot returned by health_check(). */
+export interface HealthStatus {
+  is_healthy: boolean;
+  last_operation: bigint;
+  total_operations: bigint;
+  contract_version: string;
+}
+
+/** Aggregated monitoring analytics returned by get_monitoring_analytics(). */
+export interface ProgramAnalytics {
+  total_locked: bigint;
+  total_released: bigint;
+  total_payouts: number;
+  active_programs: number;
+  operation_count: number;
+}
+
+/** Lifecycle status of a dispute. */
+export type DisputeStatus = 'None' | 'Open' | 'Resolved' | 'Cancelled';
+
+/** Record stored on-chain for an active or historical dispute. */
+export interface DisputeRecord {
+  opened_by: string;
+  opened_at: number;
+  reason: string;
+  status: DisputeStatus;
+  resolved_by?: string;
+  resolved_at?: number;
+}
+
 /**
  * Client for interacting with the ProgramEscrow Soroban contract
  */
@@ -269,6 +326,249 @@ export class ProgramEscrowClient {
         sourceKeypair
       );
       return Number(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+
+  // ==========================================================================
+  // Dispute resolution
+  // ==========================================================================
+
+  /** Open a program-wide dispute, blocking all payouts and releases. Admin-only. */
+  async openDispute(reason: string, sourceKeypair: Keypair): Promise<void> {
+    try {
+      await this.invokeContract('open_dispute', [reason], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Resolve the currently open program-wide dispute, re-enabling payouts. Admin-only. */
+  async resolveDispute(sourceKeypair: Keypair): Promise<void> {
+    try {
+      await this.invokeContract('resolve_dispute', [], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Cancel the currently open program-wide dispute, re-enabling payouts. Admin-only. */
+  async cancelDispute(sourceKeypair: Keypair): Promise<void> {
+    try {
+      await this.invokeContract('cancel_dispute', [], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Get the current or most recent program-wide dispute record, if any. */
+  async getDispute(): Promise<DisputeRecord | undefined> {
+    try {
+      const result = await this.invokeContract('get_dispute', []);
+      return (result ?? undefined) as DisputeRecord | undefined;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Whether a program-wide dispute is currently open. */
+  async isDisputed(): Promise<boolean> {
+    try {
+      const result = await this.invokeContract('is_disputed', []);
+      return Boolean(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Whether a global or recipient-scoped dispute currently blocks this recipient. */
+  async isRecipientDisputed(recipient: string): Promise<boolean> {
+    this.validateAddress(recipient, 'recipient');
+    try {
+      return await this.invokeContract('is_recipient_disputed', [recipient]);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Whether a global or schedule-scoped dispute currently blocks this release schedule. */
+  async isScheduleDisputed(scheduleId: bigint): Promise<boolean> {
+    try {
+      return await this.invokeContract('is_schedule_disputed', [scheduleId]);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  // ==========================================================================
+  // Whitelist management
+  // ==========================================================================
+
+  /** Add or remove an address from the anti-abuse whitelist. Admin-only. */
+  async setWhitelist(
+    address: string,
+    whitelisted: boolean,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(address, 'address');
+    try {
+      await this.invokeContract('set_whitelist', [address, whitelisted], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Whether an address is currently whitelisted. */
+  async isWhitelisted(address: string): Promise<boolean> {
+    this.validateAddress(address, 'address');
+    try {
+      return await this.invokeContract('is_whitelisted', [address]);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Enable or disable whitelist enforcement contract-wide. Admin-only. */
+  async setWhitelistEnforced(enabled: boolean, sourceKeypair: Keypair): Promise<void> {
+    try {
+      await this.invokeContract('set_whitelist_enforced', [enabled], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  // ==========================================================================
+  // Circuit breaker admin controls
+  // ==========================================================================
+
+  /** Register or rotate the circuit breaker admin address. */
+  async setCircuitAdmin(
+    newAdmin: string,
+    caller: string | null,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(newAdmin, 'newAdmin');
+    try {
+      await this.invokeContract('set_circuitadmin', [newAdmin, caller], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Reset the circuit breaker (Open -> HalfOpen -> Closed). Circuit-admin only. */
+  async resetCircuitBreaker(caller: string, sourceKeypair: Keypair): Promise<void> {
+    this.validateAddress(caller, 'caller');
+    try {
+      await this.invokeContract('reset_circuit_breaker', [caller], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Update circuit breaker thresholds. Circuit-admin only. */
+  async configureCircuitBreaker(
+    failureThreshold: number,
+    successThreshold: number,
+    maxErrorLog: number,
+    caller: string,
+    sourceKeypair: Keypair
+  ): Promise<void> {
+    this.validateAddress(caller, 'caller');
+    try {
+      await this.invokeContract(
+        'configure_circuit_breaker',
+        [caller, failureThreshold, successThreshold, maxErrorLog],
+        sourceKeypair
+      );
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Immediately open the circuit, blocking all payout/release operations. Circuit-admin only. */
+  async emergencyOpenCircuit(caller: string, sourceKeypair: Keypair): Promise<void> {
+    this.validateAddress(caller, 'caller');
+    try {
+      await this.invokeContract('emergency_open_circuit', [caller], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Get the current circuit breaker status snapshot. */
+  async getCircuitStatus(): Promise<CircuitBreakerStatus> {
+    try {
+      const result = await this.invokeContract('get_circuit_status', []);
+      return result as CircuitBreakerStatus;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  // ==========================================================================
+  // Governance integration
+  // ==========================================================================
+
+  /** Set the governance contract address used for version-gated admin operations. Admin-only. */
+  async setGovernanceContract(governanceAddress: string, sourceKeypair: Keypair): Promise<void> {
+    this.validateAddress(governanceAddress, 'governanceAddress');
+    try {
+      await this.invokeContract('set_governance_contract', [governanceAddress], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Get the configured governance contract address, if any. */
+  async getGovernanceContract(): Promise<string | null> {
+    try {
+      const result = await this.invokeContract('get_governance_contract', []);
+      return result as string | null;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Set the minimum governance contract version required for gated admin operations. Admin-only. */
+  async setMinGovernanceVersion(minVersion: number, sourceKeypair: Keypair): Promise<void> {
+    try {
+      await this.invokeContract('set_min_governance_version', [minVersion], sourceKeypair);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Get the configured minimum governance version (0 if unset). */
+  async getMinGovernanceVersion(): Promise<number> {
+    try {
+      const result = await this.invokeContract('get_min_governance_version', []);
+      return Number(result);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  // ==========================================================================
+  // Monitoring / analytics
+  // ==========================================================================
+
+  /** Get the current contract health snapshot. */
+  async healthCheck(): Promise<HealthStatus> {
+    try {
+      const result = await this.invokeContract('health_check', []);
+      return result as HealthStatus;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /** Get aggregated monitoring analytics across all programs. */
+  async getMonitoringAnalytics(): Promise<ProgramAnalytics> {
+    try {
+      const result = await this.invokeContract('get_monitoring_analytics', []);
+      return result as ProgramAnalytics;
     } catch (error) {
       throw this.handleError(error);
     }

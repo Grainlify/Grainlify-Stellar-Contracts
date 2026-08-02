@@ -778,10 +778,12 @@ fn test_claim_does_not_affect_other_bounties() {
     assert_eq!(setup.token.balance(&setup.escrow.address), amount);
 }
 
-/// When no claim window is explicitly set (default 0) authorize_claim creates a
-/// claim that expires immediately (expires_at == now). Any claim() call must fail.
+/// When no claim window is explicitly set (default 0), authorize_claim used
+/// to create a claim that expired immediately (expires_at == now), which
+/// claim() could never successfully redeem. Fixed for #549: authorize_claim
+/// itself now rejects a 0 claim_window outright, so this never gets as far
+/// as creating an unclaimable claim in the first place.
 #[test]
-#[should_panic(expected = "Error(Contract, #22)")] // ClaimExpired
 fn test_authorize_claim_zero_window_expires_immediately() {
     let setup = TestSetup::new();
     let bounty_id = 108_u64;
@@ -793,14 +795,8 @@ fn test_authorize_claim_zero_window_expires_immediately() {
         .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 
     // Do NOT set a claim window — default is 0
-    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
-
-    // Even without time advancing, expires_at == now so claim must fail
-    // Advance by 1 second to make now > expires_at
-    let now = setup.env.ledger().timestamp();
-    setup.env.ledger().set_timestamp(now + 1);
-
-    setup.escrow.claim(&bounty_id);
+    let result = setup.escrow.try_authorize_claim(&bounty_id, &setup.contributor);
+    assert_eq!(result, Err(Ok(Error::ClaimWindowNotConfigured)));
 }
 
 /// Claim at the exact boundary (now == expires_at) must succeed — the window
@@ -871,10 +867,13 @@ fn test_authorize_claim_on_refunded_bounty() {
     setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
 }
 
-/// When set_claim_window has never been called the default window (0) is used.
-/// The pending claim's expires_at must equal the ledger timestamp at auth time.
+/// When set_claim_window has never been called the default window (0) would
+/// previously produce a pending claim whose expires_at equals its own
+/// creation timestamp — unclaimable by the time the recipient's separate
+/// claim() transaction could land. authorize_claim now rejects this case
+/// outright instead of silently creating that unclaimable claim (#549).
 #[test]
-fn test_authorize_claim_default_window_used_when_not_set() {
+fn test_authorize_claim_rejects_when_claim_window_never_configured() {
     let setup = TestSetup::new();
     let bounty_id = 112_u64;
     let amount = 1_000_i128;
@@ -884,11 +883,13 @@ fn test_authorize_claim_default_window_used_when_not_set() {
         .escrow
         .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 
-    let auth_time = setup.env.ledger().timestamp();
-    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+    let result = setup.escrow.try_authorize_claim(&bounty_id, &setup.contributor);
+    assert_eq!(result, Err(Ok(Error::ClaimWindowNotConfigured)));
 
-    let pending = setup.escrow.get_pending_claim(&bounty_id);
-    assert_eq!(pending.expires_at, auth_time);
+    // No pending claim, and escrow remains untouched, ready for a correctly
+    // configured retry or a direct release_funds/refund.
+    let escrow = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, EscrowStatus::Locked);
 }
 
 /// Verifies set_claim_window stores the value and authorize_claim uses it.
@@ -1960,4 +1961,226 @@ fn test_all_event_types_carry_v2_version() {
         }
     }
     assert!(v2_count >= 8, "expected at least 8 events with version=2, got {}", v2_count);
+}
+
+#[test]
+fn test_authorize_claim_pending_exists_rejection() {
+    let setup = TestSetup::new();
+    let bounty_id = 900;
+    let amount = 1500;
+    let deadline = setup.env.ledger().timestamp() + 10_000;
+
+    setup.escrow.set_claim_window(&500);
+
+    // 1. Lock funds
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // 2. Authorize the first claim
+    setup.escrow.authorize_claim(&bounty_id, &setup.contributor);
+
+    // Fetch the pending claim to check regression later
+    let initial_claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(initial_claim.recipient, setup.contributor);
+    assert_eq!(initial_claim.amount, amount);
+
+    // 3. Attempt to authorize another claim on the same bounty before the first is resolved.
+    // This should fail with Error::PendingClaimExists.
+    let new_contributor = Address::generate(&setup.env);
+    let result = setup.escrow.try_authorize_claim(&bounty_id, &new_contributor);
+    assert_eq!(result, Err(Ok(Error::PendingClaimExists)));
+
+    // Regression check: original pending claim's recipient and amount fields must be unchanged.
+    let unchanged_claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(unchanged_claim.recipient, setup.contributor);
+    assert_eq!(unchanged_claim.amount, amount);
+    assert_eq!(unchanged_claim.expires_at, initial_claim.expires_at);
+
+    // 4. Resolve the first claim (e.g., by cancelling it)
+    setup.escrow.cancel_pending_claim(&bounty_id);
+
+    // 5. Prove that a fresh authorize_claim call on the same bounty succeeds again
+    setup.escrow.authorize_claim(&bounty_id, &new_contributor);
+    let new_claim = setup.escrow.get_pending_claim(&bounty_id);
+    assert_eq!(new_claim.recipient, new_contributor);
+    assert_eq!(new_claim.amount, amount);
+}
+
+// =============================================================================
+// Deadline validation tests (lock_funds / batch_lock_funds)
+// =============================================================================
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_past_deadline_rejected() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    setup.env.ledger().set_timestamp(100);
+    let past_deadline = 99u64; // deadline in the past
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &past_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_zero_deadline_rejected() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_lock_funds_deadline_equal_now_rejected() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let now = setup.env.ledger().timestamp();
+
+    // deadline == now should be rejected (must be strictly greater)
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &now);
+}
+
+#[test]
+fn test_lock_funds_future_deadline_succeeds() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let now = setup.env.ledger().timestamp();
+    let future_deadline = now + 100;
+
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &future_deadline);
+
+    let stored = setup.escrow.get_escrow_info(&bounty_id);
+    assert_eq!(stored.status, EscrowStatus::Locked);
+    assert_eq!(stored.deadline, future_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_past_deadline_rejected() {
+    let setup = TestSetup::new();
+    setup.env.ledger().set_timestamp(100);
+    let past_deadline = 99u64;
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: past_deadline,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_zero_deadline_rejected() {
+    let setup = TestSetup::new();
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: 0,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_deadline_equal_now_rejected() {
+    let setup = TestSetup::new();
+    let now = setup.env.ledger().timestamp();
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: now,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
+}
+
+#[test]
+fn test_batch_lock_funds_future_deadline_succeeds() {
+    let setup = TestSetup::new();
+    let now = setup.env.ledger().timestamp();
+    let future_deadline = now + 100;
+
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: future_deadline,
+        },
+        LockFundsItem {
+            bounty_id: 2,
+            depositor: setup.depositor.clone(),
+            amount: 2000,
+            deadline: future_deadline,
+        },
+    ];
+
+    let count = setup.escrow.batch_lock_funds(&items);
+    assert_eq!(count, 2);
+
+    let stored1 = setup.escrow.get_escrow_info(&1);
+    assert_eq!(stored1.status, EscrowStatus::Locked);
+    assert_eq!(stored1.deadline, future_deadline);
+
+    let stored2 = setup.escrow.get_escrow_info(&2);
+    assert_eq!(stored2.status, EscrowStatus::Locked);
+    assert_eq!(stored2.deadline, future_deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidDeadline
+fn test_batch_lock_funds_rejects_whole_batch_if_any_past_deadline() {
+    let setup = TestSetup::new();
+    setup.env.ledger().set_timestamp(100);
+    let future_deadline = 200u64;
+    let past_deadline = 99u64;
+
+    // Second item has a past deadline — entire batch must be rejected
+    let items = vec![
+        &setup.env,
+        LockFundsItem {
+            bounty_id: 1,
+            depositor: setup.depositor.clone(),
+            amount: 1000,
+            deadline: future_deadline,
+        },
+        LockFundsItem {
+            bounty_id: 2,
+            depositor: setup.depositor.clone(),
+            amount: 2000,
+            deadline: past_deadline,
+        },
+    ];
+
+    setup.escrow.batch_lock_funds(&items);
 }

@@ -98,6 +98,22 @@ for schedule in schedules {
 }
 ```
 
+### Event Ordering and Revert Guarantees
+
+For a successful `single_payout()` that qualifies as a large payout, off-chain
+consumers can rely on this relative contract-event order within the same
+transaction:
+
+1. `LrgPay` is emitted first, after the token transfer succeeds and program
+   balance state is updated.
+2. `Payout` is emitted immediately after `LrgPay` and reports the same
+   finalized remaining balance.
+3. `AggStats` is emitted after `Payout` and reflects the same finalized balance.
+
+If a contract call reverts, analytics events are all-or-nothing: no partial
+`LrgPay`, `Payout`, or `AggStats` events from the failed call persist for
+off-chain consumers.
+
 ## Testing
 
 Comprehensive test suite in `src/test_analytics_events.rs`:
@@ -107,13 +123,15 @@ Comprehensive test suite in `src/test_analytics_events.rs`:
 3. **test_large_payout_event_emitted_above_threshold** - Tests large payout detection (15% of funds)
 4. **test_large_payout_event_not_emitted_below_threshold** - Tests threshold boundary (5% of funds)
 5. **test_large_payout_event_in_batch** - Tests large payout detection in batch operations
-6. **test_schedule_triggered_event_automatic** - Tests automatic schedule trigger events
-7. **test_schedule_triggered_event_manual** - Tests manual schedule trigger events
-8. **test_multiple_schedule_triggers_emit_multiple_events** - Tests multiple schedule releases
-9. **test_aggregate_stats_includes_scheduled_count** - Verifies scheduled_count calculation
-10. **test_aggregate_stats_after_schedule_release** - Verifies stats update after release
-11. **test_event_payload_compactness** - Ensures payloads are not bloated
-12. **test_all_analytics_events_have_program_id** - Verifies program_id in all events
+6. **test_large_single_payout_event_ordering_is_stable** - Locks in large payout event ordering
+7. **test_reverted_large_single_payout_emits_no_partial_events** - Verifies failed calls leave no partial analytics events
+8. **test_schedule_triggered_event_automatic** - Tests automatic schedule trigger events
+9. **test_schedule_triggered_event_manual** - Tests manual schedule trigger events
+10. **test_multiple_schedule_triggers_emit_multiple_events** - Tests multiple schedule releases
+11. **test_aggregate_stats_includes_scheduled_count** - Verifies scheduled_count calculation
+12. **test_aggregate_stats_after_schedule_release** - Verifies stats update after release
+13. **test_event_payload_compactness** - Ensures payloads are not bloated
+14. **test_all_analytics_events_have_program_id** - Verifies program_id in all events
 
 ## Security Considerations
 
@@ -121,6 +139,7 @@ Comprehensive test suite in `src/test_analytics_events.rs`:
 2. **Threshold-Based Alerts**: Large payout events enable fraud detection
 3. **Audit Trail**: Schedule triggered events provide complete execution history
 4. **Version Compatibility**: v2 schema ensures forward compatibility
+5. **Atomic Event Trail**: Reverted calls do not leave partial analytics events for indexers to misread
 
 ## Performance Impact
 

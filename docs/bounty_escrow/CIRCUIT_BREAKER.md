@@ -95,6 +95,18 @@ Transitions:
 - `Open` -> `HalfOpen` (first reset)
 - `HalfOpen` -> `Closed` (second reset or sufficient successes)
 
+### Auto-Reset and Cooldown Behavior
+
+The Bounty Escrow circuit breaker is manual-reset-only. It does not define a
+cooldown duration and does not automatically transition out of `Open` based on
+elapsed ledger time. The `opened_at` and `last_failure_timestamp` values are
+diagnostic status fields; protected operations remain rejected while the circuit
+is `Open` until the registered circuit breaker admin calls `reset_circuit`.
+
+If another failure is recorded while the circuit is already `Open`, the trip is
+not silently ignored: the failure count and last failure timestamp are updated,
+and the open timestamp is refreshed to the latest trip time.
+
 ## Default Configuration
 
 ```rust
@@ -118,13 +130,16 @@ The circuit breaker maintains an error log with:
 2. **State Transitions**: Circuit can only be reset by the registered admin.
 3. **Automatic Opening**: Circuit opens automatically when failure threshold is reached.
 4. **Manual Reset**: Circuit requires manual admin intervention to transition from Open.
+5. **No Time-Based Auto Reset**: Elapsed ledger time alone cannot reopen fund-moving operations after a trip.
 
 ## Testing
 
-The circuit breaker includes 33 comprehensive tests covering:
+The circuit breaker includes 35 comprehensive tests covering:
 - Initial state validation
 - Failure threshold behavior
 - State transitions (Closed -> Open -> HalfOpen -> Closed)
+- Manual-only reset behavior and lack of auto-reset cooldown
+- Repeated trip handling while already Open
 - Admin controls (set admin, update admin, unauthorized access)
 - Configuration management
 - Error logging
@@ -155,6 +170,54 @@ The circuit breaker emits events for state changes:
 - `cb_half` - When circuit enters HalfOpen
 - `cb_close` - When circuit closes
 - `cb_reject` - When operation is rejected due to open circuit
+
+## Retry Logic
+
+`error_recovery.rs` also defines `execute_with_retry`, a bounded-retry helper
+that integrates with the circuit breaker above. It is not currently wired
+into any contract entrypoint — production code (`lib.rs`) calls
+`check_and_allow` / `record_success` / `record_failure` directly — so today
+it's primarily useful for test scenarios, simulation, and as a reference
+implementation for integrators building their own retry loop against those
+primitives (e.g. the backend's `internal/soroban` client).
+
+### Error classification
+
+| Error | Classification | Meaning |
+| --- | --- | --- |
+| `ERR_TRANSFER_FAILED` (1002) | Recoverable | Transient token transfer failure; safe to retry. |
+| `ERR_INSUFFICIENT_BALANCE` (1003) | Recoverable | May resolve once funds arrive; safe to retry. |
+| `ERR_CIRCUIT_OPEN` (1001) | Terminal | The breaker has tripped from accumulated failures (from any caller); stop until an admin resets it. |
+| `ERR_RETRIES_EXHAUSTED` (1004) | Terminal | `execute_with_retry` used up its configured `max_attempts` budget without success; stop, don't retry again with the same config. |
+
+### `execute_with_retry`
+
+```rust
+pub fn execute_with_retry<F>(
+    env: &Env,
+    config: &RetryConfig,   // { max_attempts: u32 }, default DEFAULT_MAX_RETRY_ATTEMPTS (3)
+    bounty_id: u64,
+    operation: Symbol,
+    op: F,
+) -> RetryResult             // { succeeded: bool, attempts: u32, final_error: u32 }
+where
+    F: FnMut() -> Result<(), u32>;
+```
+
+Before each attempt it calls `check_and_allow`, so a circuit that opens
+mid-loop (from this call's own failures or any other caller's) short-circuits
+the remaining attempts with `ERR_CIRCUIT_OPEN` rather than burning the full
+`max_attempts` budget.
+
+When the loop instead exhausts `max_attempts` without success,
+`RetryResult.final_error` is set to the distinct terminal code
+`ERR_RETRIES_EXHAUSTED` — not the last attempt's underlying recoverable
+error code. A caller can match on `final_error` directly to tell "circuit
+tripped" apart from "ran out of attempts" without also comparing
+`RetryResult.attempts` against the config it passed in. The last attempt's
+actual recoverable error code (e.g. `ERR_TRANSFER_FAILED`) remains
+available via `get_error_log`, which `record_failure` populates on every
+failed attempt.
 
 ## Future Enhancements
 

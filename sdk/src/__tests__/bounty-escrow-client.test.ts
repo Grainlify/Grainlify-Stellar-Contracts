@@ -71,6 +71,21 @@ describe('BountyEscrowClient', () => {
         ).rejects.toThrow(ValidationError);
       });
     });
+    describe('deadlines', () => {
+      it('throws on a positive-but-past deadline in lockFunds', async () => {
+        const pastDeadline = Math.floor(Date.now() / 1000) - 3600;
+        await expect(
+          client.lockFunds(validGAddress1, 1n, 100n, pastDeadline, sourceKeypair)
+        ).rejects.toThrow(ValidationError);
+      });
+      it('accepts a valid future deadline in lockFunds', async () => {
+        mockInvoke();
+        const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+        await expect(
+          client.lockFunds(validGAddress1, 1n, 100n, futureDeadline, sourceKeypair)
+        ).resolves.toBeUndefined();
+      });
+    });
     
     describe('batch operations', () => {
       it('throws on empty items array in batchLockFunds', async () => {
@@ -83,6 +98,17 @@ describe('BountyEscrowClient', () => {
         const items: LockFundsItem[] = [
           { bounty_id: 1n, depositor: validGAddress1, amount: 10n, deadline: 100 },
           { bounty_id: 2n, depositor: validGAddress1, amount: -10n, deadline: 100 },
+        ];
+        await expect(
+          client.batchLockFunds(items, sourceKeypair)
+        ).rejects.toThrow(ValidationError);
+      });
+      it('throws on a batch containing one item with a past deadline', async () => {
+        const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+        const pastDeadline = Math.floor(Date.now() / 1000) - 3600;
+        const items: LockFundsItem[] = [
+          { bounty_id: 1n, depositor: validGAddress1, amount: 10n, deadline: futureDeadline },
+          { bounty_id: 2n, depositor: validGAddress1, amount: 10n, deadline: pastDeadline },
         ];
         await expect(
           client.batchLockFunds(items, sourceKeypair)
@@ -194,6 +220,58 @@ describe('BountyEscrowClient', () => {
       expect(invoke).toHaveBeenNthCalledWith(2, 'get_refund_eligibility', [1n]);
       expect(invoke).toHaveBeenNthCalledWith(3, 'get_aggregate_stats', []);
       expect(invoke).toHaveBeenNthCalledWith(4, 'get_escrow_count', []);
+    });
+
+    it('routes analytics views to the matching contract methods', async () => {
+      const bountyAnalytics = {
+        total_amount_locked: 100n,
+        total_amount_released: 40n,
+        total_amount_refunded: 0n,
+        remaining_amount: 60n,
+        created_at: 1n,
+        last_updated: 2n,
+        partial_releases_count: 1,
+        partial_refunds_count: 0,
+      };
+      const contractAnalytics = {
+        active_bounty_count: 5,
+        released_bounty_count: 2,
+        refunded_bounty_count: 1,
+        total_locked: 500n,
+        total_released: 200n,
+        total_refunded: 50n,
+        average_bounty_amount: 100n,
+        snapshot_timestamp: 123n,
+      };
+      const invoke = mockInvoke();
+      invoke
+        .mockResolvedValueOnce(bountyAnalytics)
+        .mockResolvedValueOnce(contractAnalytics)
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(300n)
+        .mockResolvedValueOnce([2, 100n, 1, 40n, 0, 0n])
+        .mockResolvedValueOnce([5n, 3n]);
+
+      await expect(client.getBountyAnalytics(1n)).resolves.toEqual(bountyAnalytics);
+      await expect(client.getContractAnalytics()).resolves.toEqual(contractAnalytics);
+      await expect(client.countBountiesByStatus('Locked')).resolves.toBe(3);
+      await expect(client.getVolumeByStatus('Locked')).resolves.toBe(300n);
+      await expect(client.getDepositorStats(validGAddress1)).resolves.toEqual({
+        locked_count: 2,
+        locked_amount: 100n,
+        released_count: 1,
+        released_amount: 40n,
+        refunded_count: 0,
+        refunded_amount: 0n,
+      });
+      await expect(client.getHighValueBounties(1000n, 10)).resolves.toEqual([5n, 3n]);
+
+      expect(invoke).toHaveBeenNthCalledWith(1, 'get_bounty_analytics', [1n]);
+      expect(invoke).toHaveBeenNthCalledWith(2, 'get_contract_analytics', []);
+      expect(invoke).toHaveBeenNthCalledWith(3, 'count_bounties_by_status', ['Locked']);
+      expect(invoke).toHaveBeenNthCalledWith(4, 'get_volume_by_status', ['Locked']);
+      expect(invoke).toHaveBeenNthCalledWith(5, 'get_depositor_stats', [validGAddress1]);
+      expect(invoke).toHaveBeenNthCalledWith(6, 'get_high_value_bounties', [1000n, 10]);
     });
 
     it('routes bounty query helpers to the matching contract methods', async () => {
@@ -461,6 +539,30 @@ describe('BountyEscrowClient', () => {
       expect(invoke).toHaveBeenCalledWith('reset_circuit', [validGAddress2], sourceKeypair);
     });
 
+    it('routes getCircuitErrorLog correctly', async () => {
+      const entry = {
+        operation: 'lock_funds',
+        bounty_id: 1n,
+        error_code: 21,
+        timestamp: 100n,
+        failure_count_at_time: 3,
+      };
+      const invoke = mockInvoke([entry]);
+      await expect(client.getCircuitErrorLog()).resolves.toEqual([entry]);
+      expect(invoke).toHaveBeenCalledWith('get_circuit_error_log', []);
+    });
+
+    it('routes sweepExpiredRefunds correctly', async () => {
+      const invoke = mockInvoke(2);
+      await expect(client.sweepExpiredRefunds([1n, 2n, 3n])).resolves.toBe(2);
+      expect(invoke).toHaveBeenCalledWith('sweep_expired_refunds', [[1n, 2n, 3n]]);
+    });
+
+    it('routes executeGovernanceProposal correctly', async () => {
+      const invoke = mockInvoke();
+      await client.executeGovernanceProposal(7, sourceKeypair);
+      expect(invoke).toHaveBeenCalledWith('execute_governance_proposal', [7], sourceKeypair);
+    });
     it('routes updateMultisigConfig correctly', async () => {
       const invoke = mockInvoke();
       await client.updateMultisigConfig(1000n, [validGAddress1, validGAddress2], 2, sourceKeypair);
@@ -587,8 +689,9 @@ describe('BountyEscrowClient', () => {
 
     it('routes lockFunds correctly', async () => {
       const invoke = mockInvoke();
-      await client.lockFunds(validGAddress1, 1n, 100n, 1000, sourceKeypair);
-      expect(invoke).toHaveBeenCalledWith('lock_funds', [validGAddress1, 1n, 100n, 1000], sourceKeypair);
+      const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+      await client.lockFunds(validGAddress1, 1n, 100n, futureDeadline, sourceKeypair);
+      expect(invoke).toHaveBeenCalledWith('lock_funds', [validGAddress1, 1n, 100n, futureDeadline], sourceKeypair);
     });
 
     it('routes releaseFunds correctly', async () => {
@@ -623,7 +726,8 @@ describe('BountyEscrowClient', () => {
 
     it('routes batchLockFunds correctly', async () => {
       const invoke = mockInvoke(5);
-      const items = [{ bounty_id: 1n, depositor: validGAddress1, amount: 100n, deadline: 1000 }];
+      const futureDeadline = Math.floor(Date.now() / 1000) + 3600;
+      const items = [{ bounty_id: 1n, depositor: validGAddress1, amount: 100n, deadline: futureDeadline }];
       const count = await client.batchLockFunds(items, sourceKeypair);
       expect(count).toBe(5);
       expect(invoke).toHaveBeenCalledWith('batch_lock_funds', [items], sourceKeypair);

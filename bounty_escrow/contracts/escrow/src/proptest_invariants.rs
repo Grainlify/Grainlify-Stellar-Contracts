@@ -39,6 +39,8 @@ struct ModelEscrow {
     remaining: i128,
     deadline: u64,
     status: ModelStatus,
+    disputed: bool,
+    dispute_expires_at: u64,
 }
 
 struct ModelTotals {
@@ -86,6 +88,7 @@ impl<'a> TestSetup<'a> {
         let escrow = create_escrow_contract(&env);
 
         escrow.init(&admin, &token.address);
+        escrow.set_claim_window(&600);
 
         Self {
             env,
@@ -255,6 +258,8 @@ fn apply_lock(
         remaining: amount,
         deadline,
         status: ModelStatus::Locked,
+        disputed: false,
+        dispute_expires_at: 0,
     });
 }
 
@@ -265,7 +270,7 @@ fn apply_partial_release(
     op: LifecycleOp,
 ) {
     let Some(idx) = pick_index(model, op.selector, |escrow| {
-        escrow.status == ModelStatus::Locked && escrow.remaining > 0
+        escrow.status == ModelStatus::Locked && escrow.remaining > 0 && !escrow.disputed
     }) else {
         return;
     };
@@ -289,7 +294,7 @@ fn apply_full_release(
     op: LifecycleOp,
 ) {
     let Some(idx) = pick_index(model, op.selector, |escrow| {
-        escrow.status == ModelStatus::Locked && escrow.remaining == escrow.amount
+        escrow.status == ModelStatus::Locked && escrow.remaining == escrow.amount && !escrow.disputed
     }) else {
         return;
     };
@@ -312,6 +317,7 @@ fn apply_approved_refund(
     let Some(idx) = pick_index(model, op.selector, |escrow| {
         (escrow.status == ModelStatus::Locked || escrow.status == ModelStatus::PartiallyRefunded)
             && escrow.remaining > 0
+            && !escrow.disputed
     }) else {
         return;
     };
@@ -346,6 +352,7 @@ fn apply_deadline_refund(
     let Some(idx) = pick_index(model, op.selector, |escrow| {
         (escrow.status == ModelStatus::Locked || escrow.status == ModelStatus::PartiallyRefunded)
             && escrow.remaining > 0
+            && !escrow.disputed
     }) else {
         return;
     };
@@ -469,4 +476,142 @@ fn proptest_fee_basis_points_do_not_overflow_or_exceed_principal() {
             Ok(())
         })
         .expect("basis-point fee properties should hold");
+}
+
+fn apply_dispute(
+    setup: &TestSetup<'_>,
+    model: &mut [ModelEscrow],
+    op: LifecycleOp,
+) {
+    let Some(idx) = pick_index(model, op.selector, |escrow| {
+        escrow.status == ModelStatus::Locked && !escrow.disputed
+    }) else {
+        return;
+    };
+
+    setup.escrow.authorize_claim(&model[idx].id, &setup.contributor);
+    model[idx].disputed = true;
+    model[idx].dispute_expires_at = setup.env.ledger().timestamp().saturating_add(600);
+}
+
+fn apply_claim(
+    setup: &TestSetup<'_>,
+    model: &mut [ModelEscrow],
+    totals: &mut ModelTotals,
+    op: LifecycleOp,
+) {
+    let Some(idx) = pick_index(model, op.selector, |escrow| {
+        escrow.disputed && setup.env.ledger().timestamp() <= escrow.dispute_expires_at
+    }) else {
+        return;
+    };
+
+    setup.escrow.claim(&model[idx].id);
+    let payout = model[idx].remaining;
+    totals.released += payout;
+    model[idx].remaining = 0;
+    model[idx].status = ModelStatus::Released;
+    model[idx].disputed = false;
+    model[idx].dispute_expires_at = 0;
+}
+
+fn apply_cancel_dispute(
+    setup: &TestSetup<'_>,
+    model: &mut [ModelEscrow],
+    op: LifecycleOp,
+) {
+    let Some(idx) = pick_index(model, op.selector, |escrow| {
+        escrow.disputed
+    }) else {
+        return;
+    };
+
+    setup.escrow.cancel_pending_claim(&model[idx].id);
+    model[idx].disputed = false;
+    model[idx].dispute_expires_at = 0;
+}
+
+fn assert_fund_conservation_invariants(
+    setup: &TestSetup<'_>,
+    totals: &ModelTotals,
+) -> Result<(), TestCaseError> {
+    let contract_balance = setup.escrow.get_balance();
+    
+    // Invariant: total locked == total released + total refunded + current contract balance
+    prop_assert_eq!(
+        totals.locked,
+        totals.released + totals.refunded + contract_balance,
+        "Fund conservation invariant violated: totals.locked ({}) must equal totals.released ({}) + totals.refunded ({}) + contract_balance ({})",
+        totals.locked,
+        totals.released,
+        totals.refunded,
+        contract_balance
+    );
+
+    // Contributor's token balance must match total released (claimed/released)
+    prop_assert_eq!(
+        setup.token.balance(&setup.contributor),
+        totals.released,
+        "Contributor balance mismatch"
+    );
+
+    // Depositor's token balance must match minted - locked + refunded
+    prop_assert_eq!(
+        setup.token.balance(&setup.depositor),
+        totals.minted - totals.locked + totals.refunded,
+        "Depositor balance mismatch"
+    );
+
+    Ok(())
+}
+
+fn fund_conservation_op_strategy() -> impl Strategy<Value = LifecycleOp> {
+    (0_u8..=7, 0_usize..64, 1_i128..=20_000, 1_u64..=1_000).prop_map(
+        |(kind, selector, amount, deadline_delta)| LifecycleOp {
+            kind,
+            selector,
+            amount,
+            deadline_delta,
+        },
+    )
+}
+
+fn run_fund_conservation_ops(ops: std::vec::Vec<LifecycleOp>) -> Result<(), TestCaseError> {
+    let setup = TestSetup::new();
+    let mut model = std::vec::Vec::new();
+    let mut totals = ModelTotals {
+        minted: 0,
+        locked: 0,
+        released: 0,
+        refunded: 0,
+    };
+    let mut next_id = 10_000_u64;
+
+    assert_fund_conservation_invariants(&setup, &totals)?;
+
+    for op in ops {
+        match op.kind {
+            0 => apply_lock(&setup, &mut model, &mut totals, &mut next_id, op),
+            1 => apply_partial_release(&setup, &mut model, &mut totals, op),
+            2 => apply_full_release(&setup, &mut model, &mut totals, op),
+            3 => apply_approved_refund(&setup, &mut model, &mut totals, op),
+            4 => apply_deadline_refund(&setup, &mut model, &mut totals, op),
+            5 => apply_dispute(&setup, &mut model, op),
+            6 => apply_claim(&setup, &mut model, &mut totals, op),
+            _ => apply_cancel_dispute(&setup, &mut model, op),
+        }
+        assert_fund_conservation_invariants(&setup, &totals)?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn proptest_fund_conservation_dedicated_invariant_holds() {
+    let mut runner = deterministic_runner();
+    let strategy = proptest::collection::vec(fund_conservation_op_strategy(), 0..=30);
+
+    runner
+        .run(&strategy, |ops| run_fund_conservation_ops(ops))
+        .expect("fund conservation invariant should hold across all valid operation sequences");
 }

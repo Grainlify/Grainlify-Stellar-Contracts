@@ -100,8 +100,7 @@ Transfer funds to multiple recipients in a single transaction. Requires authoriz
 **Batch size cap (`MAX_BATCH_SIZE = 100`):**
 The cap is enforced before any token transfer. Calls with zero recipients or
 more than 100 recipients panic with a clear message and clear the reentrancy
-guard, so no partial payout or stuck guard can occur. The same constant is
-used by `batch_initialize_programs` for consistency.
+guard, so no partial payout or stuck guard can occur.
 
 #### `get_program_info()`
 
@@ -166,11 +165,10 @@ footprint bounded for large batches.
 
 ## Batch Size Cap
 
-`MAX_BATCH_SIZE = 100` is enforced in three places:
+`MAX_BATCH_SIZE = 100` is enforced in two places:
 
 | Function | Behaviour |
 |---|---|
-| `batch_initialize_programs` | Returns `BatchError::InvalidBatchSize` if `items.len() == 0` or `> 100` |
 | `batch_payout` | Panics `"Batch size exceeds maximum allowed"` before any transfer if `recipients.len() > 100` |
 | `trigger_program_releases` | Processes at most 100 due schedules per call; remaining due schedules are left for the next call |
 

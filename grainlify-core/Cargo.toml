@@ -6,14 +6,22 @@ edition = "2021"
 [lib]
 crate-type = ["lib", "cdylib"]
 
+[features]
+# Gates tests that include_bytes! a prebuilt wasm32v1-none release artifact
+# (see grainlify-core/src/lib.rs), so the default `cargo test -p
+# grainlify-core` doesn't require that target to be built first (Issue #529).
+wasm-upgrade-test = []
+
 [dependencies]
 soroban-sdk = "21.0.0"
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = "z"
+overflow-checks = true
 lto = true
 codegen-units = 1
 panic = "abort"

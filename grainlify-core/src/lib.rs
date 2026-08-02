@@ -1,164 +1,239 @@
-//! # Grainlify Contract Upgrade System
+//! # grainlify-core
 //!
-//! A minimal, secure contract upgrade pattern for Soroban smart contracts.
-//! This contract implements admin-controlled WASM upgrades with version tracking.
+//! The crate root for the Grainlify upgrade-governance system on Soroban/Stellar.
+//! It wires together two **independent, parallel** upgrade primitives —
+//! [`governance`] (democratic on-chain voting) and [`multisig`] (threshold
+//! key-holder approval) — and exposes them through a single deployable contract:
+//! [`GrainlifyContract`].
 //!
-//! ## Overview
+//! Neither module depends on the other. A deployment may use one, both, or
+//! neither upgrade path; the choice is made at runtime by calling the
+//! appropriate initialiser and entrypoints.
 //!
-//! The Grainlify contract provides a foundational upgrade mechanism that allows
-//! authorized administrators to update contract logic while maintaining state
-//! persistence. This is essential for bug fixes, feature additions, and security
-//! patches in production environments.
-//!
-//! ## Architecture
+//! ## Module Relationships
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │              Contract Upgrade Architecture                   │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                                                              │
-//! │  ┌──────────────┐                                           │
-//! │  │    Admin     │                                           │
-//! │  └──────┬───────┘                                           │
-//! │         │                                                    │
-//! │         │ 1. Compile new WASM                               │
-//! │         │ 2. Upload to Stellar                              │
-//! │         │ 3. Get WASM hash                                  │
-//! │         │                                                    │
-//! │         ▼                                                    │
-//! │  ┌──────────────────┐                                       │
-//! │  │  upgrade(hash)   │────────┐                              │
-//! │  └──────────────────┘        │                              │
-//! │         │                     │                              │
-//! │         │ require_auth()      │                              │
-//! │         │                     ▼                              │
-//! │         │              ┌─────────────┐                       │
-//! │         │              │   Verify    │                       │
-//! │         │              │   Admin     │                       │
-//! │         │              └──────┬──────┘                       │
-//! │         │                     │                              │
-//! │         │                     ▼                              │
-//! │         │              ┌─────────────┐                       │
-//! │         └─────────────>│   Update    │                       │
-//! │                        │   WASM      │                       │
-//! │                        └──────┬──────┘                       │
-//! │                               │                              │
-//! │                               ▼                              │
-//! │                        ┌─────────────┐                       │
-//! │                        │ New Version │                       │
-//! │                        │  (Optional) │                       │
-//! │                        └─────────────┘                       │
-//! │                                                              │
-//! │  Storage:                                                    │
-//! │  ┌────────────────────────────────────┐                     │
-//! │  │ Admin: Address                     │                     │
-//! │  │ Version: u32                       │                     │
-//! │  └────────────────────────────────────┘                     │
-//! └─────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │                        grainlify-core                                │
+//! │                      (GrainlifyContract)                             │
+//! │                                                                      │
+//! │   ┌──────────────────────────┐   ┌───────────────────────────────┐  │
+//! │   │     mod governance       │   │       mod multisig            │  │
+//! │   │  (GovernanceContract)    │   │        (MultiSig)             │  │
+//! │   │                          │   │                               │  │
+//! │   │  Democratic on-chain     │   │  Threshold key-holder         │  │
+//! │   │  voting for upgrade      │   │  approval for WASM upgrades.  │  │
+//! │   │  proposals.              │   │                               │  │
+//! │   │                          │   │  N-of-M signers must approve  │  │
+//! │   │  Any eligible voter may  │   │  before execute_upgrade()     │  │
+//! │   │  participate; quorum +   │   │  can run.  Replay-protected   │  │
+//! │   │  threshold decide the    │   │  via a monotonic nonce.       │  │
+//! │   │  outcome.                │   │                               │  │
+//! │   │                          │   │  Signer set and threshold     │  │
+//! │   │  is_upgrade_approved()   │   │  are snapshotted per-         │  │
+//! │   │  records approved WASM   │   │  proposal to prevent          │  │
+//! │   │  hashes for cross-       │   │  retroactive config changes.  │  │
+//! │   │  contract verification.  │   │                               │  │
+//! │   └──────────────────────────┘   └───────────────────────────────┘  │
+//! │            ▲                                                         │
+//! │            │ cross-contract call                                     │
+//! │   ┌────────┴──────────────────────────────────────────────────────┐  │
+//! │   │          bounty_escrow  /  program-escrow                     │  │
+//! │   │          governance_integration.rs                            │  │
+//! │   │                                                               │  │
+//! │   │  GovernanceInterface (contractclient trait):                  │  │
+//! │   │    get_ver()                   → version liveness check       │  │
+//! │   │    is_upg_ok(wasm_hash)        → upgrade approval gate        │  │
+//! │   │    get_version_numeric_encoded() → semver gate (bounty only)  │  │
+//! │   └───────────────────────────────────────────────────────────────┘  │
+//! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## Security Model
+//! ## governance module
 //!
-//! ### Trust Assumptions
-//! - **Admin**: Highly trusted entity with upgrade authority
-//! - **WASM Code**: New code must be audited before deployment
-//! - **State Preservation**: Upgrades preserve existing contract state
+//! `governance.rs` implements [`GovernanceContract`], a standalone democratic
+//! voting system for on-chain upgrade proposals.
 //!
-//! ### Security Features
-//! 1. **Single Admin**: Only one authorized address can upgrade
-//! 2. **Authorization Check**: Every upgrade requires admin signature
-//! 3. **Version Tracking**: Auditable upgrade history
-//! 4. **State Preservation**: Instance storage persists across upgrades
-//! 5. **Single-Admin Timelock**: Direct admin upgrades must be scheduled before execution
-//! 6. **Immutable After Init**: Admin cannot be changed after initialization
+//! ### Public interface
 //!
-//! ### Security Considerations
-//! - Admin key should be secured with hardware wallet or multi-sig
-//! - New WASM should be audited before upgrade
-//! - Use `schedule_upgrade` and wait for the configured timelock before calling `upgrade`
-//! - Version updates should follow semantic versioning
-//! - Test upgrades on testnet before mainnet deployment
+//! | Entrypoint | Description |
+//! |---|---|
+//! | `init_governance(admin, config)` | One-time governance initialisation. Stores [`GovernanceConfig`] and sets proposal counter to 0. |
+//! | `create_proposal(proposer, wasm_hash, description)` | Opens a new upgrade proposal for voting. Enforces `min_proposal_stake` if configured. |
+//! | `cast_vote(voter, proposal_id, vote_type)` | Casts a `For`, `Against`, or `Abstain` vote. Derives voting power from the configured scheme. |
+//! | `finalize_proposal(proposal_id)` | After the voting period, evaluates quorum + threshold and sets the proposal to `Approved` or `Rejected`. |
+//! | `execute_proposal(proposal_id)` | Marks an `Approved` proposal as `Executed` after its execution delay. Does **not** perform a WASM update — it records that governance blessed the hash. |
+//! | `cancel_proposal(caller, proposal_id)` | Allows the proposer to cancel an active proposal before it is finalized. |
+//! | `is_upgrade_approved(wasm_hash)` | Returns `true` if an `Executed` proposal for this hash exists and its execution delay has elapsed. Used by escrow contracts as an upgrade gate. |
+//! | `get_proposal_status(proposal_id)` | Read-only status query. |
+//! | `sweep_expired_proposal(proposal_id)` | Flags an unfinalized, past-deadline proposal as `Expired` using the ledger timestamp. |
 //!
-//! ## Upgrade Process
+//! ### Voting schemes
 //!
-//! ```rust
-//! // 1. Initialize contract (one-time)
-//! let admin = Address::from_string("GADMIN...");
-//! contract.init(&admin);
+//! [`VotingScheme::OnePersonOneVote`] assigns power `1` to every authenticated
+//! voter.  [`VotingScheme::TokenWeighted`] reads each voter's *live* balance
+//! from the configured governance token at vote time — **not** a balance
+//! snapshotted at proposal creation — so the same tokens can vote more than
+//! once via transfers between addresses within one voting period. See
+//! [`VotingScheme::TokenWeighted`]'s own doc comment and `GOVERNANCE.md` for
+//! the full security warning and deployment guidance.
 //!
-//! // 2. Develop and test new version locally
-//! // ... make changes to contract code ...
+//! ### Exported types
 //!
-//! // 3. Build new WASM
-//! // $ cargo build --release --target wasm32-unknown-unknown
+//! [`GovernanceConfig`], [`Proposal`], [`ProposalStatus`], [`Vote`],
+//! [`VoteType`], [`VotingScheme`], and [`Error as GovError`] are all
+//! re-exported from the crate root for use by external consumers.
 //!
-//! // 4. Upload WASM to Stellar and get hash
-//! // $ stellar contract install --wasm target/wasm32-unknown-unknown/release/contract.wasm
-//! // Returns: hash (e.g., "abc123...")
+//! ## multisig module
 //!
-//! // 5. Schedule upgrade and wait for the timelock
-//! let wasm_hash = BytesN::from_array(&env, &[0xab, 0xcd, ...]);
-//! let scheduled = contract.schedule_upgrade(&wasm_hash);
-//! // Wait until ledger timestamp >= scheduled.executable_at
+//! `multisig.rs` implements [`MultiSig`], a pure threshold-approval primitive
+//! for WASM upgrade proposals.  It is **entirely independent of the governance
+//! module**: it has no knowledge of voting periods, quorum, or governance
+//! config.
 //!
-//! // 6. Perform upgrade
-//! contract.upgrade(&wasm_hash);
+//! ### Public interface
 //!
-//! // 7. (Optional) Update version number
-//! contract.set_version(&2);
+//! | Method | Description |
+//! |---|---|
+//! | `MultiSig::init(env, signers, threshold)` | One-time initialisation. Stores the signer set and threshold; rejects `threshold == 0` or `threshold > signers.len()`. |
+//! | `MultiSig::propose(env, proposer, action)` | Creates an `Upgrade(wasm_hash)` proposal, snapshotting the current signer set and threshold into the proposal record. |
+//! | `MultiSig::approve(env, proposal_id, signer)` | Records one signer's approval. Rejects non-signers, duplicate approvals, and already-executed proposals. |
+//! | `MultiSig::can_execute(env, proposal_id)` | Returns `true` when the proposal's approval count meets its **snapshotted** threshold. |
+//! | `MultiSig::nonce(env)` | Returns the next expected execution nonce (replay protection). |
+//! | `MultiSig::execute(env, proposal_id, expected_action, expected_nonce, closure)` | Atomically verifies threshold, payload, and nonce, runs the provided closure (the WASM update), marks the proposal executed, and increments the nonce. |
+//! | `MultiSig::get_action(env, proposal_id)` | Returns the `ProposalAction` bound to a proposal. |
+//! | `MultiSig::remove_signer(env, caller, signer_to_remove)` | Removes a signer; `caller` must itself be a current signer (self-governing set, same rule as `propose`/`approve`), and the removal is rejected if `(signer_count - 1) < threshold` to prevent permanent lockout. |
+//! | `MultiSig::add_signer(env, caller, new_signer)` | Adds a signer; `caller` must itself be a current signer. Rejected with `AlreadySigner` if `new_signer` is already in the set. |
+//! | `MultiSig::rotate_signers(env, caller, add, remove, new_threshold)` | Adds/removes signers and optionally updates the threshold atomically; `caller` must itself be a current signer. Rejected if the resulting threshold is `0` or exceeds the resulting signer count. |
 //!
-//! // 8. Verify upgrade
-//! let version = contract.get_version();
-//! assert_eq!(version, 2);
-//! ```
+//! ### Key properties
 //!
-//! ## State Migration
+//! - **Payload binding**: signers approve a specific `wasm_hash`; executing a
+//!   different hash panics with `ActionMismatch`.
+//! - **Snapshot isolation**: changing the global signer config after a proposal
+//!   is created cannot retroactively satisfy or invalidate that proposal.
+//! - **Replay protection**: `execute_upgrade` requires the current nonce; it is
+//!   consumed on success so the same `(approvals, nonce)` pair cannot be
+//!   replayed.
 //!
-//! When upgrading contracts that require state migration:
+//! ## Single-admin upgrade path
 //!
-//! ```rust
-//! // In new WASM version, add migration function:
-//! pub fn migrate(env: Env) {
-//!     let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-//!     admin.require_auth();
-//!     
-//!     // Perform state migration
-//!     // Example: Convert old data format to new format
-//!     let old_version = env.storage().instance().get(&DataKey::Version).unwrap_or(0);
-//!     
-//!     if old_version < 2 {
-//!         // Migrate from v1 to v2
-//!         migrate_v1_to_v2(&env);
-//!     }
-//!     
-//!     // Update version
-//!     env.storage().instance().set(&DataKey::Version, &2u32);
+//! In addition to the two decentralised upgrade paths, `GrainlifyContract`
+//! provides a **single-admin** upgrade route (`init_admin` / `schedule_upgrade`
+//! / `upgrade`). This path does **not** use `governance` or `multisig`; it
+//! requires one trusted admin address and a mandatory schedule/timelock before
+//! `upgrade` can execute.
+//!
+//! The three upgrade paths are mutually exclusive at initialisation. This is
+//! enforced, not just documented: each initializer claims a shared
+//! `DataKey::UpgradeMode` flag (see `claim_upgrade_mode`) and rejects the
+//! call if any path — including its own — has already been claimed. Only
+//! the first of the three calls below to run against a given contract
+//! instance can ever succeed; the other two permanently fail from then on:
+//! - `init(signers, threshold)` — activates the multisig path.
+//! - `init_governance(admin, config)` — activates the governance path.
+//! - `init_admin(admin)` — activates the single-admin + timelock path.
+//!
+//! ## Consumption by bounty_escrow and program-escrow
+//!
+//! Both escrow contracts integrate with `grainlify-core` **exclusively through
+//! the governance side**.  Neither escrow contract calls any multisig
+//! entrypoint.
+//!
+//! Each escrow crate ships a `governance_integration.rs` module that declares
+//! the following cross-contract interface:
+//!
+//! ```rust,ignore
+//! #[contractclient(name = "GovernanceClient")]
+//! trait GovernanceInterface {
+//!     fn get_ver(env: Env) -> u32;
+//!     fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool;
+//!     // bounty_escrow also calls:
+//!     fn get_version_numeric_encoded(env: Env) -> u32;
 //! }
 //! ```
 //!
-//! ## Best Practices
+//! | Method called | Provided by | Purpose |
+//! |---|---|---|
+//! | `get_ver()` | `GrainlifyContract::get_ver` | Version liveness check; ensures the governance contract is reachable and meets a minimum version before an upgrade gate is evaluated. |
+//! | `is_upg_ok(wasm_hash)` | `GrainlifyContract::is_upg_ok` → `GovernanceContract::is_upgrade_approved` | Returns `true` only when an executed, post-delay governance proposal for `wasm_hash` exists. Escrow contracts call this before permitting a WASM upgrade. |
+//! | `get_version_numeric_encoded()` | `GrainlifyContract::get_version_numeric_encoded` | Used by `bounty_escrow` to enforce a minimum semver gate (`major*10_000 + minor*100 + patch`). |
 //!
-//! 1. **Version Numbering**: Use semantic versioning (MAJOR.MINOR.PATCH)
-//! 2. **Testing**: Always test upgrades on testnet first
-//! 3. **Auditing**: Audit new code before mainnet deployment
-//! 4. **Documentation**: Document breaking changes between versions
-//! 5. **Rollback Plan**: Keep previous WASM hash for emergency rollback
-//! 6. **Admin Security**: Use multi-sig or timelock for production
-//! 7. **State Validation**: Verify state integrity after upgrade
+//! ### Integration contract: architecture boundary
 //!
-//! ## Common Pitfalls
+//! ```text
+//! bounty_escrow / program-escrow
+//!   └── governance_integration::check_upgrade_approval(env, wasm_hash)
+//!           │
+//!           │  cross-contract call via GovernanceClient
+//!           ▼
+//!       GrainlifyContract::is_upg_ok(wasm_hash)
+//!           │
+//!           ▼
+//!       GovernanceContract::is_upgrade_approved(wasm_hash)
+//!           └── scans proposals for Executed status + matching hash
+//! ```
 //!
-//! - ❌ Not testing upgrades on testnet
-//! - ❌ Losing admin private key
-//! - ❌ Breaking state compatibility between versions
-//! - ❌ Not documenting migration steps
-//! - ❌ Upgrading without proper testing
-//! - ❌ Not having a rollback plan
+//! The escrow contracts do **not** need to know whether `grainlify-core` was
+//! configured with governance, multisig, or single-admin.  They only ask "has
+//! governance approved this hash?" via `is_upg_ok`.  The `multisig` and
+//! single-admin paths are entirely internal to `grainlify-core`.
+//!
+//! ## Monitoring module (inline)
+//!
+//! `lib.rs` contains an inline `monitoring` module with persistent counters for
+//! observability.  All counters are **observational only**; no entrypoint reads
+//! them to gate authorization or control flow.
+//!
+//! | Counter | Storage key | Incremented by |
+//! |---|---|---|
+//! | `proposals_created` | `gov_prop` | `create_proposal` (on success) |
+//! | `votes_cast` | `gov_vote` | `cast_vote` (on success) |
+//! | `upgrades_executed` | `gov_upg` | `upgrade` and `execute_upgrade` (after WASM update) |
+//! | `migrations_run` | `gov_migr` | `migrate` (once per applied migration) |
+//!
+//! Counters are surfaced through `get_analytics()` and `get_state_snapshot()`,
+//! and each increment emits a `GovernanceMetric` event under topic
+//! `("metric", "gov")` for indexer consumption.
+//!
+//! ## Public re-exports
+//!
+//! The following types from `governance` are re-exported at the crate root:
+//!
+//! - [`GovError`] (`governance::Error`)
+//! - [`GovernanceConfig`]
+//! - [`Proposal`] (governance proposal, not multisig proposal)
+//! - [`ProposalStatus`]
+//! - [`Vote`]
+//! - [`VoteType`]
+//! - [`VotingScheme`]
+//!
+//! `multisig` types (`MultiSig`, `ProposalAction`) are used internally and are
+//! **not** re-exported.
+//!
+//! ## Security notes
+//!
+//! - Governance and multisig are **parallel, non-dependent** upgrade paths.
+//!   Multisig is not a prerequisite for governance execution, and governance
+//!   approval is not required by the multisig path.
+//! - The single-admin path enforces a configurable timelock (default 24 h,
+//!   minimum 5 min) between `schedule_upgrade` and `upgrade`.
+//! - All three paths emit a versioned `UpgradeExecuted` event (`upg_exec2`)
+//!   that indexers can use to track WASM changes regardless of which path was
+//!   used.
+//! - Accurate architecture docs here reduce the risk of a future integration
+//!   mistake at the governance/multisig boundary (e.g., assuming multisig
+//!   approval is required before calling `is_upg_ok`).
+//!
+//! For in-depth governance flow, voting-scheme caveats, event schemas, and
+//! timelock details, see `docs/grainlify-core/GOVERNANCE.md`.
 
 #![no_std]
 
 mod governance;
 mod multisig;
+#[cfg(test)]
+mod governance_proptest;
 pub use governance::{
     Error as GovError, GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme,
 };
@@ -514,6 +589,41 @@ enum DataKey {
 
     /// Pending single-admin upgrade schedule
     ScheduledUpgrade,
+
+    /// Which of the three upgrade paths (see [`UpgradeMode`]) this contract
+    /// instance activated. Set exactly once, by whichever of `init`,
+    /// `init_admin`, or `init_governance` runs first; every other path is
+    /// then permanently rejected. See `claim_upgrade_mode`.
+    UpgradeMode,
+}
+
+/// The upgrade-authorization model a deployed `grainlify-core` instance uses.
+///
+/// Exactly one of these is ever active per contract instance — see the
+/// "Single upgrade authority" note in this crate's module documentation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UpgradeMode {
+    Multisig,
+    Governance,
+    SingleAdmin,
+}
+
+/// Returns `true` if any of the three upgrade paths has already been
+/// activated on this contract instance.
+fn upgrade_mode_already_claimed(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::UpgradeMode)
+}
+
+/// Permanently claims `mode` as this contract instance's sole upgrade path.
+///
+/// Callers must have already verified (via [`upgrade_mode_already_claimed`])
+/// that no path is claimed yet, and must only call this after every other
+/// validation for their own initializer has succeeded — claiming the mode
+/// on a call that goes on to fail would permanently strand the instance
+/// with no usable upgrade path at all.
+fn claim_upgrade_mode(env: &Env, mode: UpgradeMode) {
+    env.storage().instance().set(&DataKey::UpgradeMode, &mode);
 }
 
 // ============================================================================
@@ -683,7 +793,7 @@ pub struct UpgradeExecutedEvent {
 /// - No authorization required for initialization (first-caller pattern)
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use soroban_sdk::{Address, Env};
 ///
 /// let env = Env::default();
@@ -726,8 +836,12 @@ impl GrainlifyContract {
         if env.storage().instance().has(&DataKey::Version) {
             panic!("Already initialized");
         }
+        if upgrade_mode_already_claimed(&env) {
+            panic!("Upgrade mode already configured for this contract instance");
+        }
 
         MultiSig::init(&env, signers, threshold);
+        claim_upgrade_mode(&env, UpgradeMode::Multisig);
         env.storage().instance().set(&DataKey::Version, &VERSION);
     }
 
@@ -786,14 +900,48 @@ impl GrainlifyContract {
         governance::GovernanceContract::finalize_proposal(env, proposal_id)
     }
 
+    /// Cancel an active governance proposal as its proposer.
+    pub fn cancel_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u32,
+    ) -> Result<(), governance::Error> {
+        governance::GovernanceContract::cancel_proposal(env, caller, proposal_id)
+    }
+
     /// Mark an approved governance proposal as executed after its delay.
     pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), governance::Error> {
         governance::GovernanceContract::execute_proposal(env, proposal_id)
     }
 
+    /// Mark an active proposal as expired after its voting period ends.
+    pub fn sweep_expired_proposal(
+        env: Env,
+        proposal_id: u32,
+    ) -> Result<(), governance::Error> {
+        governance::GovernanceContract::sweep_expired_proposal(env, proposal_id)
+    }
+
     /// Query whether governance executed an upgrade proposal for `wasm_hash`.
     pub fn is_upg_ok(env: Env, wasm_hash: BytesN<32>) -> bool {
         governance::GovernanceContract::is_upgrade_approved(env, wasm_hash)
+    }
+
+    /// Returns `true` when the governance proposal identified by `proposal_id`
+    /// has been vetoed or cancelled and must not be executed.
+    ///
+    /// Queries the real proposal status via `governance::GovernanceContract`:
+    /// `true` when it is `ProposalStatus::Cancelled` (set by `cancel_proposal`,
+    /// the only cancellation/veto path this module currently exposes), `false`
+    /// for every other status, including a nonexistent `proposal_id` — the
+    /// same safe default as before, but now backed by real state instead of
+    /// an unconditional stub.
+    ///
+    /// # Arguments
+    /// * `proposal_id` - The governance proposal ID to check.
+    pub fn is_vetoed(env: Env, proposal_id: u32) -> bool {
+        governance::GovernanceContract::get_proposal_status(env, proposal_id)
+            == Ok(governance::ProposalStatus::Cancelled)
     }
 
     /// Initializes the contract with a single admin address.
@@ -809,9 +957,14 @@ impl GrainlifyContract {
             monitoring::track_operation(&env, symbol_short!("init"), admin.clone(), false);
             panic!("Already initialized");
         }
+        if upgrade_mode_already_claimed(&env) {
+            monitoring::track_operation(&env, symbol_short!("init"), admin.clone(), false);
+            panic!("Upgrade mode already configured for this contract instance");
+        }
 
         // Store admin address (immutable after this point)
         env.storage().instance().set(&DataKey::Admin, &admin);
+        claim_upgrade_mode(&env, UpgradeMode::SingleAdmin);
 
         // Set initial version
         env.storage().instance().set(&DataKey::Version, &VERSION);
@@ -845,6 +998,60 @@ impl GrainlifyContract {
     /// * `signer` - Address approving the proposal
     pub fn approve_upgrade(env: Env, proposal_id: u64, signer: Address) {
         MultiSig::approve(&env, proposal_id, signer);
+    }
+
+    /// Remove a signer from the multisig configuration.
+    ///
+    /// The removal is guarded by a threshold-viability check: if removing the
+    /// signer would leave fewer signers than the configured approval threshold
+    /// (making it impossible to ever reach quorum), the call is rejected with a
+    /// typed `RemovalWouldBreakThreshold` error.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the removal. Must both sign the
+    ///   transaction *and* be a current member of the signer set — this is a
+    ///   self-governing multisig, not admin-gated.
+    /// * `signer_to_remove` - The signer address to remove from the set
+    pub fn remove_signer(env: Env, caller: Address, signer_to_remove: Address) {
+        MultiSig::remove_signer(&env, caller, signer_to_remove);
+    }
+
+    /// Add a new signer to the multisig configuration.
+    ///
+    /// Same self-governing access model as `remove_signer`: `caller` must
+    /// both sign the transaction and be a current member of the signer set.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the addition; must be a current signer
+    /// * `new_signer` - The signer address to add to the set
+    pub fn add_signer(env: Env, caller: Address, new_signer: Address) {
+        MultiSig::add_signer(&env, caller, new_signer);
+    }
+
+    /// Rotate signers and/or change the approval threshold in one call.
+    ///
+    /// Same self-governing access model as `remove_signer`/`add_signer`:
+    /// `caller` must both sign the transaction and be a current member of the
+    /// signer set. Removals are applied before additions; the resulting
+    /// threshold (after an optional `new_threshold` override) must be nonzero
+    /// and not exceed the resulting signer count.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address authorising the rotation; must be a current signer
+    /// * `add` - Signer addresses to add
+    /// * `remove` - Signer addresses to remove
+    /// * `new_threshold` - If `Some`, replaces the current approval threshold
+    pub fn rotate_signers(
+        env: Env,
+        caller: Address,
+        add: Vec<Address>,
+        remove: Vec<Address>,
+        new_threshold: Option<u32>,
+    ) {
+        MultiSig::rotate_signers(&env, caller, add, remove, new_threshold);
     }
 
     /// Returns the configured single-admin upgrade delay in seconds.
@@ -960,7 +1167,7 @@ impl GrainlifyContract {
     /// 8. (Optional) Call `set_version` to update version number
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// use soroban_sdk::{BytesN, Env};
     ///
     /// let env = Env::default();
@@ -1044,14 +1251,17 @@ impl GrainlifyContract {
     /// # Arguments
     /// * `env` - The contract environment
     /// * `proposal_id` - The ID of the upgrade proposal to execute
-    pub fn execute_upgrade(env: Env, proposal_id: u64) {
+    /// * `expected_nonce` - The current execution nonce (see [`Self::multisig_nonce`]).
+    ///   Execution is rejected with `NonceMismatch` if this does not match,
+    ///   providing replay protection.
+    pub fn execute_upgrade(env: Env, proposal_id: u64, expected_nonce: u64) {
         let action = MultiSig::get_action(&env, proposal_id);
         let wasm_hash = match action.clone() {
             ProposalAction::Upgrade(wasm_hash) => wasm_hash,
         };
         let upgrade_env = env.clone();
 
-        MultiSig::execute(&env, proposal_id, action, || {
+        MultiSig::execute(&env, proposal_id, action, expected_nonce, || {
             upgrade_env
                 .deployer()
                 .update_current_contract_wasm(wasm_hash.clone());
@@ -1068,6 +1278,18 @@ impl GrainlifyContract {
 
         // Observational metric only: recorded after the upgrade has been applied.
         monitoring::track_upgrade_executed(&env);
+    }
+
+    /// Returns the next multisig execution nonce.
+    ///
+    /// This value must be passed as `expected_nonce` to [`Self::execute_upgrade`].
+    /// It increments after every successful execution, so a previously used
+    /// nonce (and its collected approvals) can never be replayed.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    pub fn multisig_nonce(env: Env) -> u64 {
+        MultiSig::nonce(&env)
     }
 
     /// Upgrades the contract to new WASM code (single admin version).
@@ -1145,7 +1367,7 @@ impl GrainlifyContract {
     /// - Version-specific behavior
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let version = contract.get_version(&env);
     ///
     /// match version {
@@ -1171,6 +1393,11 @@ impl GrainlifyContract {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
+    /// Alias for get_version, exposed for off-chain tooling. Returns the current stored version.
+    pub fn version(env: Env) -> u32 {
+        Self::get_version(env)
+    }
+
     /// Short alias used by escrow governance integration cross-contract calls.
     pub fn get_ver(env: Env) -> u32 {
         Self::get_version(env)
@@ -1184,6 +1411,7 @@ impl GrainlifyContract {
             0 => "0.0.0",
             1 | 10000 => "1.0.0",
             2 | 20000 => "2.0.0",
+            3 | 30000 => "3.0.0",
             10100 => "1.1.0",
             10001 => "1.0.1",
             _ => "unknown",
@@ -1241,7 +1469,7 @@ impl GrainlifyContract {
     /// - `3` = Third version
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// // After upgrading WASM
     /// contract.upgrade(&env, &new_wasm_hash);
     ///
@@ -1254,7 +1482,7 @@ impl GrainlifyContract {
     ///
     /// # Best Practice
     /// Document version changes:
-    /// ```rust
+    /// ```rust,ignore
     /// // Version History:
     /// // 1 - Initial release
     /// // 2 - Added feature X, fixed bug Y
@@ -1360,7 +1588,7 @@ impl GrainlifyContract {
     /// 6. Emits migration event
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// // After upgrading WASM to v2
     /// contract.upgrade(&env, &new_wasm_hash);
     ///
@@ -1615,6 +1843,85 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_init_twice_panics() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+
+        client.init(&signers, &2u32);
+        client.init(&signers, &2u32);
+    }
+
+    /// MultiSig::init must reject duplicate signer addresses.
+    /// [A, A, B] with threshold 2 has only 2 distinct signers (A and B),
+    /// so threshold 2 is technically reachable, but only by coincidence — not
+    /// by the number of distinct approvals possible. The init should reject
+    /// it proactively to prevent silent unreachable-quorum configurations.
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_init_rejects_duplicate_signers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a.clone());
+        signers.push_back(addr_a.clone()); // duplicate
+        signers.push_back(addr_b.clone());
+
+        // [A, A, B] with threshold 2 — should panic with AlreadySigner
+        client.init(&signers, &2u32);
+    }
+
+    /// Edge case: [A, A] with threshold 2 is the worst-case — only one
+    /// distinct signer, threshold of 2 is permanently unreachable.
+    #[test]
+    #[should_panic(expected = "AlreadySigner")]
+    fn test_init_rejects_duplicate_pair() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a.clone());
+        signers.push_back(addr_a.clone()); // duplicate — only 1 distinct signer
+
+        // [A, A] with threshold 2 — permanently unreachable, must be rejected
+        client.init(&signers, &2u32);
+    }
+
+    /// No duplicates — init must continue to succeed (regression guard).
+    #[test]
+    fn test_init_accepts_unique_signers() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+        let addr_c = Address::generate(&env);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(addr_a);
+        signers.push_back(addr_b);
+        signers.push_back(addr_c);
+
+        // [A, B, C] with threshold 2 — all distinct, must succeed
+        client.init(&signers, &2u32);
+    }
+
+    #[test]
     fn test_set_version() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1669,6 +1976,7 @@ mod test {
 
     #[test]
     #[should_panic(expected = "Upgrade timelock not elapsed")]
+    // Confirms that upgrade() rejects early execution before the timelock has elapsed.
     fn test_upgrade_rejects_early_execution() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1708,6 +2016,101 @@ mod test {
 
         env.ledger().with_mut(|li| li.timestamp = 3_600);
         client.upgrade(&other_hash);
+    }
+
+    #[test]
+    fn test_upgrade_rejects_hash_mismatch_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        assert_eq!(initial_version, VERSION);
+        assert_eq!(client.get_previous_version(), None);
+
+        let scheduled_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mismatch_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&scheduled_hash);
+
+        // Advance time past executable_at
+        env.ledger().with_mut(|li| li.timestamp = 3_600);
+
+        // Attempt upgrade with mismatched hash
+        let res = client.try_upgrade(&mismatch_hash);
+        assert!(res.is_err(), "upgrade() with mismatched WASM hash must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), Some(scheduled));
+    }
+
+    #[test]
+    fn test_upgrade_rejects_no_schedule_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        assert_eq!(initial_version, VERSION);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), None);
+
+        let wasm_hash = BytesN::from_array(&env, &[8u8; 32]);
+
+        // Attempt upgrade without any scheduled upgrade
+        let res = client.try_upgrade(&wasm_hash);
+        assert!(res.is_err(), "upgrade() without active schedule must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), None);
+    }
+
+    #[test]
+    fn test_upgrade_rejects_hash_mismatch_before_timelock_and_preserves_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let initial_version = client.get_version();
+        let scheduled_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let mismatch_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&scheduled_hash);
+
+        // Advance timestamp before timelock has elapsed
+        env.ledger().with_mut(|li| li.timestamp = 3_500);
+
+        // Attempt upgrade with mismatched hash before timelock
+        let res = client.try_upgrade(&mismatch_hash);
+        assert!(res.is_err(), "upgrade() with mismatched hash before timelock must be rejected");
+
+        // Verify contract version and state are provably unchanged
+        assert_eq!(client.get_version(), initial_version);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_scheduled_upgrade(), Some(scheduled));
     }
 
     #[test]
@@ -1789,6 +2192,33 @@ mod test {
     }
 
     #[test]
+    fn test_migrate_docs_example() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Force contract to start at v1 so the documented 1 -> 2 migrate(target=2)
+        // example executes against migrate_v1_to_v2, matching the doc scenario.
+        // Using direct instance storage set to avoid requiring a public setter for 1.
+        env.storage().instance().set(&DataKey::Version, &1u32);
+        assert_eq!(client.get_version(), 1);
+
+        let migration_hash = BytesN::from_array(&env, &[0u8; 32]);
+        client.migrate(&2, &migration_hash);
+
+        assert_eq!(client.get_version(), 2);
+        let migration_state = client.get_migration_state().expect("migration state must be recorded");
+        assert_eq!(migration_state.from_version, 1);
+        assert_eq!(migration_state.to_version, 2);
+        assert_eq!(migration_state.migration_hash, migration_hash);
+    }
+
+    #[test]
     #[should_panic(expected = "Target version must be greater than current version")]
     fn test_migration_invalid_target_version() {
         let env = Env::default();
@@ -1835,7 +2265,7 @@ mod test {
     }
 
     #[test]
-    fn test_get_previous_version() {
+    fn test_migration_state_getters_none_before_any_migration() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -1845,14 +2275,155 @@ mod test {
         let admin = Address::generate(&env);
         client.init_admin(&admin);
 
-        // Initially no previous version
-        assert!(client.get_previous_version().is_none());
+        assert_eq!(client.get_migration_state(), None);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_analytics().migrations_run, 0);
+        assert_eq!(client.get_state_snapshot().migrations_run, 0);
+    }
 
-        // Simulate upgrade (this would normally be done via upgrade() but we'll set version directly)
-        client.set_version(&2);
+    #[test]
+    fn test_migration_state_getters_across_upgrade_and_migrate_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 8_000);
 
-        // Previous version should still be None unless upgrade() was called
-        // This test verifies the get_previous_version function works
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let pre_upgrade_version = client.get_version();
+
+        assert_eq!(client.get_migration_state(), None);
+        assert_eq!(client.get_previous_version(), None);
+        assert_eq!(client.get_analytics().migrations_run, 0);
+
+        // Drive the real single-admin upgrade path. The empty uploaded WASM is
+        // sufficient for exercising update_current_contract_wasm in the test host.
+        let replacement_wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+
+        client.set_upgrade_delay(&600);
+        let scheduled = client.schedule_upgrade(&replacement_wasm_hash);
+
+        assert_eq!(scheduled.scheduled_at, 8_000);
+        assert_eq!(scheduled.executable_at, 8_600);
+
+        env.ledger().with_mut(|li| li.timestamp = scheduled.executable_at);
+        client.upgrade(&replacement_wasm_hash);
+
+        // The replacement test WASM has no callable entrypoints. Invoke the
+        // implementation directly in the preserved contract context to verify
+        // instance storage written by the real upgrade invocation.
+        let version_after_upgrade = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_version(env.clone())
+        });
+        let previous_version = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_previous_version(env.clone())
+        });
+        let migration_state_before = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_migration_state(env.clone())
+        });
+
+        assert_eq!(version_after_upgrade, pre_upgrade_version);
+        assert_eq!(previous_version, Some(pre_upgrade_version));
+        assert_eq!(migration_state_before, None);
+
+        let target_version = pre_upgrade_version + 1;
+        let migration_hash = BytesN::from_array(&env, &[4u8; 32]);
+        let migrated_at = scheduled.executable_at + 1;
+
+        env.ledger().with_mut(|li| li.timestamp = migrated_at);
+
+        env.as_contract(&contract_id, || {
+            GrainlifyContract::migrate(
+                env.clone(),
+                target_version,
+                migration_hash.clone(),
+            );
+        });
+
+        let migration_state = env
+            .as_contract(&contract_id, || {
+                GrainlifyContract::get_migration_state(env.clone())
+            })
+            .expect("completed migration must record migration state");
+
+        assert_eq!(
+            migration_state,
+            MigrationState {
+                from_version: pre_upgrade_version,
+                to_version: target_version,
+                migrated_at,
+                migration_hash: migration_hash.clone(),
+            }
+        );
+
+        let previous_after_migration = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_previous_version(env.clone())
+        });
+        let analytics_after_migration = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_analytics(env.clone())
+        });
+        let snapshot_after_migration = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_state_snapshot(env.clone())
+        });
+
+        assert_eq!(
+            previous_after_migration,
+            Some(pre_upgrade_version),
+            "migration must not overwrite the version captured by upgrade()"
+        );
+        assert_eq!(analytics_after_migration.upgrades_executed, 1);
+        assert_eq!(analytics_after_migration.migrations_run, 1);
+        assert_eq!(snapshot_after_migration.migrations_run, 1);
+
+        // The same completed migration is idempotent: state and counters must
+        // remain unchanged.
+        env.ledger().with_mut(|li| li.timestamp = migrated_at + 100);
+
+        env.as_contract(&contract_id, || {
+            GrainlifyContract::migrate(
+                env.clone(),
+                target_version,
+                migration_hash.clone(),
+            );
+        });
+
+        let state_after_repeat = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_migration_state(env.clone())
+        });
+        let analytics_after_repeat = env.as_contract(&contract_id, || {
+            GrainlifyContract::get_analytics(env.clone())
+        });
+
+        assert_eq!(state_after_repeat, Some(migration_state));
+        assert_eq!(analytics_after_repeat.migrations_run, 1);
+    }
+
+    /// get_version_semver_string must return "3.0.0" after migrating to version 3.
+    /// Previously the hardcoded match table had no 3|30000 arm, so it returned
+    /// "unknown" even after a successful migrate(env, 3, hash).
+    #[test]
+    fn test_version_semver_string_v3_after_migration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Default version after init_admin is 2
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "2.0.0"));
+
+        // Migrate to version 3
+        let migration_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.migrate(&3, &migration_hash);
+
+        // After migration, version string must reflect version 3
+        assert_eq!(client.get_version_semver_string(), String::from_str(&env, "3.0.0"));
     }
 
     // ========================================================================
@@ -1968,6 +2539,105 @@ mod test {
 
         client.init_admin(&admin1);
         client.init_admin(&admin2);
+    }
+
+    // ---- Issue #471: the three upgrade paths must be mutually exclusive ----
+
+    #[test]
+    #[should_panic(expected = "Upgrade mode already configured")]
+    fn test_init_admin_rejected_after_multisig_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        client.init(&signers, &3u32);
+
+        // A single-admin key must never become layerable on top of an
+        // already-active multisig upgrade path — that would let it bypass
+        // the 3-of-3 approval requirement entirely.
+        client.init_admin(&Address::generate(&env));
+    }
+
+    #[test]
+    // init_admin already writes DataKey::Version (shared with init's own
+    // pre-existing reinit guard), so that older check fires before the new
+    // UpgradeMode check is even reached in this direction. Either message
+    // is a correct rejection; this asserts the one that actually fires.
+    #[should_panic(expected = "Already initialized")]
+    fn test_multisig_init_rejected_after_admin_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        client.init_admin(&Address::generate(&env));
+
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        client.init(&signers, &2u32);
+    }
+
+    #[test]
+    fn test_init_governance_rejected_after_admin_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        client.init_admin(&Address::generate(&env));
+
+        let admin = Address::generate(&env);
+        let result = client.try_init_governance(&admin, &one_person_governance_config(&env));
+        assert_eq!(result, Err(Ok(governance::Error::AlreadyInitialized)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Upgrade mode already configured")]
+    fn test_admin_init_rejected_after_governance_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        // The single-admin path must not become available once governance
+        // has claimed upgrade authority: otherwise a single admin key could
+        // unilaterally replace the WASM, bypassing quorum/threshold voting
+        // entirely — the exact bypass this issue is about.
+        client.init_admin(&Address::generate(&env));
+    }
+
+    #[test]
+    fn test_single_admin_only_deployment_unaffected_by_mutual_exclusion() {
+        // A deployment that only ever calls init_admin (never init /
+        // init_governance) must keep working exactly as before.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let wasm_hash = env.deployer().upload_contract_wasm([].as_slice());
+        client.schedule_upgrade(&wasm_hash);
+        env.ledger()
+            .with_mut(|li| li.timestamp += DEFAULT_UPGRADE_DELAY_SECONDS);
+        client.upgrade(&wasm_hash);
     }
 
     #[test]
@@ -2314,6 +2984,112 @@ mod test {
         assert_eq!(client.get_state_snapshot().migrations_run, 1);
     }
 
+    fn assert_last_governance_metric_event(
+        env: &Env,
+        contract_id: &Address,
+        expected_metric: soroban_sdk::Symbol,
+        expected_total: u64,
+    ) {
+        let events = env.events().all();
+        assert!(events.len() > 0, "tracking helper must emit an event");
+
+        let (event_contract, topics, data) = events
+            .get(events.len() - 1)
+            .expect("last governance metric event must exist");
+
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (symbol_short!("metric"), symbol_short!("gov")).into_val(env);
+
+        assert_eq!(event_contract, contract_id.clone());
+        assert_eq!(topics, expected_topics);
+
+        let payload =
+            monitoring::GovernanceMetric::try_from_val(env, &data)
+                .expect("governance metric payload must decode");
+
+        assert_eq!(payload.metric, expected_metric);
+        assert_eq!(payload.total, expected_total);
+        assert_eq!(payload.timestamp, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_track_governance_metric_helpers_return_monotonic_totals() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(monitoring::track_proposal_created(&env), 1);
+            assert_eq!(monitoring::track_proposal_created(&env), 2);
+
+            assert_eq!(monitoring::track_vote_cast(&env), 1);
+            assert_eq!(monitoring::track_vote_cast(&env), 2);
+
+            assert_eq!(monitoring::track_upgrade_executed(&env), 1);
+            assert_eq!(monitoring::track_upgrade_executed(&env), 2);
+
+            assert_eq!(monitoring::track_migration_run(&env), 1);
+            assert_eq!(monitoring::track_migration_run(&env), 2);
+
+            let analytics = monitoring::get_analytics(&env);
+            assert_eq!(analytics.proposals_created, 2);
+            assert_eq!(analytics.votes_cast, 2);
+            assert_eq!(analytics.upgrades_executed, 2);
+            assert_eq!(analytics.migrations_run, 2);
+        });
+    }
+
+    #[test]
+    fn test_track_governance_metric_helpers_emit_exact_events() {
+        let env = Env::default();
+        env.ledger().with_mut(|ledger| ledger.timestamp = 9_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+
+        let proposal_total = env.as_contract(&contract_id, || {
+            monitoring::track_proposal_created(&env)
+        });
+        assert_eq!(proposal_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("proposal"),
+            proposal_total,
+        );
+
+        let vote_total = env.as_contract(&contract_id, || {
+            monitoring::track_vote_cast(&env)
+        });
+        assert_eq!(vote_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("vote"),
+            vote_total,
+        );
+
+        let upgrade_total = env.as_contract(&contract_id, || {
+            monitoring::track_upgrade_executed(&env)
+        });
+        assert_eq!(upgrade_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("upgrade"),
+            upgrade_total,
+        );
+
+        let migration_total = env.as_contract(&contract_id, || {
+            monitoring::track_migration_run(&env)
+        });
+        assert_eq!(migration_total, 1);
+        assert_last_governance_metric_event(
+            &env,
+            &contract_id,
+            symbol_short!("migrate"),
+            migration_total,
+        );
+    }
+
     #[test]
     fn test_upgrade_counter_increments_and_persists() {
         // The single-admin/multisig upgrade paths replace the contract WASM, so
@@ -2335,23 +3111,36 @@ mod test {
     }
 
     #[test]
-    fn test_counters_are_independent() {
-        // Exercising one counter must never perturb the others.
+    fn test_track_governance_metric_counters_are_independent() {
         let env = Env::default();
         let contract_id = env.register_contract(None, GrainlifyContract);
 
         env.as_contract(&contract_id, || {
-            monitoring::track_proposal_created(&env);
-            monitoring::track_vote_cast(&env);
-            monitoring::track_vote_cast(&env);
-            monitoring::track_upgrade_executed(&env);
-            monitoring::track_migration_run(&env);
+            assert_eq!(monitoring::track_proposal_created(&env), 1);
+            assert_eq!(monitoring::track_proposal_created(&env), 2);
+            assert_eq!(monitoring::track_proposal_created(&env), 3);
+
+            assert_eq!(monitoring::track_vote_cast(&env), 1);
+
+            assert_eq!(monitoring::track_upgrade_executed(&env), 1);
+            assert_eq!(monitoring::track_upgrade_executed(&env), 2);
+
+            assert_eq!(monitoring::track_migration_run(&env), 1);
+            assert_eq!(monitoring::track_migration_run(&env), 2);
+            assert_eq!(monitoring::track_migration_run(&env), 3);
+            assert_eq!(monitoring::track_migration_run(&env), 4);
 
             let analytics = monitoring::get_analytics(&env);
-            assert_eq!(analytics.proposals_created, 1);
-            assert_eq!(analytics.votes_cast, 2);
-            assert_eq!(analytics.upgrades_executed, 1);
-            assert_eq!(analytics.migrations_run, 1);
+            assert_eq!(analytics.proposals_created, 3);
+            assert_eq!(analytics.votes_cast, 1);
+            assert_eq!(analytics.upgrades_executed, 2);
+            assert_eq!(analytics.migrations_run, 4);
+
+            let snapshot = monitoring::get_state_snapshot(&env);
+            assert_eq!(snapshot.proposals_created, 3);
+            assert_eq!(snapshot.votes_cast, 1);
+            assert_eq!(snapshot.upgrades_executed, 2);
+            assert_eq!(snapshot.migrations_run, 4);
         });
     }
 
@@ -2493,7 +3282,9 @@ mod test {
 
         // 3. Execute -> emits UpgradeExecuted
         let events_len_before = env.events().all().len();
-        client.execute_upgrade(&proposal_id);
+        assert_eq!(client.multisig_nonce(), 0);
+        client.execute_upgrade(&proposal_id, &0u64);
+        assert_eq!(client.multisig_nonce(), 1);
         let events = env.events().all();
         assert!(events.len() > events_len_before);
 
@@ -2508,5 +3299,237 @@ mod test {
             }
         }
         assert!(found_upg_exec);
+    }
+
+    // Requires a prebuilt grainlify-core wasm32v1-none release artifact for
+    // the include_bytes! below (`cargo build -p grainlify-core --release
+    // --target wasm32v1-none`) — gated behind a feature so the default
+    // host-only `cargo test -p grainlify-core` doesn't need that target
+    // (Issue #529). Run explicitly with `--features wasm-upgrade-test`
+    // after building the artifact.
+    #[test]
+    #[cfg(feature = "wasm-upgrade-test")]
+    fn test_upgrade_replay_guard_and_rescheduling() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 5_000);
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        // Use the compiled contract WASM with proper metadata for upload.
+        let wasm_bytes = include_bytes!("../target/wasm32v1-none/release/grainlify_core.wasm");
+        let wasm_hash = env.deployer().upload_contract_wasm(&wasm_bytes[..]);
+        client.set_upgrade_delay(&600);
+        client.schedule_upgrade(&wasm_hash);
+
+        // Verify get_scheduled_upgrade returns the scheduled upgrade before execution
+        let scheduled_before = client.get_scheduled_upgrade().unwrap();
+        assert_eq!(scheduled_before.wasm_hash, wasm_hash);
+        assert_eq!(scheduled_before.scheduled_at, 5_000);
+        assert_eq!(scheduled_before.executable_at, 5_600);
+
+        env.ledger().with_mut(|li| li.timestamp = 5_600);
+
+        // Perform the upgrade
+        client.upgrade(&wasm_hash);
+
+        // 1. get_scheduled_upgrade is None immediately after a successful upgrade.
+        assert!(client.get_scheduled_upgrade().is_none());
+
+        // 2. A same-hash replay call fails after the schedule is consumed.
+        let result = client.try_upgrade(&wasm_hash);
+        assert!(result.is_err());
+
+        // 3. Re-scheduling after completion starts a correctly-fresh timelock.
+        env.ledger().with_mut(|li| li.timestamp = 6_000);
+        
+        // Let's schedule a new upgrade hash
+        let new_wasm_hash = wasm_hash; // reuse original wasm_hash to avoid missing metadata
+        let rescheduled = client.schedule_upgrade(&new_wasm_hash);
+
+        assert_eq!(rescheduled.wasm_hash, new_wasm_hash);
+        assert_eq!(rescheduled.scheduled_at, 6_000);
+        assert_eq!(rescheduled.executable_at, 6_600);
+        
+        let scheduled_after = client.get_scheduled_upgrade().unwrap();
+        assert_eq!(scheduled_after, rescheduled);
+
+        // Verify that executing before the new timelock fails
+        env.ledger().with_mut(|li| li.timestamp = 6_599);
+        assert!(client.try_upgrade(&new_wasm_hash).is_err());
+
+        // Verify it succeeds after the new timelock
+        env.ledger().with_mut(|li| li.timestamp = 6_600);
+        client.upgrade(&new_wasm_hash);
+        
+        // After this second upgrade, it is None again
+        assert!(client.get_scheduled_upgrade().is_none());
+    }
+
+    /// is_vetoed must reflect real proposal state (Issue #386): false for a
+    /// proposal that was never cancelled, true once cancel_proposal actually
+    /// cancels it — not an unconditional stub.
+    #[test]
+    fn test_is_vetoed_reflects_real_cancellation_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        let prop_id = client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+
+        assert!(
+            !client.is_vetoed(&prop_id),
+            "a freshly created proposal is never vetoed"
+        );
+
+        client.cancel_proposal(&proposer, &prop_id);
+
+        assert!(
+            client.is_vetoed(&prop_id),
+            "a cancelled proposal must report as vetoed"
+        );
+    }
+
+    #[test]
+    fn test_sweep_expired_proposal_uses_public_entrypoint() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        client.init_governance(&admin, &one_person_governance_config(&env));
+
+        let hash = BytesN::from_array(&env, &[2u8; 32]);
+        let prop_id = client.create_proposal(&proposer, &hash, &symbol_short!("p1"));
+        env.ledger().with_mut(|li| li.timestamp = 101);
+        client.sweep_expired_proposal(&prop_id);
+
+        assert_eq!(client.get_proposal_status(&prop_id), ProposalStatus::Expired);
+    }
+
+    // ============================================================
+    // health_check() wrapper tests
+    // ============================================================
+
+    /// Test that health_check returns healthy by default through the contract client.
+    /// Note: the current implementation always returns is_healthy = true regardless
+    /// of error rate. Rolling-window error-tracking semantics described in the
+    /// monitoring module doc do not exist yet — this test documents the actual
+    /// behaviour so that when those semantics are implemented, this test will
+    /// need to be updated with error-injection + time-decay assertions.
+    #[test]
+    fn test_health_check_through_client() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let status = client.health_check();
+        assert!(status.is_healthy);
+        assert!(status.total_operations > 0);
+        assert!(status.contract_version.len() > 0);
+    }
+
+    /// Test health_check returns consistent data across multiple calls
+    #[test]
+    fn test_health_check_idempotent() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let s1 = client.health_check();
+        let s2 = client.health_check();
+        assert_eq!(s1.is_healthy, s2.is_healthy);
+        assert_eq!(s1.contract_version, s2.contract_version);
+    }
+
+    // ============================================================
+    // get_performance_stats() wrapper tests
+    // ============================================================
+
+    /// Test that get_performance_stats returns zeroed stats for a function that
+    /// was never tracked (rather than panicking).
+    #[test]
+    fn test_performance_stats_untracked_function() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_admin(&admin);
+
+        let stats = client.get_performance_stats(&symbol_short!("noexist"));
+        assert_eq!(stats.call_count, 0);
+        assert_eq!(stats.total_time, 0);
+        assert_eq!(stats.avg_time, 0);
+        assert_eq!(stats.last_called, 0);
+        assert_eq!(stats.function_name, symbol_short!("noexist"));
+    }
+
+    /// Test that get_performance_stats returns correct avg_time after several
+    /// emit_performance-driving operations. init_admin → tracks "init", 
+    /// set_version → tracks "set_ver". Call each once; verify stats.
+    #[test]
+    fn test_performance_stats_avg_time_computation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        // init_admin calls emit_performance("init", duration)
+        client.init_admin(&admin);
+        // set_version calls emit_performance("set_ver", duration)
+        client.set_version(&5);
+
+        let stats = client.get_performance_stats(&symbol_short!("init"));
+        assert_eq!(stats.call_count, 1);
+        // In test env, operations can complete in zero ledger time, so total_time may be 0
+        assert_eq!(stats.avg_time, if stats.call_count > 0 { stats.total_time / stats.call_count } else { 0 });
+        assert_eq!(stats.function_name, symbol_short!("init"));
+
+        let stats2 = client.get_performance_stats(&symbol_short!("set_ver"));
+        assert_eq!(stats2.call_count, 1);
+        assert_eq!(stats2.avg_time, if stats2.call_count > 0 { stats2.total_time / stats2.call_count } else { 0 });
+    }
+
+    /// Test average time computation with multiple calls — total / count integer division
+    #[test]
+    fn test_performance_stats_avg_with_multiple_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, GrainlifyContract);
+        let client = GrainlifyContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        // Call set_version multiple times — each triggers emit_performance("set_ver", ...)
+        client.init_admin(&admin);
+        client.set_version(&5);
+        client.set_version(&6);
+        client.set_version(&7);
+
+        let stats = client.get_performance_stats(&symbol_short!("set_ver"));
+        assert_eq!(stats.call_count, 3, "three set_version calls");
+        // avg_time should be integer division: total / 3
+        assert_eq!(stats.avg_time, if stats.call_count > 0 { stats.total_time / stats.call_count } else { 0 });
     }
 }

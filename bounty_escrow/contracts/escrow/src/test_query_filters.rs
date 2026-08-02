@@ -28,6 +28,7 @@ fn create_escrow(env: &Env) -> BountyEscrowContractClient<'static> {
 
 struct Setup {
     env: Env,
+    admin: Address,
     depositor: Address,
     contributor: Address,
     token: token::Client<'static>,
@@ -48,6 +49,7 @@ impl Setup {
         token_admin.mint(&depositor, &10_000_000);
         Setup {
             env,
+            admin,
             depositor,
             contributor,
             token,
@@ -886,4 +888,270 @@ fn test_composite_filter_refunded_status() {
             EscrowStatus::Refunded
         );
     }
+}
+
+#[test]
+fn test_query_filters_combined_three_dimensions_exact_subset() {
+    let s = Setup::new();
+    let base = s.env.ledger().timestamp();
+    let dl1 = base + 1000;
+    
+    let depositor2 = Address::generate(&s.env);
+    s.token_admin.mint(&depositor2, &10_000);
+
+    // 1. match (depositor, locked, amount=500)
+    s.escrow.lock_funds(&s.depositor, &1, &500, &dl1); 
+    // 2. wrong depositor
+    s.escrow.lock_funds(&depositor2, &2, &500, &dl1);
+    // 3. wrong amount
+    s.escrow.lock_funds(&s.depositor, &3, &200, &dl1);
+    // 4. wrong status (released)
+    s.escrow.lock_funds(&s.depositor, &4, &500, &dl1);
+    s.escrow.release_funds(&4, &s.contributor);
+    // 5. match (depositor, locked, amount=600)
+    s.escrow.lock_funds(&s.depositor, &5, &600, &dl1);
+
+    // Query: depositor=s.depositor, status=Locked, amount in [400, 700]
+    let filter = EscrowQueryFilter {
+        has_depositor_filter: true,
+        depositor: s.depositor.clone(),
+        has_status_filter: true,
+        status: EscrowStatus::Locked,
+        min_amount: 400,
+        max_amount: 700,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+    
+    let results = s.escrow.query_escrows(&filter, &0, &10);
+    assert_eq!(results.len(), 2);
+    let mut found_1 = false;
+    let mut found_5 = false;
+    for i in 0..results.len() {
+        let id = results.get(i).unwrap().bounty_id;
+        if id == 1 { found_1 = true; }
+        if id == 5 { found_5 = true; }
+    }
+    assert!(found_1 && found_5);
+}
+
+#[test]
+fn test_query_filters_combined_matching_zero() {
+    let s = Setup::new();
+    let dl = s.env.ledger().timestamp() + 1000;
+    
+    // Create some escrows
+    s.escrow.lock_funds(&s.depositor, &1, &500, &dl);
+    s.escrow.lock_funds(&s.depositor, &2, &600, &dl);
+    
+    // Query with 3 dimensions that don't overlap with any escrow:
+    // status = Released, depositor = s.depositor, amount in [1000, 2000]
+    let filter = EscrowQueryFilter {
+        has_depositor_filter: true,
+        depositor: s.depositor.clone(),
+        has_status_filter: true,
+        status: EscrowStatus::Released,
+        min_amount: 1000,
+        max_amount: 2000,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+    
+    let results = s.escrow.query_escrows(&filter, &0, &10);
+    // Should cleanly return empty
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_query_filters_mutually_exclusive() {
+    let s = Setup::new();
+    let dl = s.env.ledger().timestamp() + 1000;
+    
+    s.escrow.lock_funds(&s.depositor, &1, &500, &dl);
+    
+    // Mutually exclusive: min_amount > max_amount
+    let filter = EscrowQueryFilter {
+        has_depositor_filter: false,
+        depositor: Address::generate(&s.env),
+        has_status_filter: false,
+        status: EscrowStatus::Locked, // Unused
+        min_amount: 1000,
+        max_amount: 500,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+    
+    let results = s.escrow.query_escrows(&filter, &0, &10);
+    // Should cleanly return empty, as it's logically impossible
+    assert_eq!(results.len(), 0);
+}
+
+// ==================== QUERY EXPIRING BOUNTIES TESTS ====================
+
+#[test]
+fn test_query_expiring_bounties_includes_expected_statuses() {
+    let s = Setup::new();
+    let base = s.env.ledger().timestamp();
+    
+    // 1. Locked and expiring (<= max_deadline) -> INCLUDED
+    s.escrow.lock_funds(&s.depositor, &1, &100, &(base + 100));
+    
+    // 2. Locked but not expiring (> max_deadline) -> EXCLUDED
+    s.escrow.lock_funds(&s.depositor, &2, &200, &(base + 500));
+    
+    // 3. PartiallyRefunded and expiring (<= max_deadline) -> INCLUDED
+    s.escrow.lock_funds(&s.depositor, &3, &300, &(base + 200));
+    s.escrow.approve_refund(&3, &100, &s.depositor, &RefundMode::Partial);
+    s.escrow.refund(&3);
+    
+    let results = s.escrow.query_expiring_bounties(&(base + 300), &0, &10);
+    assert_eq!(results.len(), 2);
+    let mut found_1 = false;
+    let mut found_3 = false;
+    for i in 0..results.len() {
+        let id = results.get(i).unwrap();
+        if id == 1 { found_1 = true; }
+        if id == 3 { found_3 = true; }
+    }
+    assert!(found_1 && found_3);
+}
+
+#[test]
+fn test_query_expiring_bounties_excludes_released_and_refunded() {
+    let s = Setup::new();
+    let base = s.env.ledger().timestamp();
+    
+    // Released, even if deadline qualifies -> EXCLUDED
+    s.escrow.lock_funds(&s.depositor, &1, &100, &(base + 100));
+    s.escrow.release_funds(&1, &s.contributor);
+    
+    // Fully Refunded, even if deadline qualifies -> EXCLUDED
+    s.escrow.lock_funds(&s.depositor, &2, &200, &(base + 100));
+    s.env.ledger().set_timestamp(base + 101);
+    s.escrow.refund(&2);
+    
+    // PartiallyRefunded (for control) -> INCLUDED
+    s.escrow.lock_funds(&s.depositor, &3, &300, &(base + 150));
+    s.escrow.approve_refund(&3, &100, &s.depositor, &RefundMode::Partial);
+    s.escrow.refund(&3);
+    
+    let results = s.escrow.query_expiring_bounties(&(base + 200), &0, &10);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0).unwrap(), 3);
+}
+
+#[test]
+fn test_query_expiring_bounties_pagination() {
+    let s = Setup::new();
+    let base = s.env.ledger().timestamp();
+    
+    // Create 5 expiring Locked bounties
+    for i in 1u64..=5 {
+        s.escrow.lock_funds(&s.depositor, &i, &100, &(base + 100));
+    }
+    
+    // Also create 1 that shouldn't be included (wrong deadline)
+    s.escrow.lock_funds(&s.depositor, &6, &100, &(base + 1000));
+    
+    let max_deadline = base + 500;
+    
+    let page1 = s.escrow.query_expiring_bounties(&max_deadline, &0, &2);
+    assert_eq!(page1.len(), 2);
+    
+    let page2 = s.escrow.query_expiring_bounties(&max_deadline, &2, &2);
+    assert_eq!(page2.len(), 2);
+    
+    let page3 = s.escrow.query_expiring_bounties(&max_deadline, &4, &2);
+    assert_eq!(page3.len(), 1);
+    
+    // Check they are distinct
+    assert_ne!(page1.get(0).unwrap(), page2.get(0).unwrap());
+    assert_ne!(page2.get(0).unwrap(), page3.get(0).unwrap());
+}
+
+#[test]
+fn test_query_expiring_bounties_empty_index() {
+    let s = Setup::new();
+    let base = s.env.ledger().timestamp();
+    
+    let results = s.escrow.query_expiring_bounties(&(base + 100), &0, &10);
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_query_limit_clamped_to_max_query_limit() {
+    let s = Setup::new();
+    s.env.budget().reset_unlimited();
+    let dl = s.env.ledger().timestamp() + 1000;
+
+    // Whitelist depositor to bypass anti-abuse rate limiter
+    s.escrow
+        .set_whitelist(&s.depositor, &true);
+
+    // Create more escrows than MAX_QUERY_LIMIT (100)
+    let total = MAX_QUERY_LIMIT + 10;
+    for id in 1..=total as u64 {
+        s.escrow.lock_funds(&s.depositor, &id, &(id as i128), &dl);
+    }
+
+    // Verify the index actually exceeds the cap
+    let count = s.escrow.get_escrow_count();
+    assert!(count > MAX_QUERY_LIMIT);
+
+    // query_escrows_by_status with limit = u32::MAX should return at most MAX_QUERY_LIMIT
+    let results =
+        s.escrow
+            .query_escrows_by_status(&EscrowStatus::Locked, &0, &u32::MAX);
+    assert_eq!(results.len(), MAX_QUERY_LIMIT);
+
+    // get_escrow_ids_by_status with limit = u32::MAX should return at most MAX_QUERY_LIMIT
+    let ids = s
+        .escrow
+        .get_escrow_ids_by_status(&EscrowStatus::Locked, &0, &u32::MAX);
+    assert_eq!(ids.len(), MAX_QUERY_LIMIT);
+
+    // query_expiring_bounties with limit = u32::MAX should return at most MAX_QUERY_LIMIT
+    let expiring = s
+        .escrow
+        .query_expiring_bounties(&(dl + 1), &0, &u32::MAX);
+    assert_eq!(expiring.len(), MAX_QUERY_LIMIT);
+
+    // query_escrows (composite filter) with limit = u32::MAX
+    let filter = EscrowQueryFilter {
+        has_status_filter: true,
+        status: EscrowStatus::Locked,
+        has_depositor_filter: false,
+        depositor: s.depositor.clone(),
+        min_amount: 0,
+        max_amount: i128::MAX,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+    let composite = s.escrow.query_escrows(&filter, &0, &u32::MAX);
+    assert_eq!(composite.len(), MAX_QUERY_LIMIT);
+}
+
+// Regression guard for issue #486: docs/QUERY_DOCUMENTATION.md and
+// docs/QUERY_QUICK_REFERENCE.md previously showed an Option-based
+// EscrowQueryFilter shape that does not match this struct and would not
+// compile. This mirrors the "Query all locked escrows with amount >= 1000"
+// example verbatim, so if the struct's field shape ever drifts again, this
+// test (not just the docs) fails to compile.
+#[test]
+fn test_escrow_query_filter_doc_example_compiles() {
+    let s = Setup::new();
+
+    let filter = EscrowQueryFilter {
+        has_status_filter: true,
+        status: EscrowStatus::Locked,
+        has_depositor_filter: false,
+        depositor: Address::generate(&s.env),
+        min_amount: 1000,
+        max_amount: i128::MAX,
+        min_deadline: 0,
+        max_deadline: u64::MAX,
+    };
+    // Not asserting on contents here -- the point is that this construction
+    // and call compiles against the real struct/entrypoint shape.
+    let _results = s.escrow.query_escrows(&filter, &0, &50);
 }

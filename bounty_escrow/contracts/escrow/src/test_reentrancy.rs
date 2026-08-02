@@ -12,6 +12,7 @@ enum AttackMode {
     None = 0,
     Claim = 1,
     PartialRelease = 2,
+    ReleaseFunds = 3,
 }
 
 #[contracttype]
@@ -210,6 +211,14 @@ impl HostileTokenContract {
 
         let blocked = if mode == AttackMode::Claim as u32 {
             match client.try_claim(&bounty_id) {
+                Ok(inner) => inner.is_err(),
+                Err(_) => true,
+            }
+        } else if mode == AttackMode::ReleaseFunds as u32 {
+            // Try to re-enter release_funds during the token transfer.
+            // With effects-before-interactions the escrow is already Released,
+            // so the second call must be rejected (FundsNotLocked or similar).
+            match client.try_release_funds(&bounty_id, recipient) {
                 Ok(inner) => inner.is_err(),
                 Err(_) => true,
             }
@@ -472,4 +481,91 @@ fn hostile_token_cannot_double_spend_partial_release_during_transfer() {
         "partial release must not execute a second escrow-to-recipient transfer"
     );
     assert_eq!(hostile_token.balance(&contributor), payout_amount);
+}
+
+/// Mirrors program-escrow's malicious_reentrant.rs approach, adapted for
+/// bounty_escrow's `release_funds` path.
+///
+/// # Attack scenario
+/// A hostile token contract intercepts the `transfer` call made by
+/// `release_funds` and immediately tries to call `release_funds` again on the
+/// same bounty before the first invocation has returned.
+///
+/// # Why it must fail
+/// After the effects-before-interactions fix the escrow state is written as
+/// `Released` (remaining_amount = 0) *before* the token transfer.  The
+/// reentrant call therefore finds `escrow.status != Locked` and is rejected
+/// with `FundsNotLocked`.  Without the fix the second call would see the old
+/// `Locked` state and transfer the funds a second time.
+///
+/// The test also verifies that the reentrancy guard alone (belt-and-suspenders)
+/// blocks the second call even if the state were somehow still Locked.
+#[test]
+fn hostile_token_cannot_double_spend_release_funds_during_transfer() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let (token, hostile_token) = create_hostile_token(&env, &contract_id);
+    let bounty_id = 99_u64;
+    let amount = 2_000_i128;
+
+    client.init(&admin, &token);
+    hostile_token.mint(&depositor, &amount);
+
+    client.lock_funds(
+        &depositor,
+        &bounty_id,
+        &amount,
+        &(env.ledger().timestamp() + 100),
+    );
+
+    // Arm the hostile token: when it receives a transfer *from* the escrow
+    // contract it will immediately call release_funds again on the same bounty.
+    hostile_token.set_attack(&(AttackMode::ReleaseFunds as u32), &bounty_id);
+
+    // The legitimate release must complete without panicking.
+    client.release_funds(&bounty_id, &contributor);
+
+    let escrow = client.get_escrow_info(&bounty_id);
+
+    // The escrow must be Released with zero remaining — exactly once.
+    assert_eq!(
+        escrow.status,
+        EscrowStatus::Released,
+        "escrow must end up Released"
+    );
+    assert_eq!(
+        escrow.remaining_amount, 0,
+        "remaining_amount must be zeroed after release"
+    );
+
+    // The hostile token attempted exactly one reentrant call.
+    assert_eq!(
+        hostile_token.attack_count(),
+        1,
+        "hostile token should have attempted one reentrant release_funds call"
+    );
+
+    // That reentrant attempt must have been blocked (state-based or guard-based).
+    assert!(
+        hostile_token.reentry_blocked(),
+        "reentrant release_funds call must be rejected by escrow state or guard"
+    );
+
+    // Only one actual escrow-to-contributor transfer must have occurred.
+    assert_eq!(
+        hostile_token.escrow_transfer_count(),
+        1,
+        "release_funds must not execute a second escrow-to-contributor transfer"
+    );
+
+    // Contributor received the funds exactly once.
+    assert_eq!(
+        hostile_token.balance(&contributor),
+        amount,
+        "contributor balance must equal the locked amount (no double-spend)"
+    );
 }

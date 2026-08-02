@@ -24,17 +24,17 @@ import {
 // -----------------------------------------------------------------------
 
 /** contracts/program-escrow/src/lib.rs — Error enum */
-const PROGRAM_ESCROW_DISCRIMINANTS: number[] = [4];
+const PROGRAM_ESCROW_DISCRIMINANTS: number[] = [4, 5];
 
 /** contracts/bounty_escrow/contracts/escrow/src/lib.rs — Error enum */
 const BOUNTY_ESCROW_DISCRIMINANTS: number[] = [
   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, /* gap at 15 */ 16, 17, 18,
-  19, 20, 21, 22, 23,
+  19, 20, 21, 22, 23, 24, 25, 26, 27,
 ];
 
 /** contracts/grainlify-core/src/governance.rs — Error enum */
 const GOVERNANCE_DISCRIMINANTS: number[] = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 ];
 
 /** contracts/program-escrow/src/error_recovery.rs — u32 constants */
@@ -93,7 +93,7 @@ describe('Numeric error code tables', () => {
   });
 
   describe('Bounty-escrow', () => {
-    it('maps every contract discriminant (1-23, excluding 15)', () => {
+    it('maps every contract discriminant (1-27, excluding 15)', () => {
       for (const code of BOUNTY_ESCROW_DISCRIMINANTS) {
         expect(BOUNTY_ESCROW_ERROR_MAP[code]).toBeDefined();
       }
@@ -108,6 +108,21 @@ describe('Numeric error code tables', () => {
       }
     });
 
+    it('resolves pending-claim, upgrade, and analytics errors to specific codes', () => {
+      const cases: [number, ContractErrorCode][] = [
+        [24, ContractErrorCode.BOUNTY_PENDING_CLAIM_EXISTS],
+        [26, ContractErrorCode.BOUNTY_UPGRADE_NOT_APPROVED],
+        [27, ContractErrorCode.BOUNTY_ANALYTICS_OVERFLOW],
+      ];
+
+      for (const [code, expected] of cases) {
+        const err = parseContractErrorByCode(code, 'bounty_escrow');
+        expect(err.code).toBe(expected);
+        expect(err.code).not.toBe('CONTRACT_ERROR');
+        expect(err.contractErrorCode).toBe(code);
+      }
+    });
+
     it('returns generic error for unmapped code', () => {
       const err = parseContractErrorByCode(15, 'bounty_escrow');
       expect(err.code).toBe('CONTRACT_ERROR');
@@ -117,7 +132,7 @@ describe('Numeric error code tables', () => {
   });
 
   describe('Governance', () => {
-    it('maps every contract discriminant (1-14)', () => {
+    it('maps every contract discriminant (1-19)', () => {
       for (const code of GOVERNANCE_DISCRIMINANTS) {
         expect(GOVERNANCE_ERROR_MAP[code]).toBeDefined();
       }
@@ -130,6 +145,15 @@ describe('Numeric error code tables', () => {
         expect(err.code).not.toBe('CONTRACT_ERROR');
         expect(err.contractErrorCode).toBe(code);
       }
+    });
+
+    it('resolves voting-power and authorization errors to distinct codes', () => {
+      expect(parseContractErrorByCode(15, 'governance').code)
+        .toBe(ContractErrorCode.GOV_ZERO_VOTING_POWER);
+      expect(parseContractErrorByCode(16, 'governance').code)
+        .toBe(ContractErrorCode.GOV_INVALID_TOTAL_VOTING_POWER);
+      expect(parseContractErrorByCode(17, 'governance').code)
+        .toBe(ContractErrorCode.GOV_UNAUTHORIZED);
     });
 
     it('returns generic error for unmapped code', () => {
@@ -181,6 +205,8 @@ describe('parseContractError string matching', () => {
     ['Amount exceeds maximum allowed',                 ContractErrorCode.AMOUNT_ABOVE_MAX],
     ['AmountAboveMaximum',                             ContractErrorCode.AMOUNT_ABOVE_MAX],
     ['GovernanceVersionTooLow',                       ContractErrorCode.GOVERNANCE_VERSION_TOO_LOW],
+    ['InvalidThresholdBps',                            ContractErrorCode.INVALID_THRESHOLD_BPS],
+    ['threshold_bps exceeds 10_000',                   ContractErrorCode.INVALID_THRESHOLD_BPS],
   ];
 
   it.each(programEscrowCases)(
@@ -292,6 +318,14 @@ describe('parseContractError string matching', () => {
 // 4. Cross-layer consistency: numeric ↔ string resolution agrees
 // =======================================================================
 describe('Cross-layer consistency', () => {
+  it('program-escrow numeric and string parsers yield the same code', () => {
+    const fromNumeric = parseContractErrorByCode(5, 'program_escrow');
+    const fromString = parseContractError(new Error('InvalidThresholdBps'));
+
+    expect(fromNumeric.code).toBe(ContractErrorCode.INVALID_THRESHOLD_BPS);
+    expect(fromNumeric.code).toBe(fromString.code);
+  });
+
   it('bounty-escrow numeric and string parsers yield the same code', () => {
     const numericToString: [number, string][] = [
       [3,  'BountyExists'],
@@ -303,6 +337,7 @@ describe('Cross-layer consistency', () => {
       [21, 'CircuitBreakerOpen'],
       [22, 'ClaimExpired'],
       [23, 'Bounty GovernanceVersionTooLow'],
+      [25, 'Bounty GovernanceProposalNotExecutable'],
     ];
 
     for (const [code, message] of numericToString) {
@@ -334,20 +369,20 @@ describe('Cross-layer consistency', () => {
 describe('Enum size regression guards', () => {
   it('ContractErrorCode has the expected number of values', () => {
     const count = Object.keys(ContractErrorCode).length;
-    // 11 program-escrow + 22 bounty-escrow + 14 governance + 3 circuit-breaker = 50
-    expect(count).toBe(50);
+    // 12 program-escrow + 26 bounty-escrow + 19 governance + 3 circuit-breaker = 60
+    expect(count).toBe(60);
   });
 
-  it('PROGRAM_ESCROW_ERROR_MAP has 1 entry', () => {
-    expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(1);
+  it('PROGRAM_ESCROW_ERROR_MAP has 2 entries', () => {
+    expect(Object.keys(PROGRAM_ESCROW_ERROR_MAP).length).toBe(2);
   });
 
-  it('BOUNTY_ESCROW_ERROR_MAP has 22 entries', () => {
-    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(22);
+  it('BOUNTY_ESCROW_ERROR_MAP has 26 entries', () => {
+    expect(Object.keys(BOUNTY_ESCROW_ERROR_MAP).length).toBe(26);
   });
 
-  it('GOVERNANCE_ERROR_MAP has 14 entries', () => {
-    expect(Object.keys(GOVERNANCE_ERROR_MAP).length).toBe(14);
+  it('GOVERNANCE_ERROR_MAP has 19 entries', () => {
+    expect(Object.keys(GOVERNANCE_ERROR_MAP).length).toBe(19);
   });
 
   it('CIRCUIT_BREAKER_ERROR_MAP has 3 entries', () => {

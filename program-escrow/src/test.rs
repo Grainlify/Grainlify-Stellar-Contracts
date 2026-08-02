@@ -45,7 +45,10 @@ fn next_seed(seed: &mut u64) -> u64 {
 
 fn assert_event_data_has_v2_tag(env: &Env, data: &Val) {
     if let Ok(data_map) = Map::<Symbol, Val>::try_from_val(env, data) {
-        if data_map.contains_key(Symbol::new(env, "duration")) || data_map.contains_key(Symbol::new(env, "caller")) || data_map.contains_key(Symbol::new(env, "lock")) {
+        if data_map.contains_key(Symbol::new(env, "duration"))
+            || data_map.contains_key(Symbol::new(env, "caller"))
+            || data_map.contains_key(Symbol::new(env, "lock"))
+        {
             return; // Skip metric/op/pause events
         }
         let version_val = data_map
@@ -71,7 +74,6 @@ fn get_batch_gas_proxy_metrics(
         if contract != client.address {
             continue;
         }
-
 
         let transfer_ops = get_u32_event_field(env, &data, "gas_proxy_transfer_ops");
         let history_appends = get_u32_event_field(env, &data, "gas_proxy_history_appends");
@@ -478,7 +480,7 @@ fn test_release_schedule_exact_timestamp_boundary() {
     let released = client.trigger_program_releases();
     assert_eq!(released, 1);
 
-    let schedules = client.get_program_release_schedules();
+    let schedules = client.get_program_release_schedules(&0, &100);
     let updated = schedules.get(0).unwrap();
     assert_eq!(updated.schedule_id, schedule.schedule_id);
     assert!(updated.released);
@@ -499,7 +501,7 @@ fn test_release_schedule_just_before_timestamp_rejected() {
     assert_eq!(released, 0);
     assert_eq!(token_client.balance(&recipient), 0);
 
-    let schedules = client.get_program_release_schedules();
+    let schedules = client.get_program_release_schedules(&0, &100);
     assert!(!schedules.get(0).unwrap().released);
 }
 
@@ -760,84 +762,6 @@ fn test_anti_abuse_whitelist_bypass() {
 }
 
 // =============================================================================
-// TESTS FOR batch_initialize_programs
-// =============================================================================
-
-#[test]
-fn test_batch_initialize_programs_success() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, ProgramEscrowContract);
-    let client = ProgramEscrowContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let mut items = Vec::new(&env);
-    items.push_back(ProgramInitItem {
-        program_id: String::from_str(&env, "prog-1"),
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    items.push_back(ProgramInitItem {
-        program_id: String::from_str(&env, "prog-2"),
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    let count = client
-        .try_batch_initialize_programs(&items)
-        .unwrap()
-        .unwrap();
-    assert_eq!(count, 2);
-    // batch_initialize_programs uses the multi-program registry (DataKey::Program),
-    // not the single-program PROGRAM_DATA key, so program_exists() won't return true.
-    // Verify the batch succeeded by count alone.
-}
-
-#[test]
-fn test_batch_initialize_programs_empty_err() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, ProgramEscrowContract);
-    let client = ProgramEscrowContractClient::new(&env, &contract_id);
-    let items: Vec<ProgramInitItem> = Vec::new(&env);
-    let res = client.try_batch_initialize_programs(&items);
-    assert!(matches!(res, Err(Ok(BatchError::InvalidBatchSize))));
-}
-
-#[test]
-fn test_batch_initialize_programs_duplicate_id_err() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, ProgramEscrowContract);
-    let client = ProgramEscrowContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let pid = String::from_str(&env, "same-id");
-    let mut items = Vec::new(&env);
-    items.push_back(ProgramInitItem {
-        program_id: pid.clone(),
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    items.push_back(ProgramInitItem {
-        program_id: pid,
-        authorized_payout_key: admin.clone(),
-        token_address: token.clone(),
-    });
-    let res = client.try_batch_initialize_programs(&items);
-    assert!(matches!(res, Err(Ok(BatchError::DuplicateProgramId))));
-}
-
-// =============================================================================
-// TESTS FOR MULTI-TENANT ISOLATION
-// =============================================================================
-
-// Note: Comprehensive multi-tenant isolation tests are implemented in lib.rs
-// using the ProgramEscrowContractClient for proper integration testing.
-// The tests verify:
-// - Funds and balance isolation between programs
-// - Payout history isolation
-// - Release schedule isolation
-// - Release history isolation
-// - Analytics isolation concepts (for future program-specific analytics)
-
-// =============================================================================
 // TESTS FOR PROGRAM ANALYTICS AND MONITORING VIEWS
 // =============================================================================
 
@@ -1028,10 +952,10 @@ fn test_health_due_schedules() {
     client.create_program_release_schedule(&15_000_0000000, &(now + 1000), &recipient2);
 
     // Check due schedules
-    let due = client.get_due_schedules();
+    let due = client.get_due_schedules(&0, &100);
     assert_eq!(due.len(), 1);
 
-    let pending = client.get_pending_schedules();
+    let pending = client.get_pending_schedules(&0, &100);
     assert_eq!(pending.len(), 2);
 }
 
@@ -1707,13 +1631,209 @@ fn test_combined_recipient_and_amount_filter_manual() {
     assert_eq!(last_amount, 200_000);
 }
 
+// ---------------------------------------------------------------------------
+// query_releases_by_recipient (issue #319): recipient isolation + pagination.
+// Fixtures use distinct amounts per entry (unlike identical-amount fixtures
+// elsewhere) so pagination assertions can pin down exact identity and order,
+// not just counts.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_query_releases_by_recipient_returns_correct_records() {
+    let env = Env::default();
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 2_000_000);
+
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    let r3 = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    // Interleaved recipients, overlapping counts (r1: 2, r2: 2, r3: 1).
+    client.create_program_release_schedule(&111_000, &(now + 10), &r1);
+    client.create_program_release_schedule(&222_000, &(now + 10), &r2);
+    client.create_program_release_schedule(&333_000, &(now + 10), &r1);
+    client.create_program_release_schedule(&444_000, &(now + 10), &r3);
+    client.create_program_release_schedule(&555_000, &(now + 10), &r2);
+
+    env.ledger().set_timestamp(now + 10);
+    let released = client.trigger_program_releases();
+    assert_eq!(released, 5);
+
+    // r1: exact set, in creation order, by schedule_id and amount.
+    let r1_records = client.query_releases_by_recipient(&r1, &0, &10);
+    assert_eq!(r1_records.len(), 2);
+    assert_eq!(r1_records.get(0).unwrap().schedule_id, 1);
+    assert_eq!(r1_records.get(0).unwrap().amount, 111_000);
+    assert_eq!(r1_records.get(1).unwrap().schedule_id, 3);
+    assert_eq!(r1_records.get(1).unwrap().amount, 333_000);
+    for record in r1_records.iter() {
+        assert_eq!(record.recipient, r1);
+    }
+    // Explicitly assert no other recipient's amounts leaked into r1's set.
+    for record in r1_records.iter() {
+        assert_ne!(record.amount, 222_000);
+        assert_ne!(record.amount, 444_000);
+        assert_ne!(record.amount, 555_000);
+    }
+
+    // r2: exact set, in creation order.
+    let r2_records = client.query_releases_by_recipient(&r2, &0, &10);
+    assert_eq!(r2_records.len(), 2);
+    assert_eq!(r2_records.get(0).unwrap().schedule_id, 2);
+    assert_eq!(r2_records.get(0).unwrap().amount, 222_000);
+    assert_eq!(r2_records.get(1).unwrap().schedule_id, 5);
+    assert_eq!(r2_records.get(1).unwrap().amount, 555_000);
+    for record in r2_records.iter() {
+        assert_eq!(record.recipient, r2);
+        assert_ne!(record.amount, 111_000);
+        assert_ne!(record.amount, 333_000);
+        assert_ne!(record.amount, 444_000);
+    }
+
+    // r3: single exact record.
+    let r3_records = client.query_releases_by_recipient(&r3, &0, &10);
+    assert_eq!(r3_records.len(), 1);
+    assert_eq!(r3_records.get(0).unwrap().schedule_id, 4);
+    assert_eq!(r3_records.get(0).unwrap().amount, 444_000);
+    assert_eq!(r3_records.get(0).unwrap().recipient, r3);
+}
+
+#[test]
+fn test_query_releases_by_recipient_unknown_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 100_000);
+
+    let r1 = Address::generate(&env);
+    let unknown = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    client.create_program_release_schedule(&50_000, &(now + 10), &r1);
+    env.ledger().set_timestamp(now + 10);
+    client.trigger_program_releases();
+
+    // r1 has release history, but `unknown` was never scheduled anything.
+    let results = client.query_releases_by_recipient(&unknown, &0, &10);
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_query_releases_by_recipient_empty_history_returns_empty() {
+    let env = Env::default();
+    // No schedules ever created, so RELEASE_HISTORY was never written to storage.
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 0);
+
+    let recipient = Address::generate(&env);
+    let results = client.query_releases_by_recipient(&recipient, &0, &10);
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_query_releases_by_recipient_pagination_truncates_and_preserves_order() {
+    let env = Env::default();
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 500_000);
+
+    let r1 = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    let amounts = [10_000, 20_000, 30_000, 40_000, 50_000];
+    for amount in amounts {
+        client.create_program_release_schedule(&amount, &(now + 10), &r1);
+    }
+
+    env.ledger().set_timestamp(now + 10);
+    let released = client.trigger_program_releases();
+    assert_eq!(released, 5);
+
+    // limit=3, offset=0: expect exactly the first 3 entries, in order.
+    let page = client.query_releases_by_recipient(&r1, &0, &3);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().schedule_id, 1);
+    assert_eq!(page.get(0).unwrap().amount, 10_000);
+    assert_eq!(page.get(1).unwrap().schedule_id, 2);
+    assert_eq!(page.get(1).unwrap().amount, 20_000);
+    assert_eq!(page.get(2).unwrap().schedule_id, 3);
+    assert_eq!(page.get(2).unwrap().amount, 30_000);
+}
+
+#[test]
+fn test_query_releases_by_recipient_pagination_offset_skips_in_order() {
+    let env = Env::default();
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 500_000);
+
+    let r1 = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    let amounts = [10_000, 20_000, 30_000, 40_000, 50_000];
+    for amount in amounts {
+        client.create_program_release_schedule(&amount, &(now + 10), &r1);
+    }
+
+    env.ledger().set_timestamp(now + 10);
+    client.trigger_program_releases();
+
+    // offset=2, limit=10: expect the last 3 entries, order preserved.
+    let page = client.query_releases_by_recipient(&r1, &2, &10);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().schedule_id, 3);
+    assert_eq!(page.get(0).unwrap().amount, 30_000);
+    assert_eq!(page.get(1).unwrap().schedule_id, 4);
+    assert_eq!(page.get(1).unwrap().amount, 40_000);
+    assert_eq!(page.get(2).unwrap().schedule_id, 5);
+    assert_eq!(page.get(2).unwrap().amount, 50_000);
+}
+
+#[test]
+fn test_query_releases_by_recipient_pagination_offset_and_limit_combined() {
+    let env = Env::default();
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 500_000);
+
+    let r1 = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    let amounts = [10_000, 20_000, 30_000, 40_000, 50_000];
+    for amount in amounts {
+        client.create_program_release_schedule(&amount, &(now + 10), &r1);
+    }
+
+    env.ledger().set_timestamp(now + 10);
+    client.trigger_program_releases();
+
+    // offset=1, limit=2: expect exactly the middle slice [schedule 2, schedule 3].
+    let page = client.query_releases_by_recipient(&r1, &1, &2);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().schedule_id, 2);
+    assert_eq!(page.get(0).unwrap().amount, 20_000);
+    assert_eq!(page.get(1).unwrap().schedule_id, 3);
+    assert_eq!(page.get(1).unwrap().amount, 30_000);
+}
+
+#[test]
+fn test_query_releases_by_recipient_offset_beyond_total_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 200_000);
+
+    let r1 = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    client.create_program_release_schedule(&10_000, &(now + 10), &r1);
+    client.create_program_release_schedule(&20_000, &(now + 10), &r1);
+
+    env.ledger().set_timestamp(now + 10);
+    client.trigger_program_releases();
+
+    // Only 2 matching entries exist; offset=5 is well beyond that count.
+    let page = client.query_releases_by_recipient(&r1, &5, &10);
+    assert_eq!(page.len(), 0);
+}
+
 // ========================================================================
 // Fund Cap Tests
 // ========================================================================
 
 fn setup_program_with_admin(
     env: &Env,
-) -> (ProgramEscrowContractClient<'static>, Address, token::StellarAssetClient<'static>, token::Client<'static>) {
+) -> (
+    ProgramEscrowContractClient<'static>,
+    Address,
+    token::StellarAssetClient<'static>,
+    token::Client<'static>,
+) {
     env.mock_all_auths();
 
     let contract_id = env.register_contract(None, ProgramEscrowContract);
@@ -1831,4 +1951,64 @@ fn test_set_fund_cap_config_clear_caps() {
     let config = client.get_fund_cap_config();
     assert!(config.max_total_funds.is_none());
     assert!(config.max_single_lock.is_none());
+}
+
+// =============================================================================
+// program_exists() correctness (post-fix: removed dead batch storage)
+// =============================================================================
+
+/// program_exists() must return false before any program is initialized.
+#[test]
+fn test_program_exists_false_before_init() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    assert!(!client.program_exists());
+}
+
+/// program_exists() must return true after init_program, and the program
+/// must be fully functional: fundable, payable, and queryable.
+#[test]
+fn test_program_exists_true_after_init_and_fully_usable() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let tokenadmin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract(tokenadmin.clone());
+    let token_client = token::Client::new(&env, &token_id);
+    let tokenadmin_client = token::StellarAssetClient::new(&env, &token_id);
+
+    let program_id = String::from_str(&env, "hack-2026");
+
+    // Before init: does not exist
+    assert!(!client.program_exists());
+
+    // Initialize
+    client.init_program(&program_id, &admin, &token_id);
+
+    // After init: exists
+    assert!(client.program_exists());
+
+    // Fund the program
+    tokenadmin_client.mint(&admin, &100_000);
+    client.lock_program_funds(&admin, &100_000);
+    assert_eq!(client.get_remaining_balance(), 100_000);
+
+    // Pay out from the program
+    let recipient = Address::generate(&env);
+    let data = client.single_payout(&recipient, &30_000);
+    assert_eq!(data.remaining_balance, 70_000);
+    assert_eq!(token_client.balance(&recipient), 30_000);
+
+    // Query still works
+    let info = client.get_program_info();
+    assert_eq!(info.program_id, program_id);
+    assert_eq!(info.total_funds, 100_000);
+    assert_eq!(info.remaining_balance, 70_000);
+    assert_eq!(info.payout_history.len(), 1);
 }

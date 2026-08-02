@@ -7,6 +7,24 @@ describe('Soroban Event Decoding', () => {
   const gAddress2 = 'GBZN6265B5U2ZIK2QFWIYYXGZ5B47L7Z236L72G66Z3S7MHT7XZQ5WZG';
 
   describe('Bounty Escrow Events', () => {
+    it('decodes the bounty upgrade event with a hex wasm hash', () => {
+      const decoded = decodeContractEvent(
+        [nativeToScVal('upgrade')],
+        nativeToScVal({
+          version: 2,
+          wasm_hash: Buffer.from('ab'.repeat(32), 'hex'),
+          admin: gAddress1,
+        })
+      );
+
+      expect(decoded).toEqual({
+        type: 'upgrade',
+        version: 2,
+        wasmHash: 'ab'.repeat(32),
+        admin: gAddress1,
+      });
+    });
+
     it('decodes init event successfully', () => {
       const topics = [nativeToScVal('init')];
       const value = nativeToScVal({
@@ -312,6 +330,26 @@ describe('Soroban Event Decoding', () => {
         activity_type: 'created',
         amount: 15000n,
         timestamp: 1718915000n,
+      });
+    });
+  });
+
+  describe('Upgrade Events', () => {
+    it('decodes the program upgrade event with the shared shape', () => {
+      const decoded = decodeContractEvent(
+        [nativeToScVal('UpgExec')],
+        nativeToScVal({
+          version: 2,
+          wasm_hash: Buffer.from('0123'.repeat(16), 'hex'),
+          admin: gAddress2,
+        })
+      );
+
+      expect(decoded).toEqual({
+        type: 'UpgExec',
+        version: 2,
+        wasmHash: '0123'.repeat(16),
+        admin: gAddress2,
       });
     });
   });

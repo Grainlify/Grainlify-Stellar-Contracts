@@ -152,6 +152,14 @@ Defined in: [src/errors.ts:100](https://github.com/mxrtins04/Grainlify-Stellar-C
 
 ***
 
+### BOUNTY\_GOVERNANCE\_PROPOSAL\_NOT\_EXECUTABLE
+
+> **BOUNTY\_GOVERNANCE\_PROPOSAL\_NOT\_EXECUTABLE**: `"BOUNTY_GOVERNANCE_PROPOSAL_NOT_EXECUTABLE"`
+
+Defined in: [src/errors.ts:101](https://github.com/mxrtins04/Grainlify-Stellar-Contracts/blob/34042aba00c5f308f7440b49b36a077874089c25/sdk/src/errors.ts#L101)
+
+***
+
 ### BOUNTY\_INSUFFICIENT\_FUNDS
 
 > **BOUNTY\_INSUFFICIENT\_FUNDS**: `"BOUNTY_INSUFFICIENT_FUNDS"`

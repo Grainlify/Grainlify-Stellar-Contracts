@@ -389,6 +389,22 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "UpgradeMode"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "symbol": "SingleAdmin"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Version"
                             }
                           ]

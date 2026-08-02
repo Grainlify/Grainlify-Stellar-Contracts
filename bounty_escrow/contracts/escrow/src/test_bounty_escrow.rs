@@ -1,9 +1,10 @@
 #![cfg(test)]
-use crate::{BountyEscrowContract, BountyEscrowContractClient, Error as ContractError};
+use crate::{events, BountyEscrowContract, BountyEscrowContractClient, ClaimCreated, ClaimExecuted, Error as ContractError};
 use soroban_sdk::testutils::Events;
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger},
-    token, Address, Env, Map, Symbol, TryFromVal, Val,
+    token, vec, Address, Env, Map, Symbol, TryFromVal, Val,
 };
 
 fn create_test_env() -> (Env, BountyEscrowContractClient<'static>, Address) {
@@ -57,6 +58,53 @@ fn assert_current_call_has_versioned_contract_event(env: &Env, contract_id: &Add
         }
     }
     assert!(found);
+}
+
+/// Locate the first event published by `contract_id` whose first topic
+/// equals `topic0`, returning its topics and raw payload for field-by-field
+/// assertions. Panics if no matching event was emitted.
+fn find_contract_event(
+    env: &Env,
+    contract_id: &Address,
+    topic0: Symbol,
+) -> (soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    for i in 0..events.len() {
+        let (contract, topics, data) = events.get(i).unwrap();
+        if contract != *contract_id || topics.len() == 0 {
+            continue;
+        }
+        if let Ok(sym) = Symbol::try_from_val(env, &topics.get(0).unwrap()) {
+            if sym == topic0 {
+                return (topics, data);
+            }
+        }
+    }
+    panic!("no event with the expected topic was emitted");
+}
+
+/// Like `find_contract_event`, but returns the LAST matching event instead of
+/// the first. Needed when more than one event shares `topic0` (e.g. both
+/// `authorize_claim` and `claim` emit under the `claim` topic0, distinguished
+/// only by their second topic) and the test cares about a later one.
+fn find_last_contract_event(
+    env: &Env,
+    contract_id: &Address,
+    topic0: Symbol,
+) -> (soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    for i in (0..events.len()).rev() {
+        let (contract, topics, data) = events.get(i).unwrap();
+        if contract != *contract_id || topics.len() == 0 {
+            continue;
+        }
+        if let Ok(sym) = Symbol::try_from_val(env, &topics.get(0).unwrap()) {
+            if sym == topic0 {
+                return (topics, data);
+            }
+        }
+    }
+    panic!("no event with the expected topic was emitted");
 }
 
 #[test]
@@ -1032,6 +1080,182 @@ fn test_lock_funds_within_range_succeeds() {
     assert_eq!(escrow.status, crate::EscrowStatus::Locked);
 }
 
+/// batch_lock_funds must enforce the same AmountPolicy as lock_funds.
+/// A batch containing an item strictly below the configured minimum must
+/// be rejected entirely with AmountBelowMinimum.
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")] // AmountBelowMinimum
+fn test_batch_lock_funds_below_minimum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    // Policy: min=100, max=10_000.  Attempting to lock 50 must be rejected.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 50,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds must enforce the same AmountPolicy as lock_funds.
+/// A batch containing an item strictly above the configured maximum must
+/// be rejected entirely with AmountAboveMaximum.
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")] // AmountAboveMaximum
+fn test_batch_lock_funds_above_maximum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &100_000);
+
+    // Policy: min=100, max=10_000.  Attempting to lock 50_000 must be rejected.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 50_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds must reject the whole batch if any item violates the
+/// AmountPolicy, even when other items in the batch are valid.
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")] // AmountBelowMinimum
+fn test_batch_lock_funds_mixed_valid_and_below_minimum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &100_000);
+
+    // Policy: min=100, max=10_000.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    // First item violates the policy (below min), second is valid.
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 50,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds must reject the whole batch if any item exceeds the
+/// AmountPolicy maximum, even when other items in the batch are valid.
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")] // AmountAboveMaximum
+fn test_batch_lock_funds_mixed_valid_and_above_maximum_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &100_000);
+
+    // Policy: min=100, max=10_000.
+    client.set_amount_policy(&admin, &100_i128, &10_000_i128);
+
+    // First item is valid, second item violates the policy (above max).
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 50_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+}
+
+/// batch_lock_funds succeeds when no AmountPolicy has been set (unrestricted).
+#[test]
+fn test_batch_lock_funds_without_amount_policy_succeeds() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &10_000);
+
+    // No AmountPolicy set — any positive amount should succeed.
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+
+    let escrow = client.get_escrow_info(&1);
+    assert_eq!(escrow.amount, 5_000);
+    assert_eq!(escrow.status, crate::EscrowStatus::Locked);
+}
+
 /// Only the admin may call `set_amount_policy`.  Any other caller must be
 /// rejected with an Unauthorized error.
 #[test]
@@ -1075,9 +1299,11 @@ fn test_no_policy_set_allows_any_positive_amount() {
     assert_eq!(client.get_escrow_info(&7).amount, 999_999);
 }
 
-/// Supplying min > max is a logically invalid policy and must be rejected.
+/// Supplying min > max is a logically invalid policy and must be rejected
+/// with the typed InvalidAmountRange error (issue #467: this previously
+/// used an untyped panic!() instead).
 #[test]
-#[should_panic] // InvalidPolicy / contract-defined panic for malformed config
+#[should_panic(expected = "Error(Contract, #28)")] // InvalidAmountRange
 fn test_set_amount_policy_min_greater_than_max_rejected() {
     let (env, client, _) = create_test_env();
     let admin = Address::generate(&env);
@@ -1088,8 +1314,25 @@ fn test_set_amount_policy_min_greater_than_max_rejected() {
     let (token, _token_client, _) = create_token_contract(&env, &token_admin);
     client.init(&admin, &token);
 
-    // min=5_000 > max=100 — invalid policy, must panic.
+    // min=5_000 > max=100 — invalid policy, must be rejected.
     client.set_amount_policy(&admin, &5_000_i128, &100_i128);
+}
+
+/// The non-panicking try_ variant surfaces the same InvalidAmountRange
+/// error as a typed Result, without panicking.
+#[test]
+fn test_set_amount_policy_min_greater_than_max_returns_typed_error() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, _) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+
+    let result = client.try_set_amount_policy(&admin, &5_000_i128, &100_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidAmountRange)));
 }
 
 /// The admin must be able to update the policy after initial configuration, and
@@ -1160,4 +1403,1051 @@ fn test_one_above_maximum_boundary_rejected() {
     client.set_amount_policy(&admin, &100_i128, &10_000_i128);
     // 10_001 == max(10_000) + 1 → must be rejected.
     client.lock_funds(&depositor, &10, &10_001_i128, &deadline);
+}
+
+// ==================== DUPLICATE ID VALIDATION EDGE CASE TESTS ====================
+
+/// Attempting to lock funds with the same bounty_id twice must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // BountyExists
+fn test_lock_funds_duplicate_bounty_id_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let bounty_id = 1;
+    let amount = 1000;
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    // First lock should succeed
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    // Second lock with same bounty_id must fail with BountyExists
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+}
+
+/// Batch lock with adjacent duplicate bounty_ids must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_lock_funds_adjacent_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &10_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 1000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 1, // Duplicate adjacent
+            depositor: depositor.clone(),
+            amount: 2000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+}
+
+/// Batch lock with non-adjacent duplicate bounty_ids must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_lock_funds_non_adjacent_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &10_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 1000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 2000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 1, // Duplicate non-adjacent
+            depositor: depositor.clone(),
+            amount: 3000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+}
+
+/// Batch lock with triple duplicate bounty_ids must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_lock_funds_triple_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &15_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 1000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 1, // First duplicate
+            depositor: depositor.clone(),
+            amount: 2000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 1, // Second duplicate (triple total)
+            depositor: depositor.clone(),
+            amount: 3000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+}
+
+/// Batch lock with multiple different duplicate bounty_ids must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_lock_funds_multiple_different_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &20_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 1000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 2000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 1, // Duplicate of bounty_id 1
+            depositor: depositor.clone(),
+            amount: 3000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2, // Duplicate of bounty_id 2
+            depositor: depositor.clone(),
+            amount: 4000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+}
+
+/// Batch lock with zero bounty_id must handle duplicate validation correctly.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_lock_funds_zero_bounty_id_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &10_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 0,
+            depositor: depositor.clone(),
+            amount: 1000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 0, // Duplicate zero
+            depositor: depositor.clone(),
+            amount: 2000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+}
+
+/// Batch lock with maximum u64 bounty_id must handle duplicate validation correctly.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_lock_funds_max_bounty_id_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &10_000);
+
+    let max_id = u64::MAX;
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: max_id,
+            depositor: depositor.clone(),
+            amount: 1000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: max_id, // Duplicate MAX
+            depositor: depositor.clone(),
+            amount: 2000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+}
+
+/// Batch release with adjacent duplicate bounty_ids must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_release_funds_adjacent_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &10_000);
+
+    // Lock two bounties
+    client.lock_funds(&depositor, &1, &5000, &deadline);
+    client.lock_funds(&depositor, &2, &5000, &deadline);
+
+    let items = vec![
+        &env,
+        crate::ReleaseFundsItem {
+            bounty_id: 1,
+            contributor: contributor.clone(),
+        },
+        crate::ReleaseFundsItem {
+            bounty_id: 1, // Duplicate adjacent
+            contributor: contributor.clone(),
+        },
+    ];
+
+    client.batch_release_funds(&items);
+}
+
+/// Batch release with non-adjacent duplicate bounty_ids must be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // DuplicateBountyId
+fn test_batch_release_funds_non_adjacent_duplicates_rejected() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &15_000);
+
+    // Lock three bounties
+    client.lock_funds(&depositor, &1, &5000, &deadline);
+    client.lock_funds(&depositor, &2, &5000, &deadline);
+    client.lock_funds(&depositor, &3, &5000, &deadline);
+
+    let items = vec![
+        &env,
+        crate::ReleaseFundsItem {
+            bounty_id: 1,
+            contributor: contributor.clone(),
+        },
+        crate::ReleaseFundsItem {
+            bounty_id: 2,
+            contributor: contributor.clone(),
+        },
+        crate::ReleaseFundsItem {
+            bounty_id: 1, // Duplicate non-adjacent
+            contributor: contributor.clone(),
+        },
+    ];
+
+    client.batch_release_funds(&items);
+}
+
+/// Batch release with single item should succeed (no duplicate possible).
+#[test]
+fn test_batch_release_funds_single_item_succeeds() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &5000);
+
+    client.lock_funds(&depositor, &1, &5000, &deadline);
+
+    let items = vec![
+        &env,
+        crate::ReleaseFundsItem {
+            bounty_id: 1,
+            contributor: contributor.clone(),
+        },
+    ];
+
+    let result = client.batch_release_funds(&items);
+    assert_eq!(result, 1);
+}
+
+/// Batch lock with single item should succeed (no duplicate possible).
+#[test]
+fn test_batch_lock_funds_single_item_succeeds() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &5000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+
+    let escrow = client.get_escrow_info(&1);
+    assert_eq!(escrow.amount, 5000);
+    assert_eq!(escrow.status, crate::EscrowStatus::Locked);
+}
+
+/// Batch lock with all unique bounty_ids must succeed.
+#[test]
+fn test_batch_lock_funds_all_unique_succeeds() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &15_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 2,
+            depositor: depositor.clone(),
+            amount: 5000,
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 3,
+            depositor: depositor.clone(),
+            amount: 5000,
+            deadline,
+        },
+    ];
+
+    client.batch_lock_funds(&items);
+
+    assert_eq!(client.get_escrow_info(&1).amount, 5000);
+    assert_eq!(client.get_escrow_info(&2).amount, 5000);
+    assert_eq!(client.get_escrow_info(&3).amount, 5000);
+}
+
+/// Batch release with all unique bounty_ids must succeed.
+#[test]
+fn test_batch_release_funds_all_unique_succeeds() {
+    let (env, client, _) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &15_000);
+
+    client.lock_funds(&depositor, &1, &5000, &deadline);
+    client.lock_funds(&depositor, &2, &5000, &deadline);
+    client.lock_funds(&depositor, &3, &5000, &deadline);
+
+    let items = vec![
+        &env,
+        crate::ReleaseFundsItem {
+            bounty_id: 1,
+            contributor: contributor.clone(),
+        },
+        crate::ReleaseFundsItem {
+            bounty_id: 2,
+            contributor: contributor.clone(),
+        },
+        crate::ReleaseFundsItem {
+            bounty_id: 3,
+            contributor: contributor.clone(),
+        },
+    ];
+
+    let result = client.batch_release_funds(&items);
+    assert_eq!(result, 3);
+}
+
+// =============================================================================
+// Payload assertions for emit_bounty_initialized / emit_funds_locked /
+// emit_bounty_expired (Issue #393)
+// =============================================================================
+// Existing tests only assert *that* a versioned event was published
+// (assert_event_data_has_v2_tag); these assert the actual topic value and
+// every payload field, field-by-field.
+
+#[test]
+fn test_emit_bounty_initialized_topic_and_payload() {
+    use crate::events::BountyEscrowInitialized;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let (token, _, _) = create_token_contract(&env, &admin);
+
+    // `init` requires the incoming admin's own auth as of #491.
+    env.mock_all_auths();
+    client.init(&admin, &token);
+
+    let expected_topics: soroban_sdk::Vec<Val> = (symbol_short!("init"),).into_val(&env);
+    let mut found = false;
+    for (evt_contract_id, topics, data) in env.events().all().iter() {
+        if evt_contract_id != contract_id || topics != expected_topics {
+            continue;
+        }
+        let event = BountyEscrowInitialized::try_from_val(&env, &data)
+            .expect("init event payload must decode as BountyEscrowInitialized");
+        assert_eq!(event.version, 2);
+        assert_eq!(event.admin, admin);
+        assert_eq!(event.token, token);
+        found = true;
+    }
+    assert!(found, "no init event with the expected topic was published");
+}
+
+#[test]
+fn test_emit_funds_locked_topic_and_payload() {
+    use crate::events::FundsLocked;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &admin);
+    token_admin_client.mint(&depositor, &1_000);
+    client.init(&admin, &token);
+
+    let bounty_id = 7u64;
+    let amount = 250i128;
+    let deadline = env.ledger().timestamp() + 3600;
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    let expected_topics: soroban_sdk::Vec<Val> =
+        (symbol_short!("f_lock"), bounty_id).into_val(&env);
+    let mut found = false;
+    for (evt_contract_id, topics, data) in env.events().all().iter() {
+        if evt_contract_id != contract_id || topics != expected_topics {
+            continue;
+        }
+        let event = FundsLocked::try_from_val(&env, &data)
+            .expect("lock event payload must decode as FundsLocked");
+        assert_eq!(event.version, 2);
+        assert_eq!(event.bounty_id, bounty_id);
+        assert_eq!(event.amount, amount);
+        assert_eq!(event.depositor, depositor);
+        assert_eq!(event.deadline, deadline);
+        found = true;
+    }
+    assert!(
+        found,
+        "no f_lock event with the expected topic was published"
+    );
+}
+
+#[test]
+fn test_emit_bounty_expired_topic_and_payload() {
+    use crate::events::BountyExpired;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token, _, token_admin_client) = create_token_contract(&env, &admin);
+    token_admin_client.mint(&depositor, &1_000);
+    client.init(&admin, &token);
+
+    let bounty_id = 9u64;
+    let amount = 400i128;
+    let deadline = env.ledger().timestamp() + 100;
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+
+    // Advance past the deadline and sweep — this is the call site that emits
+    // BountyExpired (see lib.rs's sweep_expired_refunds).
+    env.ledger().set_timestamp(deadline + 1);
+    let ids = vec![&env, bounty_id];
+    let swept = client.sweep_expired_refunds(&ids);
+    assert_eq!(swept, 1);
+
+    let expected_topics: soroban_sdk::Vec<Val> = (symbol_short!("b_exp"), bounty_id).into_val(&env);
+    let mut found = false;
+    for (evt_contract_id, topics, data) in env.events().all().iter() {
+        if evt_contract_id != contract_id || topics != expected_topics {
+            continue;
+        }
+        let event = BountyExpired::try_from_val(&env, &data)
+            .expect("expired event payload must decode as BountyExpired");
+        assert_eq!(event.version, 2);
+        assert_eq!(event.bounty_id, bounty_id);
+        assert_eq!(event.depositor, depositor);
+        assert_eq!(event.amount, amount);
+        assert_eq!(event.deadline, deadline);
+        assert_eq!(event.expired_at, deadline + 1);
+        found = true;
+    }
+    assert!(
+        found,
+        "no b_exp event with the expected topic was published"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Payload-level coverage for emit_funds_released, emit_funds_refunded and
+// emit_batch_funds_locked (bounty_escrow/src/events.rs).
+// ---------------------------------------------------------------------
+
+/// release_funds() must emit FundsReleased with a `("f_rel", bounty_id)`
+/// topic pair and a payload whose amount/recipient match the full locked
+/// amount and the release_funds() call arguments.
+#[test]
+fn test_release_funds_emits_funds_released_event_full_amount() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let bounty_id = 42u64;
+    let amount = 7_500i128;
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    client.release_funds(&bounty_id, &contributor);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_rel"));
+    assert_eq!(topics.len(), 2);
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsReleased =
+        events::FundsReleased::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.version, events::EVENT_VERSION_V2);
+    assert_eq!(payload.bounty_id, bounty_id);
+    assert_eq!(payload.amount, amount);
+    assert_eq!(payload.recipient, contributor);
+    assert_eq!(payload.timestamp, env.ledger().timestamp());
+}
+
+/// Edge case: partial_release() also emits FundsReleased through the same
+/// emitter. A partial payout must be recorded as the payout amount, not the
+/// bounty's full locked amount.
+#[test]
+fn test_partial_release_emits_funds_released_event_with_partial_amount() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let bounty_id = 43u64;
+    let amount = 10_000i128;
+    let payout_amount = 4_000i128;
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    client.partial_release(&bounty_id, &contributor, &payout_amount);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_rel"));
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsReleased =
+        events::FundsReleased::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.amount, payout_amount);
+    assert_ne!(payload.amount, amount);
+    assert_eq!(payload.recipient, contributor);
+
+    let escrow = client.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.remaining_amount, amount - payout_amount);
+}
+
+/// refund() must emit FundsRefunded with a `("f_ref", bounty_id)` topic
+/// pair and a payload whose amount/refund_to match a standard post-deadline
+/// full refund back to the original depositor.
+#[test]
+fn test_refund_emits_funds_refunded_event_full_amount() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let bounty_id = 44u64;
+    let amount = 3_000i128;
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    env.ledger().set_timestamp(deadline + 1);
+    client.refund(&bounty_id);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_ref"));
+    assert_eq!(topics.len(), 2);
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsRefunded =
+        events::FundsRefunded::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.version, events::EVENT_VERSION_V2);
+    assert_eq!(payload.bounty_id, bounty_id);
+    assert_eq!(payload.amount, amount);
+    assert_eq!(payload.refund_to, depositor);
+}
+
+/// Edge case: an admin-approved partial refund to a custom recipient must
+/// be recorded with the approved partial amount, not the full locked
+/// amount, and refund_to must be the approved recipient rather than the
+/// original depositor.
+#[test]
+fn test_refund_emits_funds_refunded_event_partial_amount_custom_recipient() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let refund_recipient = Address::generate(&env);
+    let bounty_id = 45u64;
+    let amount = 10_000i128;
+    let partial_amount = 3_500i128;
+    let deadline = env.ledger().timestamp() + 1000;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &amount);
+
+    client.lock_funds(&depositor, &bounty_id, &amount, &deadline);
+    client.approve_refund(
+        &bounty_id,
+        &partial_amount,
+        &refund_recipient,
+        &crate::RefundMode::Partial,
+    );
+    client.refund(&bounty_id);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("f_ref"));
+    let topic_bounty_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_bounty_id, bounty_id);
+
+    let payload: events::FundsRefunded =
+        events::FundsRefunded::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.amount, partial_amount);
+    assert_ne!(payload.amount, amount);
+    assert_eq!(payload.refund_to, refund_recipient);
+    assert_ne!(payload.refund_to, depositor);
+
+    let escrow = client.get_escrow_info(&bounty_id);
+    assert_eq!(escrow.status, crate::EscrowStatus::PartiallyRefunded);
+    assert_eq!(escrow.remaining_amount, amount - partial_amount);
+}
+
+/// batch_lock_funds() must emit a single BatchFundsLocked summarising the
+/// whole batch. For a single-item batch, count must be 1 and total_amount
+/// must equal that one item's amount.
+#[test]
+fn test_batch_lock_funds_emits_batch_event_single_item() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &5_000);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 1,
+            depositor: depositor.clone(),
+            amount: 5_000,
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("b_lock"));
+    // BatchFundsLocked carries no per-bounty topic, only the event symbol.
+    assert_eq!(topics.len(), 1);
+
+    let payload: events::BatchFundsLocked =
+        events::BatchFundsLocked::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.version, events::EVENT_VERSION_V2);
+    assert_eq!(payload.count, 1);
+    assert_eq!(payload.total_amount, 5_000);
+}
+
+/// Edge case: for a multi-item batch with non-uniform amounts, the emitted
+/// count must equal the batch size and total_amount must equal the exact
+/// sum of the individual item amounts (guards against accumulation drift,
+/// ordering bugs, or truncation in the aggregation logic).
+#[test]
+fn test_batch_lock_funds_emits_batch_event_aggregated_multi_item() {
+    let (env, client, contract_id) = create_test_env();
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 100;
+
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+    client.init(&admin, &token);
+
+    let amounts: [i128; 4] = [1_000, 2_500, 3_500, 5_000];
+    let expected_total: i128 = amounts.iter().sum();
+    let expected_count = amounts.len() as u32;
+    token_admin_client.mint(&depositor, &expected_total);
+
+    let items = vec![
+        &env,
+        crate::LockFundsItem {
+            bounty_id: 10,
+            depositor: depositor.clone(),
+            amount: amounts[0],
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 11,
+            depositor: depositor.clone(),
+            amount: amounts[1],
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 12,
+            depositor: depositor.clone(),
+            amount: amounts[2],
+            deadline,
+        },
+        crate::LockFundsItem {
+            bounty_id: 13,
+            depositor: depositor.clone(),
+            amount: amounts[3],
+            deadline,
+        },
+    ];
+    client.batch_lock_funds(&items);
+
+    let (_topics, data) = find_contract_event(&env, &contract_id, symbol_short!("b_lock"));
+    let payload: events::BatchFundsLocked =
+        events::BatchFundsLocked::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.count, expected_count);
+    assert_eq!(payload.total_amount, expected_total);
+}
+// ---------------------------------------------------------------------------
+// § Event payload assertions: ClaimCreated, ClaimExecuted, PauseStateChanged
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_claim_created_event_payload_and_topic() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    let bounty_id = 1;
+    let amount = 500;
+    let lock_deadline = env.ledger().timestamp() + 10_000;
+    client.lock_funds(&depositor, &bounty_id, &amount, &lock_deadline);
+
+    let claim_window = 500u64;
+    client.set_claim_window(&claim_window);
+
+    let expected_expires_at = env.ledger().timestamp() + claim_window;
+    client.authorize_claim(&bounty_id, &recipient);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("claim"));
+
+    // Topic tuple check: (claim, created)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("created"));
+
+    // Payload field checks
+    let event: ClaimCreated = ClaimCreated::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as ClaimCreated"));
+    assert_eq!(event.bounty_id, bounty_id);
+    assert_eq!(event.recipient, recipient);
+    assert_eq!(event.amount, amount);
+    assert_eq!(event.expires_at, expected_expires_at);
+}
+
+#[test]
+fn test_claim_executed_event_payload_and_topic() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token, _token_client, token_admin_client) = create_token_contract(&env, &token_admin);
+
+    client.init(&admin, &token);
+    token_admin_client.mint(&depositor, &1_000);
+
+    let bounty_id = 1;
+    let amount = 500;
+    let lock_deadline = env.ledger().timestamp() + 10_000;
+    client.lock_funds(&depositor, &bounty_id, &amount, &lock_deadline);
+
+    client.set_claim_window(&500);
+    client.authorize_claim(&bounty_id, &recipient);
+
+    let claimed_at = env.ledger().timestamp();
+    client.claim(&bounty_id);
+
+    // `authorize_claim` above already emitted a (claim, created) event, so we
+    // need the LAST "claim"-topic event here, not the first.
+    let (topics, data) = find_last_contract_event(&env, &contract_id, symbol_short!("claim"));
+
+    // Topic tuple check: (claim, done)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("done"));
+
+    // Payload field checks
+    let event: ClaimExecuted = ClaimExecuted::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as ClaimExecuted"));
+    assert_eq!(event.bounty_id, bounty_id);
+    assert_eq!(event.recipient, recipient);
+    assert_eq!(event.amount, amount);
+    assert_eq!(event.claimed_at, claimed_at);
+}
+
+#[test]
+fn test_pause_state_changed_event_for_lock_operation() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    client.set_paused(&Some(true), &None, &None);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("pause"));
+
+    // Topic tuple check: (pause, lock)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("lock"));
+
+    // Payload field checks
+    let event: crate::PauseStateChanged = crate::PauseStateChanged::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as PauseStateChanged"));
+    assert_eq!(event.operation, symbol_short!("lock"));
+    assert!(event.paused);
+    assert_eq!(event.admin, admin);
+}
+
+#[test]
+fn test_pause_state_changed_event_for_release_operation() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    client.set_paused(&None, &Some(true), &None);
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("pause"));
+
+    // Topic tuple check: (pause, release)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("release"));
+
+    // Payload field checks
+    let event: crate::PauseStateChanged = crate::PauseStateChanged::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as PauseStateChanged"));
+    assert_eq!(event.operation, symbol_short!("release"));
+    assert!(event.paused);
+    assert_eq!(event.admin, admin);
+}#[test]
+fn test_pause_state_changed_event_for_refund_operation() {
+    let (env, client, contract_id) = create_test_env();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.init(&admin, &token);
+
+    client.set_paused(&None, &None, &Some(true));
+
+    let (topics, data) = find_contract_event(&env, &contract_id, symbol_short!("pause"));
+
+    // Topic tuple check: (pause, refund)
+    assert_eq!(topics.len(), 2);
+    let topic1: Symbol = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic1, symbol_short!("refund"));
+
+    // Payload field checks
+    let event: crate::PauseStateChanged = crate::PauseStateChanged::try_from_val(&env, &data)
+        .unwrap_or_else(|_| panic!("payload should decode as PauseStateChanged"));
+    assert_eq!(event.operation, symbol_short!("refund"));
+    assert!(event.paused);
+    assert_eq!(event.admin, admin);
+}
+
+// Regression guard for issue #458: get_fee_config previously panicked on a
+// freshly deployed, uninitialized contract (unwrap() on the not-yet-set
+// DataKey::Admin key inside the fee_recipient fallback), instead of
+// returning a graceful disabled default.
+#[test]
+fn test_get_fee_config_on_uninitialized_contract_does_not_panic() {
+    let (_env, client, _contract_id) = create_test_env();
+
+    let config = client.get_fee_config();
+
+    assert_eq!(config.lock_fee_rate, 0);
+    assert_eq!(config.release_fee_rate, 0);
+    assert!(!config.fee_enabled);
 }

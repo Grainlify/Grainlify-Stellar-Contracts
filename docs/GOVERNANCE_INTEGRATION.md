@@ -32,6 +32,28 @@ The governance integration follows a modular design that allows escrow contracts
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Upgrade Authority Model (grainlify-core)
+
+`grainlify-core` supports three independent upgrade-authorization models —
+single-admin (`init_admin` + `schedule_upgrade`/`upgrade`), multisig (`init`
++ `propose_upgrade`/`execute_upgrade`), and governance (`init_governance` +
+`create_proposal`/`cast_vote`/`finalize_proposal`/`execute_proposal`) — but a
+given deployed contract instance may only ever activate **one** of them.
+
+This is enforced at initialization, not left as a deployment convention:
+each of `init`, `init_admin`, and `init_governance` claims a shared
+`DataKey::UpgradeMode` flag the first time it succeeds, and every subsequent
+call to any of the three — including a repeat call to the same one — is
+permanently rejected for that contract instance. This closes a specific
+bypass: without this guard, a deployer could configure multisig or
+governance for upgrade approval and *also* call `init_admin`, leaving a
+single admin key able to unilaterally replace the contract's WASM regardless
+of the quorum/threshold requirement the other path was meant to enforce.
+
+Escrow contracts (`bounty_escrow`, `program-escrow`) are unaffected by which
+mode a given `grainlify-core` instance uses — they only ever consult the
+governance side via `is_upg_ok`, as described below.
+
 ## Key Components
 
 ### 1. Governance Hooks
@@ -86,6 +108,29 @@ reports an executed proposal for the exact `wasm_hash`. The escrow contracts
 use a Soroban `contractclient` interface to call the governance contract's
 short `is_upg_ok(wasm_hash)` query after the minimum version check passes.
 
+#### Governance Proposal Execution Guard
+
+```rust
+fn execute_governance_proposal(env: &Env, proposal_id: u32) -> bool
+```
+
+Consumes an approved grainlify-core governance proposal before a
+governance-triggered escrow action proceeds. The guard delegates to
+`grainlify-core`'s `execute_proposal(proposal_id)`, so quorum, approval
+threshold, execution delay, and replay protection are re-validated by the
+governance module instead of trusting a caller-supplied flag.
+
+### Veto / Cancellation Check
+
+`grainlify-core::is_vetoed(proposal_id)` returns `true` when the proposal is
+in `ProposalStatus::Cancelled`. Both escrow integrations call this query from
+`check_proposal_vetoed` before `execute_governance_proposal`; a cancelled
+proposal is rejected and cannot authorize a governance-triggered escrow action.
+Cancellation is performed by the proposal proposer during the permitted
+proposal lifecycle. The core functions are implemented and tested, but their
+deployment-facing entrypoints still need to be exposed through the
+`GrainlifyContract` interface; see [issue #535](https://github.com/Grainlify/Grainlify-Stellar-Contracts/issues/535).
+
 ## Integration Points
 
 ### Admin Operations Protected by Governance
@@ -105,6 +150,11 @@ The following admin operations now check governance requirements:
 - `batch_release_funds()` - Batch admin-authorized contributor payouts
 - `refund()` - Post-deadline or approved refund transfer
 - `sweep_expired_refunds()` - Batch post-deadline refund sweep
+
+Bounty escrow also exposes `execute_governance_proposal(proposal_id)` as the
+proposal-state gate for governance-triggered actions. It returns
+`GovernanceProposalNotExecutable` when the proposal is pending, rejected,
+missing, delayed, or already executed.
 
 ### Governance Check Flow
 
@@ -246,6 +296,14 @@ pub fn check_upgrade_approval(env: &Env, wasm_hash: &BytesN<32>) -> bool {
 The `is_upg_ok` query returns `true` only when the matching proposal is
 `Executed` and the proposal's `execution_delay` has elapsed.
 
+### 4. Governance Action Replay Protection
+
+Governance-triggered escrow actions should first call
+`execute_governance_proposal(proposal_id)`. This replays the core governance
+state machine at the trust boundary: only an `Approved` proposal can be
+consumed, and successful consumption marks it `Executed`, preventing the same
+proposal from authorizing a second action.
+
 ## Testing
 
 ### Test Coverage
@@ -267,6 +325,8 @@ The integration includes comprehensive tests:
    - Admin operations with governance
    - Upgrade scenarios
    - Matching-hash approval, wrong-hash rejection, and missing-governance rejection
+   - Proposal execution guard rejection for pending, rejected, and already-executed proposals
+   - Proposal execution guard happy path and replay rejection
    - Cross-contract `bounty_escrow` + real `grainlify-core` version gates, including below-minimum rejection, at-minimum success, and numeric-encoded version checks
    - Value-transfer gates for release, partial release, refund, expired-refund sweep, and batch release paths
 
@@ -337,8 +397,7 @@ cargo test
 Potential improvements for future versions:
 
 1. **Multi-Contract Governance**: Support governance across multiple contracts
-2. **Veto Mechanism**: Allow governance to veto admin actions
-3. **Delegation**: Support vote delegation in governance
+2. **Delegation**: Support vote delegation in governance
 
 ## References
 
@@ -348,6 +407,10 @@ Potential improvements for future versions:
 - [Soroban Documentation](https://soroban.stellar.org/docs)
 
 ## Changelog
+
+### Version 1.2.0
+- Documented the implemented veto check backed by cancelled proposal state.
+- Both escrow contracts reject vetoed proposals before governance-triggered execution.
 
 ### Version 1.1.0
 - Hash-specific upgrade approval through executed governance proposals

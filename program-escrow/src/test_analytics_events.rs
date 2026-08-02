@@ -54,6 +54,58 @@ fn find_event_by_topic(env: &Env, topic: Symbol) -> Option<(Vec<Val>, Val)> {
     None
 }
 
+fn event_index_by_topic_since(env: &Env, start: u32, topic: Symbol) -> Option<u32> {
+    let events = env.events().all();
+    for i in start..events.len() {
+        let event = events.get(i).unwrap();
+        let topics = event.1;
+        if topics.len() > 0 {
+            let first_topic = topics.get(0).unwrap();
+            if let Ok(sym) = Symbol::try_from_val(env, &first_topic) {
+                if sym == topic {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn event_data_by_topic_since(env: &Env, start: u32, topic: Symbol) -> Option<Val> {
+    let events = env.events().all();
+    for i in start..events.len() {
+        let event = events.get(i).unwrap();
+        let topics = event.1;
+        if topics.len() > 0 {
+            let first_topic = topics.get(0).unwrap();
+            if let Ok(sym) = Symbol::try_from_val(env, &first_topic) {
+                if sym == topic {
+                    return Some(event.2);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn count_events_by_topic_since(env: &Env, start: u32, topic: Symbol) -> u32 {
+    let events = env.events().all();
+    let mut count = 0u32;
+    for i in start..events.len() {
+        let event = events.get(i).unwrap();
+        let topics = event.1;
+        if topics.len() > 0 {
+            let first_topic = topics.get(0).unwrap();
+            if let Ok(sym) = Symbol::try_from_val(env, &first_topic) {
+                if sym == topic {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 fn assert_event_has_version(env: &Env, data: &Val) {
     let data_map: Map<Symbol, Val> =
         Map::try_from_val(env, data).unwrap_or_else(|_| panic!("event payload should be a map"));
@@ -226,6 +278,101 @@ fn test_large_payout_event_in_batch() {
     assert_eq!(
         large_payout_count, 1,
         "Exactly one LargePayout event should be emitted"
+    );
+}
+
+#[test]
+fn test_large_single_payout_event_ordering_is_stable() {
+    let env = Env::default();
+    let (client, _admin, _token, _tokenadmin) = setup_program(&env, 100_000);
+
+    let recipient = Address::generate(&env);
+    let event_start = env.events().all().len();
+
+    let updated = client.single_payout(&recipient, &15_000);
+    assert_eq!(updated.remaining_balance, 85_000);
+    assert_eq!(client.get_remaining_balance(), 85_000);
+
+    let large_idx = event_index_by_topic_since(&env, event_start, symbol_short!("LrgPay"))
+        .expect("large payout alert should be emitted");
+    let payout_idx = event_index_by_topic_since(&env, event_start, symbol_short!("Payout"))
+        .expect("payout event should be emitted");
+    let aggregate_idx = event_index_by_topic_since(&env, event_start, symbol_short!("AggStats"))
+        .expect("aggregate stats event should be emitted");
+
+    assert!(
+        large_idx < payout_idx,
+        "LargePayout alert should precede the finalized Payout event"
+    );
+    assert!(
+        payout_idx < aggregate_idx,
+        "AggregateStats should be emitted after the finalized Payout event"
+    );
+
+    let payout_data =
+        event_data_by_topic_since(&env, event_start, symbol_short!("Payout")).unwrap();
+    let payout_map: Map<Symbol, Val> = Map::try_from_val(&env, &payout_data).unwrap();
+    let payout_remaining_val = payout_map
+        .get(Symbol::new(&env, "remaining_balance"))
+        .unwrap();
+    let payout_remaining =
+        <i128 as TryFromVal<Env, Val>>::try_from_val(&env, &payout_remaining_val).unwrap();
+    assert_eq!(
+        payout_remaining, 85_000,
+        "Payout event should describe the post-state-update balance"
+    );
+
+    let aggregate_data =
+        event_data_by_topic_since(&env, event_start, symbol_short!("AggStats")).unwrap();
+    let aggregate_map: Map<Symbol, Val> = Map::try_from_val(&env, &aggregate_data).unwrap();
+    let aggregate_remaining_val = aggregate_map
+        .get(Symbol::new(&env, "remaining_balance"))
+        .unwrap();
+    let aggregate_remaining =
+        <i128 as TryFromVal<Env, Val>>::try_from_val(&env, &aggregate_remaining_val).unwrap();
+    let aggregate_paid_val = aggregate_map.get(Symbol::new(&env, "total_paid_out")).unwrap();
+    let aggregate_paid =
+        <i128 as TryFromVal<Env, Val>>::try_from_val(&env, &aggregate_paid_val).unwrap();
+
+    assert_eq!(aggregate_remaining, 85_000);
+    assert_eq!(aggregate_paid, 15_000);
+}
+
+#[test]
+fn test_reverted_large_single_payout_emits_no_partial_events() {
+    let env = Env::default();
+    let (client, _admin, token_client, _tokenadmin) = setup_program(&env, 100_000);
+
+    let recipient = Address::generate(&env);
+    let drain = Address::generate(&env);
+
+    token_client.transfer(&client.address, &drain, &100_000);
+    assert_eq!(token_client.balance(&client.address), 0);
+    assert_eq!(client.get_remaining_balance(), 100_000);
+
+    let event_start = env.events().all().len();
+    let result = client.try_single_payout(&recipient, &15_000);
+    assert!(
+        result.is_err(),
+        "payout should revert before any analytics events are emitted"
+    );
+
+    assert_eq!(client.get_remaining_balance(), 100_000);
+    assert_eq!(token_client.balance(&recipient), 0);
+    assert_eq!(
+        count_events_by_topic_since(&env, event_start, symbol_short!("LrgPay")),
+        0,
+        "reverted operation must not persist a LargePayout event"
+    );
+    assert_eq!(
+        count_events_by_topic_since(&env, event_start, symbol_short!("Payout")),
+        0,
+        "reverted operation must not persist a finalized Payout event"
+    );
+    assert_eq!(
+        count_events_by_topic_since(&env, event_start, symbol_short!("AggStats")),
+        0,
+        "reverted operation must not persist aggregate analytics"
     );
 }
 

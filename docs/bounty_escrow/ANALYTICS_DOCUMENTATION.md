@@ -337,7 +337,11 @@ const large = contract.get_high_value_bounties(10_000_000, 50); // $10M+
 
 // Calculate risk metrics
 const tvl = contract.get_volume_by_status(EscrowStatus.Locked);
-const largeRatio = large.length / contract.get_escrow_count();
+// large only includes currently-Locked/PartiallyRefunded bounties, so the
+// denominator must be a live active count too — get_escrow_count() is a
+// lifetime total that never decreases and would silently understate this
+// ratio more and more as the platform accumulates settled history.
+const largeRatio = large.length / contract.count_bounties_by_status(EscrowStatus.Locked);
 ```
 
 ### Depositor Analytics
